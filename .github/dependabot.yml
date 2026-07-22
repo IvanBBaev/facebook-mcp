@@ -1,0 +1,17 @@
+# Automated dependency updates (npm + GitHub Actions), weekly. Minor/patch are
+# grouped to keep PR noise low; majors stay separate so breaking bumps get
+# individual review. The github-actions ecosystem bumps the SHA-pinned actions.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ['minor', 'patch']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

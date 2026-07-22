@@ -1,0 +1,68 @@
+{
+  "name": "@ivanbbaev/facebook-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "TypeScript MCP server for the Meta Graph API (Facebook Pages).",
+  "license": "MIT",
+  "author": "Ivan Baev <ivanbbaev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanBBaev/facebook-mcp.git"
+  },
+  "homepage": "https://github.com/IvanBBaev/facebook-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/IvanBBaev/facebook-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "facebook-mcp": "./bin/facebook-mcp.mjs"
+  },
+  "main": "./build/index.js",
+  "files": [
+    "build",
+    "!build/**/*.map",
+    "!build/**/*.test.js",
+    "bin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --test \"build/**/*.test.js\"",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.1",
+    "c8": "^12.0.0",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import-x": "^4.17.1",
+    "globals": "^15.15.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "facebook",
+    "meta",
+    "graph-api",
+    "pages",
+    "llm",
+    "ai"
+  ],
+  "trademark": "This is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta and related marks are trademarks of Meta Platforms, Inc., used here only nominatively to indicate compatibility."
+}

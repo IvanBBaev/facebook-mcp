@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+*.tsbuildinfo
+
+# Coverage output (c8)
+coverage/
+
+# Credentials & environment
+.env
+.env.*
+!.env.example
+
+# Packed tarballs
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db

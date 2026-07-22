@@ -1,0 +1,10 @@
+node_modules/
+build/
+coverage/
+package-lock.json
+*.tgz
+
+# Not owned by this project's formatter: documentation corpus and local-only
+# AI-harness files are formatted (or intentionally not) by their own owners.
+docs/
+WORKLOG.md
