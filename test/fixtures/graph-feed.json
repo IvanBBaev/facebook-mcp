@@ -1,0 +1,21 @@
+{
+  "data": [
+    {
+      "id": "100000000000001_200000000000002",
+      "message": "Hello from the example fixture.",
+      "created_time": "2026-01-15T10:00:00+0000"
+    },
+    {
+      "id": "100000000000001_200000000000003",
+      "story": "Example Test Page shared a link.",
+      "created_time": "2026-01-14T09:30:00+0000"
+    }
+  ],
+  "paging": {
+    "cursors": {
+      "before": "QVFIUmExX2JlZm9yZQ",
+      "after": "QVFIUmExX2FmdGVy"
+    },
+    "next": "https://graph.facebook.com/v21.0/100000000000001/feed?after=QVFIUmExX2FmdGVy&limit=25"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "all": true,
+  "src": ["src"],
+  "extension": [".ts"],
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/testing/**",
+    "src/core/fakes/**",
+    "src/index.ts",
+    "**/*.d.ts",
+    "build/**",
+    "coverage/**",
+    "node_modules/**"
+  ],
+  "reporter": ["text", "text-summary", "lcov"],
+  "reports-dir": "coverage",
+  "check-coverage": true,
+  "lines": 70,
+  "branches": 60,
+  "functions": 75,
+  "statements": 70
+}

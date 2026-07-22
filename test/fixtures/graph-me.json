@@ -1,0 +1,6 @@
+{
+  "id": "100000000000001",
+  "name": "Example Test Page",
+  "category": "Software",
+  "tasks": ["ANALYZE", "MODERATE", "CREATE_CONTENT", "MANAGE"]
+}
