@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  facebook-mcp social banner — 1200x630, self-contained (no external refs).
+  Nice-to-have: export a rasterised PNG (assets/og-banner.png) for scrapers
+  that reject SVG Open Graph images, e.g.
+    npx sharp-cli -i og-banner.svg -o og-banner.png
+  or any headless-browser screenshot of this file at 1200x630.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="facebook-mcp — Facebook Pages MCP Server for the Meta Graph API">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1017" />
+      <stop offset="0.55" stop-color="#0a0d12" />
+      <stop offset="1" stop-color="#070a0e" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.12" r="0.75">
+      <stop offset="0" stop-color="#1877F2" stop-opacity="0.42" />
+      <stop offset="0.5" stop-color="#1877F2" stop-opacity="0.12" />
+      <stop offset="1" stop-color="#1877F2" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.06" cy="0.9" r="0.6">
+      <stop offset="0" stop-color="#1877F2" stop-opacity="0.16" />
+      <stop offset="1" stop-color="#1877F2" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="logoFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1877F2" />
+      <stop offset="1" stop-color="#0f5fc9" />
+    </linearGradient>
+    <pattern id="grid" width="46" height="46" patternUnits="userSpaceOnUse">
+      <path d="M46 0H0V46" fill="none" stroke="#ffffff" stroke-opacity="0.03" stroke-width="1" />
+    </pattern>
+  </defs>
+
+  <!-- Base -->
+  <rect width="1200" height="630" fill="url(#bg)" />
+  <rect width="1200" height="630" fill="url(#grid)" />
+  <rect width="1200" height="630" fill="url(#glow)" />
+  <rect width="1200" height="630" fill="url(#glow2)" />
+
+  <!-- Accent hairline frame -->
+  <rect x="1" y="1" width="1198" height="628" fill="none" stroke="#1877F2" stroke-opacity="0.16" stroke-width="2" />
+
+  <!-- Logo + eyebrow -->
+  <g transform="translate(96, 150)">
+    <rect x="0" y="0" width="96" height="96" rx="22" fill="url(#logoFill)" />
+    <path d="M63 30h-8.4c-2.7 0-4.2 1.7-4.2 4.5V42h12l-1.7 12.4H50.4V88H37V54.4H27V42h10v-8.7C37 23.2 43.1 17 53.4 17c3.4 0 6.6.3 9.6.7z" fill="#ffffff" />
+    <text x="128" y="42" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" letter-spacing="3" fill="#4d9bff">MODEL CONTEXT PROTOCOL SERVER</text>
+    <text x="128" y="80" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="30" fill="#9aa6b4">Meta Graph API · Facebook Pages</text>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="94" y="360" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-weight="800" font-size="128" letter-spacing="-4" fill="#f4f8fd">facebook-mcp</text>
+
+  <!-- Subtitle -->
+  <text x="98" y="430" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-weight="500" font-size="40" fill="#cfdae8">Drive your Facebook Page from your AI assistant.</text>
+
+  <!-- Feature chips -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="24" fill="#a9cdff">
+    <g transform="translate(98, 494)">
+      <rect x="0" y="0" width="230" height="52" rx="12" fill="#1877F2" fill-opacity="0.10" stroke="#1877F2" stroke-opacity="0.30" />
+      <text x="24" y="34">Publish &amp; schedule</text>
+    </g>
+    <g transform="translate(348, 494)">
+      <rect x="0" y="0" width="216" height="52" rx="12" fill="#1877F2" fill-opacity="0.10" stroke="#1877F2" stroke-opacity="0.30" />
+      <text x="24" y="34">Read insights</text>
+    </g>
+    <g transform="translate(584, 494)">
+      <rect x="0" y="0" width="200" height="52" rx="12" fill="#1877F2" fill-opacity="0.10" stroke="#1877F2" stroke-opacity="0.30" />
+      <text x="24" y="34">Moderate</text>
+    </g>
+    <g transform="translate(804, 494)">
+      <rect x="0" y="0" width="270" height="52" rx="12" fill="#1877F2" fill-opacity="0.10" stroke="#1877F2" stroke-opacity="0.30" />
+      <text x="24" y="34">Local-first · no telemetry</text>
+    </g>
+  </g>
+
+  <!-- Corner meta -->
+  <text x="1104" y="586" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22" fill="#6f7d8c">TypeScript · MIT · Node 22+ · pre-1.0</text>
+</svg>

@@ -1,0 +1,1008 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>facebook-mcp — Facebook Pages MCP Server for the Meta Graph API</title>
+    <meta
+      name="description"
+      content="An open-source, local-first MCP server that lets your AI assistant drive a Facebook Page through the Meta Graph API — publishing, insights, and comment/message moderation, with least-privilege tokens and safe plan-and-apply writes. TypeScript, MIT, Node 22+."
+    />
+    <meta name="author" content="Ivan Baev" />
+    <meta name="theme-color" content="#1877F2" />
+    <link rel="canonical" href="https://ivanbbaev.github.io/facebook-mcp/" />
+    <meta name="color-scheme" content="dark light" />
+
+    <!-- Favicon: inline data-URI SVG, no network request -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%231877F2'/%3E%3Cpath%20d='M39.5 20h-4.3c-1.4 0-2.2.9-2.2 2.4V26h6.4l-.9 6.5h-5.5V52h-6.8V32.5H15V26h5.2v-4.6c0-5.2 3.2-8.4 8.6-8.4 2.6 0 4.8.2 5.4.3z' fill='%23fff'/%3E%3C/svg%3E"
+    />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="facebook-mcp" />
+    <meta
+      property="og:title"
+      content="facebook-mcp — Facebook Pages MCP Server"
+    />
+    <meta
+      property="og:description"
+      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, and moderation with safe, gated writes."
+    />
+    <meta property="og:url" content="https://ivanbbaev.github.io/facebook-mcp/" />
+    <!-- og:image points to the bundled SVG banner. A rasterised PNG export
+         (assets/og-banner.png) would improve compatibility with scrapers that
+         reject SVG previews — a nice-to-have, not required. -->
+    <meta
+      property="og:image"
+      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.svg"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="facebook-mcp — Facebook Pages MCP Server for the Meta Graph API"
+    />
+
+    <!-- Twitter card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="facebook-mcp — Facebook Pages MCP Server" />
+    <meta
+      name="twitter:description"
+      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, and moderation with safe, gated writes."
+    />
+    <meta
+      name="twitter:image"
+      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.svg"
+    />
+
+    <!-- Structured data: SoftwareApplication + FAQ -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "name": "facebook-mcp",
+            "alternateName": "Facebook Pages MCP Server",
+            "applicationCategory": "DeveloperApplication",
+            "applicationSubCategory": "MCP Server",
+            "operatingSystem": "Cross-platform (Node.js 22+)",
+            "description": "A local-first Model Context Protocol (MCP) server for the Meta Graph API, focused on Facebook Pages: publishing, reading & insights, and comment/message moderation, operated locally by a Page admin using their own Meta developer app.",
+            "url": "https://ivanbbaev.github.io/facebook-mcp/",
+            "codeRepository": "https://github.com/IvanBBaev/facebook-mcp",
+            "license": "https://opensource.org/licenses/MIT",
+            "programmingLanguage": "TypeScript",
+            "author": {
+              "@type": "Person",
+              "name": "Ivan Baev",
+              "url": "https://github.com/IvanBBaev"
+            },
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "isAccessibleForFree": true
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Is facebook-mcp affiliated with Meta?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. This is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta and related marks are trademarks of Meta Platforms, Inc., used here only nominatively to indicate compatibility."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which credentials does it need?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "A Meta developer app plus one access token: either a never-expiring System User token from Business Manager, or a long-lived Page token. The app secret is used to compute appsecret_proof. Because you administer your own Page, no Meta App Review is required."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is it safe to let an AI assistant write to my Page?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Writes are gated by a tiered plan-and-apply model: every write tool first returns a dry-run preview and performs zero network mutations. Irreversible actions (delete) and spend actions (ads) always require an explicit per-call confirmation and are never bypassed by an environment flag. The recommended starting posture is read-only."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "When will it be published to npm?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Not yet. facebook-mcp is pre-1.0 and in active development; the design is complete and documented while implementation is in progress. An npm package will ship with the first tagged release. Until then you run it from source."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which MCP clients does it work with?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Any client that speaks the Model Context Protocol over stdio — for example Claude Desktop, Claude Code, VS Code, and Cursor. An optional loopback-only Streamable HTTP transport is available for advanced setups."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="bg-glow" aria-hidden="true"></div>
+    <div class="bg-grid" aria-hidden="true"></div>
+
+    <!-- ============================ Top bar ============================ -->
+    <header class="topbar">
+      <button
+        id="menuBtn"
+        class="icon-btn"
+        aria-label="Open navigation"
+        aria-expanded="false"
+        aria-controls="sidebar"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="3" y1="6" x2="21" y2="6" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="3" y1="18" x2="21" y2="18" />
+        </svg>
+      </button>
+      <a class="brand" href="#top">
+        <span class="logo" aria-hidden="true">f</span>
+        <span>facebook-mcp <small>&nbsp;/ Pages MCP server</small></span>
+      </a>
+      <span class="spacer"></span>
+      <nav class="toplinks" aria-label="Primary">
+        <a href="#quickstart">Quick start</a>
+        <a href="#capabilities">Capabilities</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#security">Security</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <span class="ver-pill" title="Development status">pre-1.0 · not on npm</span>
+      <a
+        class="icon-btn"
+        href="https://github.com/IvanBBaev/facebook-mcp"
+        aria-label="View facebook-mcp on GitHub"
+        rel="noopener"
+      >
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.41-5.26 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z" />
+        </svg>
+      </a>
+    </header>
+
+    <div class="backdrop" id="backdrop" aria-hidden="true"></div>
+
+    <!-- ============================ Layout ============================ -->
+    <div class="layout" id="top">
+      <!-- --------------------- Sidebar --------------------- -->
+      <aside class="sidebar" id="sidebar" aria-label="Section navigation">
+        <h4>Getting started</h4>
+        <nav>
+          <a href="#overview">Overview</a>
+          <a href="#quick-demo">Quick demo</a>
+          <a href="#what-is-mcp">Why MCP?</a>
+          <a href="#capabilities">Capabilities</a>
+        </nav>
+        <h4>Set up</h4>
+        <nav>
+          <a href="#quickstart">Quick start</a>
+          <a href="#credentials">Credentials</a>
+        </nav>
+        <h4>Under the hood</h4>
+        <nav>
+          <a href="#architecture">Architecture</a>
+          <a href="#security">Security</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+      </aside>
+
+      <!-- --------------------- Content --------------------- -->
+      <main class="content" id="main">
+        <!-- ============ Hero / Overview ============ -->
+        <section class="hero" id="overview">
+          <div class="hero-grid">
+            <div class="hero-copy">
+              <span class="eyebrow">Model Context Protocol · Facebook Pages</span>
+              <h1>
+                Drive your Facebook Page from your
+                <span class="accent">AI assistant.</span>
+              </h1>
+              <p class="lead">
+                <strong>facebook-mcp</strong> is a local-first MCP server for the
+                Meta Graph API. Publish posts, read live insights, and moderate
+                comments and messages — from any MCP client, with
+                least-privilege tokens and writes you have to approve.
+              </p>
+              <div class="hero-cta">
+                <a class="btn primary" href="#quickstart">Get started &rarr;</a>
+                <a
+                  class="btn"
+                  href="https://github.com/IvanBBaev/facebook-mcp"
+                  rel="noopener"
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.41-5.26 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z" />
+                  </svg>
+                  View on GitHub
+                </a>
+              </div>
+              <div class="badges">
+                <span class="badge ok">MIT licensed</span>
+                <span class="badge">TypeScript · ESM</span>
+                <span class="badge">Node.js 22+</span>
+                <span class="badge">MCP SDK 1.29</span>
+                <span class="badge">Graph API v25.0</span>
+                <span class="badge">No telemetry</span>
+              </div>
+            </div>
+
+            <!-- Hero terminal -->
+            <div class="hero-visual">
+              <div class="terminal-wrap">
+                <div class="terminal">
+                  <div class="term-bar">
+                    <span class="term-dot" style="background:#ff5f57"></span>
+                    <span class="term-dot" style="background:#febc2e"></span>
+                    <span class="term-dot" style="background:#28c840"></span>
+                    <span class="term-label">assistant · facebook-mcp</span>
+                    <span class="term-live">live</span>
+                  </div>
+                  <div class="term-body" id="term-body">
+                    <span class="term-scan" aria-hidden="true"></span>
+                    <div class="term-line tl1">
+                      <span class="tprompt">you &rsaquo;</span> Publish today's
+                      launch post and pin it.
+                    </div>
+                    <div class="term-line tl2 term-call">
+                      <span class="tcall">&#9656; facebook_create_post</span>
+                      <span class="tdim">(plan)</span>
+                    </div>
+                    <div class="term-line tl3 tdim2">
+                      &nbsp;&nbsp;preview: "We just shipped…" · link · no media
+                    </div>
+                    <div class="term-line tl4 tdim2">
+                      &nbsp;&nbsp;&#9888; nothing was published — awaiting apply
+                    </div>
+                    <div class="term-line tl5">
+                      <span class="tprompt">you &rsaquo;</span> Looks good — apply.
+                    </div>
+                    <div class="term-line tl6 term-call">
+                      <span class="tcall">&#9656; facebook_create_post</span>
+                      <span class="tdim">(apply) &rarr; post 102…847</span>
+                    </div>
+                    <div class="term-line tl7 term-call">
+                      <span class="tcall">&#9656; facebook_get_insights</span>
+                      <span class="tdim">(read)</span>
+                    </div>
+                    <div class="term-line tl8">
+                      <div class="term-row">
+                        <span>post_impressions</span><span class="prio p3">1,204</span>
+                      </div>
+                      <div class="term-row last">
+                        <span>post_reactions_by_type</span><span class="prio p3">86</span>
+                      </div>
+                    </div>
+                    <div class="term-line tl8 term-cursor">
+                      <span class="cur">&#9608;</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="callout warn" style="margin-top: 34px">
+            <span class="c-ico" aria-hidden="true">&#128679;</span>
+            <p>
+              <strong>Pre-1.0, in active development.</strong> The design is
+              complete and documented; implementation is in progress. Interfaces
+              and scope may change until the first tagged release, and the
+              package is <strong>not yet published to npm</strong> — for now you
+              run it from source (see
+              <a href="#quickstart">Quick start</a>).
+            </p>
+          </div>
+
+          <div class="stat-row" role="list" aria-label="Project facts">
+            <div class="stat" role="listitem">
+              <b>7</b><span>tool packages</span>
+            </div>
+            <div class="stat" role="listitem">
+              <b>~27</b><span>default tools</span>
+            </div>
+            <div class="stat" role="listitem">
+              <b>4</b><span>layers · core&larr;api&larr;mcp&larr;tools</span>
+            </div>
+            <div class="stat" role="listitem">
+              <b>3</b><span>allow-listed Meta hosts</span>
+            </div>
+            <div class="stat" role="listitem">
+              <b>0</b><span>telemetry calls</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Quick demo ============ -->
+        <section id="quick-demo">
+          <span class="eyebrow">See it in action</span>
+          <h2>Three things it does, in one place</h2>
+          <p class="lead">
+            Your assistant calls a small, curated set of tools. Each one wraps a
+            real, verified Graph API capability — not every raw edge.
+          </p>
+
+          <div class="tabs" role="tablist" aria-label="Example capabilities">
+            <button class="tab active" role="tab" aria-selected="true" aria-controls="panel-publish" id="tab-publish">
+              <span class="tab-index">01</span> Publish a post
+            </button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-insights" id="tab-insights">
+              <span class="tab-index">02</span> Read insights
+            </button>
+            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-moderate" id="tab-moderate">
+              <span class="tab-index">03</span> Moderate a comment
+            </button>
+          </div>
+
+          <div class="tab-panel active" id="panel-publish" role="tabpanel" aria-labelledby="tab-publish">
+            <div class="tab-left">
+              <h3>Publish a post</h3>
+              <p>
+                Text, link, photo, video or Reels — with scheduling, edits and
+                deletes. The write is previewed first; nothing hits your Page
+                until you say <code>apply</code>.
+              </p>
+              <span class="tool-pill"><code>facebook_create_post</code> <span class="pill wr">write</span></span>
+            </div>
+            <div class="code-box">
+              <span class="cb-comment"># assistant &rarr; tool call (dry-run preview)</span>
+              <pre>{
+  "message": "We just shipped v1 🎉",
+  "link": "https://example.com/launch",
+  "published": true
+}
+
+&rarr; PREVIEW · resolves Page, checks perms
+&rarr; "The post was NOT published."
+&rarr; call again with { "apply": true }</pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-insights" role="tabpanel" aria-labelledby="tab-insights">
+            <div class="tab-left">
+              <h3>Read insights</h3>
+              <p>
+                Page and post reads with cursor pagination and
+                <em>live-verified</em> metric names — no guessing at deprecated
+                fields. Reads never mutate anything.
+              </p>
+              <span class="tool-pill"><code>facebook_get_insights</code> <span class="pill ro">read</span></span>
+            </div>
+            <div class="code-box">
+              <span class="cb-comment"># assistant &rarr; tool call</span>
+              <pre>{
+  "object": "post",
+  "metrics": ["post_impressions",
+              "post_reactions_by_type"]
+}
+
+&rarr; post_impressions            1,204
+&rarr; post_reactions_by_type        86
+&rarr; paging cursors stripped of tokens</pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-moderate" role="tabpanel" aria-labelledby="tab-moderate">
+            <div class="tab-left">
+              <h3>Moderate a comment</h3>
+              <p>
+                Hide, unhide or delete comments; read and reply to Page messages.
+                Moderation is reversible where the platform allows, so it can
+                default to a lighter confirmation posture.
+              </p>
+              <span class="tool-pill"><code>facebook_hide_comment</code> <span class="pill wr">write</span></span>
+            </div>
+            <div class="code-box">
+              <span class="cb-comment"># assistant &rarr; tool call</span>
+              <pre>{
+  "comment_id": "102…847_9911",
+  "hidden": true
+}
+
+&rarr; PREVIEW · before-state: visible
+&rarr; apply &rarr; comment hidden
+&rarr; recorded to local write journal
+    (metadata only, secrets redacted)</pre>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Why MCP ============ -->
+        <section id="what-is-mcp">
+          <span class="eyebrow">Background</span>
+          <h2>What is the Model Context Protocol?</h2>
+          <p>
+            The
+            <a href="https://modelcontextprotocol.io" rel="noopener">Model Context Protocol</a>
+            (MCP) is an open standard that lets AI assistants call external tools
+            through a uniform interface. An <strong>MCP server</strong> exposes a
+            set of typed tools; an <strong>MCP client</strong> (your assistant)
+            discovers them and calls them on your behalf.
+          </p>
+          <p>
+            <strong>facebook-mcp</strong> is one such server. It runs on your own
+            machine, talks only to Meta's Graph API, and turns Page operations —
+            publishing, insights, moderation — into tools your assistant can use.
+            Because it runs locally with your token, there is no third-party
+            service in the middle: your credentials never leave your machine, and
+            the server never phones home.
+          </p>
+          <div class="cards">
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128268;</div>
+              <h3>Standard interface</h3>
+              <p>
+                Works with any MCP client over stdio — Claude Desktop, Claude
+                Code, VS Code, Cursor and others.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#127968;</div>
+              <h3>Runs where you do</h3>
+              <p>
+                A local process using your own Meta developer app and token. No
+                hosted middleman, no account linking.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#129513;</div>
+              <h3>Curated tools</h3>
+              <p>
+                A deliberately small surface — each tool wraps a verified
+                capability rather than mirroring every Graph edge.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Capabilities ============ -->
+        <section id="capabilities">
+          <span class="eyebrow">What it does</span>
+          <h2>Capabilities</h2>
+          <p class="lead">
+            Grouped into packages you can enable or restrict. The default profile
+            is publishing, reading, insights, moderation and messages — with ads
+            deliberately left off.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Area</th>
+                  <th scope="col">What it covers</th>
+                  <th scope="col">Default</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Publishing</strong></td>
+                  <td>Text, link, photo, video &amp; Reels posts; scheduling; edit &amp; delete</td>
+                  <td><span class="pill wr">on</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Reading &amp; insights</strong></td>
+                  <td>Page &amp; post reads, cursor pagination, live-verified insight metrics</td>
+                  <td><span class="pill ro">on</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Moderation</strong></td>
+                  <td>Comment hide / unhide / delete; message reads &amp; replies</td>
+                  <td><span class="pill wr">on</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Ads</strong> <span style="color: var(--dim)">(1.1)</span></td>
+                  <td>Campaign / ad-set / ad reads plus status &amp; budget control</td>
+                  <td><span class="pill" style="color: var(--dim); border: 1px solid var(--hair)">opt-in</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="cards" style="margin-top: 22px">
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128227;</div>
+              <h3>Publishing</h3>
+              <p>
+                Compose and schedule posts across every media type, then edit or
+                delete them — each write previewed before it runs.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128202;</div>
+              <h3>Reading &amp; insights</h3>
+              <p>
+                Pull Page and post data and live-verified insight metrics with
+                cursor pagination that never persists tokens.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128737;</div>
+              <h3>Moderation &amp; messages</h3>
+              <p>
+                Hide, unhide or delete comments and read and reply to Page
+                conversations, keeping your community tidy.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128200;</div>
+              <h3>Ads — opt-in</h3>
+              <p>
+                Read campaigns and control status and budget. Off by default
+                (Meta ships an official ads MCP); enable it deliberately.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128274;</div>
+              <h3>Local-first, no telemetry</h3>
+              <p>
+                Only three Meta hosts are ever reached. Nothing about your usage
+                is collected or sent anywhere.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#9995;</div>
+              <h3>Safe, gated writes</h3>
+              <p>
+                Tiered plan-and-apply gating. Irreversible and spend actions
+                always need an explicit, per-call confirmation.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ Quick start ============ -->
+        <section id="quickstart">
+          <span class="eyebrow">Set up</span>
+          <h2>Quick start</h2>
+          <p class="lead">
+            There is no npm package yet, so you run it from source. Three steps to
+            a working server, then point your MCP client at it.
+          </p>
+
+          <div class="qs-grid">
+            <div class="qs-steps">
+              <div class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">1</span>
+                  <span class="qs-step-title">Clone &amp; build</span>
+                </div>
+                <div class="qs-cmd" data-copy="git clone https://github.com/IvanBBaev/facebook-mcp
+cd facebook-mcp
+npm install
+npm run build">
+                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
+                  <p class="qs-cmd-text"><code>git clone https://github.com/IvanBBaev/facebook-mcp
+cd facebook-mcp
+npm install
+npm run build</code></p>
+                </div>
+              </div>
+
+              <div class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">2</span>
+                  <span class="qs-step-title">Provide credentials</span>
+                </div>
+                <div class="qs-cmd" data-copy="export FB_ACCESS_TOKEN=EAA…
+export FB_PAGE_ID=1234567890
+export FB_APP_SECRET=…   # for appsecret_proof">
+                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
+                  <p class="qs-cmd-text"><code>export FB_ACCESS_TOKEN=EAA…
+export FB_PAGE_ID=1234567890
+export FB_APP_SECRET=…   # appsecret_proof</code></p>
+                </div>
+              </div>
+
+              <div class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">3</span>
+                  <span class="qs-step-title">Run it</span>
+                </div>
+                <div class="qs-cmd" data-copy="node build/index.js">
+                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
+                  <p class="qs-cmd-text"><code>node build/index.js</code></p>
+                </div>
+                <p class="qs-note">
+                  Speaks MCP over stdio. Usually you won't run it by hand — your
+                  MCP client launches it using the config on the right.
+                </p>
+              </div>
+            </div>
+
+            <!-- Client config panel -->
+            <div class="qs-config">
+              <div class="qs-config-head">
+                <div class="qs-tabs" role="tablist" aria-label="Client">
+                  <button class="qs-tab active" role="tab" aria-selected="true" data-cfg="claude">Claude Desktop</button>
+                  <button class="qs-tab" role="tab" aria-selected="false" data-cfg="vscode">VS Code</button>
+                  <button class="qs-tab" role="tab" aria-selected="false" data-cfg="cursor">Cursor</button>
+                </div>
+                <button class="qs-config-copy" type="button">copy</button>
+              </div>
+              <div class="qs-config-body">
+                <div class="qs-config-path" id="cfg-path">
+                  ~/Library/Application Support/Claude/claude_desktop_config.json
+                </div>
+                <pre class="qs-config-pre" id="cfg-body"><code>{
+  "mcpServers": {
+    "facebook": {
+      "command": "node",
+      "args": ["/abs/path/facebook-mcp/build/index.js"],
+      "env": {
+        "FB_ACCESS_TOKEN": "EAA…",
+        "FB_PAGE_ID": "1234567890",
+        "FB_APP_SECRET": "…"
+      }
+    }
+  }
+}</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="callout" style="margin-top: 24px">
+            <span class="c-ico" aria-hidden="true">&#128230;</span>
+            <p>
+              <strong>After the first release</strong> — once facebook-mcp is
+              published to npm — the same config becomes a one-liner, no clone or
+              build required:
+            </p>
+          </div>
+          <div class="codeblock">
+            <span class="lang">json</span>
+            <pre><code>{
+  "mcpServers": {
+    "facebook": {
+      "command": "npx",
+      "args": ["-y", "@ivanbbaev/facebook-mcp"],
+      "env": {
+        "FB_ACCESS_TOKEN": "EAA…",
+        "FB_PAGE_ID": "1234567890"
+      }
+    }
+  }
+}</code></pre>
+          </div>
+          <p class="qs-note">
+            Not available yet — shown here as the intended shape once the package
+            ships. Track progress on
+            <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">GitHub</a>.
+          </p>
+        </section>
+
+        <!-- ============ Credentials ============ -->
+        <section id="credentials">
+          <span class="eyebrow">Set up</span>
+          <h2>Credentials</h2>
+          <p class="lead">
+            You bring your own Meta developer app and a token for a Page you
+            administer. facebook-mcp uses the least privilege that works — and no
+            App Review, because you operate your own assets.
+          </p>
+
+          <h3>Two token routes</h3>
+          <div class="cards">
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#127970;</div>
+              <h3>System User token</h3>
+              <p>
+                A never-expiring token issued from Business Manager. Best for a
+                stable, long-running setup where a Business owns the Page.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128273;</div>
+              <h3>Long-lived Page token</h3>
+              <p>
+                A first-class fallback — no Business Manager required. Ideal when
+                you simply administer a Page yourself.
+              </p>
+            </div>
+          </div>
+
+          <h3>Environment variables</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Variable</th>
+                  <th scope="col">Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>FB_ACCESS_TOKEN</code></td>
+                  <td>Your System User or long-lived Page token. Sent as a Bearer header — never in a query string.</td>
+                </tr>
+                <tr>
+                  <td><code>FB_PAGE_ID</code></td>
+                  <td>The default Page the tools operate on.</td>
+                </tr>
+                <tr>
+                  <td><code>FB_APP_SECRET</code></td>
+                  <td>Used to compute <code>appsecret_proof</code> (HMAC-SHA256) on every call.</td>
+                </tr>
+                <tr>
+                  <td><code>FB_API_VERSION</code></td>
+                  <td>Graph API version pin (defaults to a tested version).</td>
+                </tr>
+                <tr>
+                  <td><code>FB_TOOL_PACKAGES</code></td>
+                  <td>Which tool packages to expose. Unset ⇒ the default profile (ads excluded).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout">
+            <span class="c-ico" aria-hidden="true">&#128273;</span>
+            <p>
+              Config is <strong>env-first</strong>: values passed by the client
+              beat the env file. On-disk config lives under an XDG path and is
+              written atomically with <code>0600</code> permissions. Your token
+              is never logged and is stripped from any Graph response before it
+              leaves the process.
+            </p>
+          </div>
+          <p>
+            No Meta <strong>App Review</strong> is required for an admin operating
+            their own Page. Start read-only, confirm the topology, then enable
+            writes when you are ready.
+          </p>
+        </section>
+
+        <!-- ============ Architecture ============ -->
+        <section id="architecture">
+          <span class="eyebrow">Under the hood</span>
+          <h2>Architecture</h2>
+          <p class="lead">
+            A thin, lint-enforced stack. Each layer may only import the one below
+            it, so tools can never reach around policy straight to the network.
+          </p>
+
+          <figure class="diagram">
+            <svg viewBox="0 0 720 250" role="img" aria-label="Layering: tools depend on mcp, which depends on api, which depends on core. Imports only ever point downward.">
+              <!-- L3 tools -->
+              <rect class="box accent" x="20" y="20" width="680" height="46" rx="9" />
+              <text class="lbl" x="40" y="41">tools</text>
+              <text class="sub" x="40" y="58">ToolSpec[] per package — data, not code · facebook_&lt;verb&gt;_&lt;noun&gt;</text>
+              <text class="tag" x="640" y="47">L3</text>
+              <!-- L2 mcp -->
+              <rect class="box" x="20" y="78" width="680" height="46" rx="9" />
+              <text class="lbl" x="40" y="99">mcp</text>
+              <text class="sub" x="40" y="116">registry &amp; packages · result shaper · write-mode + journal · transport</text>
+              <text class="tag" x="640" y="105">L2</text>
+              <!-- L1 api -->
+              <rect class="box" x="20" y="136" width="680" height="46" rx="9" />
+              <text class="lbl" x="40" y="157">api</text>
+              <text class="sub" x="40" y="174">Graph domain functions · posts · insights · comments · messaging · ads</text>
+              <text class="tag" x="640" y="163">L1</text>
+              <!-- L0 core -->
+              <rect class="box" x="20" y="194" width="680" height="46" rx="9" />
+              <text class="lbl" x="40" y="215">core</text>
+              <text class="sub" x="40" y="232">config &amp; auth · HTTP client + upload protocols · host allowlist · redaction</text>
+              <text class="tag" x="640" y="221">L0</text>
+              <!-- downward arrow -->
+              <path class="edge" d="M362 66 L362 78" />
+              <path class="ah" d="M362 78 l-4 -6 l8 0 z" />
+              <path class="edge" d="M362 124 L362 136" />
+              <path class="ah" d="M362 136 l-4 -6 l8 0 z" />
+              <path class="edge" d="M362 182 L362 194" />
+              <path class="ah" d="M362 194 l-4 -6 l8 0 z" />
+            </svg>
+            <figcaption>
+              <code>core &larr; api &larr; mcp &larr; tools</code> — enforced with
+              ESLint <code>no-restricted-imports</code>. Tools never import
+              <code>core/http</code> directly.
+            </figcaption>
+          </figure>
+
+          <h3>The three-host fence</h3>
+          <p>
+            There is exactly one vendor, so the HTTP client hard-codes a fixed
+            host allowlist — there are no user-configurable hosts. Every request,
+            including chunked media uploads, goes through one choke-point that
+            can only reach these three:
+          </p>
+          <div class="host-fence">
+            <span class="host-chip"><span class="dot" aria-hidden="true"></span>graph.facebook.com</span>
+            <span class="host-chip"><span class="dot" aria-hidden="true"></span>graph-video.facebook.com</span>
+            <span class="host-chip"><span class="dot" aria-hidden="true"></span>rupload.facebook.com</span>
+          </div>
+          <p>
+            One <code>fbRequest()</code> entry point covers all three wire
+            protocols — JSON / query-string reads and simple writes, multipart
+            <code>FormData</code> for direct binary uploads, and raw-binary
+            <code>rupload</code> for chunked resumable video and Reels — so no
+            media path can bypass auth, redaction or the host fence.
+          </p>
+        </section>
+
+        <!-- ============ Security ============ -->
+        <section id="security">
+          <span class="eyebrow">Under the hood</span>
+          <h2>Security &amp; safety</h2>
+          <p class="lead">
+            Publishing to a real audience is the most consequential thing this
+            server does, so safe-by-default is non-negotiable.
+          </p>
+
+          <div class="cards">
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128225;</div>
+              <h3>Local-first, no telemetry</h3>
+              <p>
+                The server reaches only the three allow-listed Meta hosts.
+                Nothing about your usage is collected, and nothing phones home.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128272;</div>
+              <h3>Least-privilege tokens</h3>
+              <p>
+                A System User or long-lived Page token, sent as a Bearer header —
+                never in a query string, so it can't leak into
+                <code>paging.next</code> URLs.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#9995;</div>
+              <h3>Plan-and-apply writes</h3>
+              <p>
+                Every write previews first and mutates nothing. Delete and spend
+                tiers always need a per-call <code>apply</code> — never bypassed
+                by an env flag.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#129529;</div>
+              <h3>Single-choke-point redaction</h3>
+              <p>
+                One function scrubs raw secret <em>values</em> — tokens, app
+                secret, <code>appsecret_proof</code> — across logs, errors,
+                results and the journal.
+              </p>
+            </div>
+          </div>
+
+          <h3>Defense in depth</h3>
+          <ul>
+            <li>
+              <strong>appsecret_proof</strong> (HMAC-SHA256) is attached to every
+              Graph call.
+            </li>
+            <li>
+              <strong>Response scrubbing</strong> recursively strips every
+              <code>paging</code> object and token-bearing URL before a payload
+              leaves the process.
+            </li>
+            <li>
+              <strong>SSRF containment</strong> — the fixed host allowlist means
+              no request can be steered to an arbitrary host; local file uploads
+              are off unless you explicitly set <code>FB_MEDIA_DIR</code>
+              (realpath-confined, no cross-host redirects).
+            </li>
+            <li>
+              <strong>HTTP transport fails closed</strong> — it refuses to start
+              without <code>FB_HTTP_TOKEN</code>, binds <code>127.0.0.1</code>
+              only, validates the <code>Origin</code> header, and constant-time
+              checks the bearer on every request.
+            </li>
+            <li>
+              <strong>Ambiguous writes are never auto-retried</strong> — Graph has
+              no idempotency keys, so a publish/send/delete whose outcome is
+              unknown is surfaced for you to verify, never blindly replayed.
+            </li>
+          </ul>
+
+          <div class="callout security">
+            <span class="c-ico" aria-hidden="true">&#9888;</span>
+            <p>
+              Because an assistant can ingest untrusted content (comments,
+              messages) and also hold a write-capable token, the recommended
+              posture for unattended runs is <strong>read-only</strong>.
+              Irreversible and spend actions always require out-of-band
+              confirmation that an environment flag can never satisfy.
+            </p>
+          </div>
+        </section>
+
+        <!-- ============ FAQ ============ -->
+        <section id="faq">
+          <span class="eyebrow">Questions</span>
+          <h2>FAQ</h2>
+
+          <h3>Is this affiliated with Meta?</h3>
+          <p>
+            No. This is an independent, community-built project and is not
+            affiliated with, endorsed by, or sponsored by Meta Platforms, Inc.
+            "Facebook" and "Meta" are used only nominatively, to indicate what the
+            server is compatible with.
+          </p>
+
+          <h3>Which credentials does it need?</h3>
+          <p>
+            A Meta developer app plus one access token — either a never-expiring
+            System User token from Business Manager, or a long-lived Page token.
+            The app secret is used to compute <code>appsecret_proof</code>.
+            Because you administer your own Page, <strong>no App Review</strong>
+            is required.
+          </p>
+
+          <h3>Is it safe to let it write to my Page?</h3>
+          <p>
+            Writes are gated. Every write tool first returns a dry-run preview and
+            performs zero network mutations; you approve with an explicit
+            <code>apply</code>. Irreversible actions (delete) and spend actions
+            (ads) always require a per-call confirmation and are
+            <strong>never</strong> bypassed by an environment flag. Starting
+            read-only is recommended.
+          </p>
+
+          <h3>When will it be published to npm?</h3>
+          <p>
+            Not yet. facebook-mcp is pre-1.0 and in active development — the design
+            is complete and documented while implementation is in progress. An npm
+            package will ship with the first tagged release; until then you run it
+            from source.
+          </p>
+
+          <h3>Which MCP clients does it work with?</h3>
+          <p>
+            Any client that speaks MCP over stdio — for example Claude Desktop,
+            Claude Code, VS Code and Cursor. An optional loopback-only Streamable
+            HTTP transport is available for advanced setups.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <!-- ============================ Footer ============================ -->
+    <footer>
+      <div class="foot-inner">
+        <div>
+          <strong>facebook-mcp</strong> · MIT © 2026 Ivan Baev
+        </div>
+        <nav aria-label="Footer">
+          <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">GitHub</a>
+          &nbsp;·&nbsp;
+          <a href="https://github.com/IvanBBaev/facebook-mcp#readme" rel="noopener">README</a>
+          &nbsp;·&nbsp;
+          <a href="https://modelcontextprotocol.io" rel="noopener">About MCP</a>
+        </nav>
+      </div>
+      <p class="disclaimer">
+        This is an independent, community-built project and is not affiliated
+        with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta
+        and related marks are trademarks of Meta Platforms, Inc., used here only
+        nominatively to indicate compatibility.
+      </p>
+    </footer>
+
+    <button id="toTop" class="to-top" aria-label="Back to top" title="Back to top">&uarr;</button>
+
+    <script src="assets/app.js" defer></script>
+  </body>
+</html>
