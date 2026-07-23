@@ -16,6 +16,28 @@ export * from './registry.js';
 // truncation, server-owned envelope shaping (C3/CC-MCP-4/CC-MCP-7).
 export * from './result.js';
 
+// F13 — tiered plan-and-apply write gating + non-blocking rotating journal (C4).
+export {
+  createWriteGate,
+  authorize,
+  computeDivergence,
+  WriteGateError,
+  PLAN_TTL_MS,
+  type WriteGate,
+  type WriteGateDeps,
+  type WriteAction,
+  type WriteOutcome,
+  type GateDecision,
+  type AuthorizeInput,
+  type WriteGateErrorCode,
+} from './write-mode.js';
+export {
+  createJournal,
+  rotatedJournalPath,
+  JOURNAL_MAX_BYTES,
+  type JournalDeps,
+} from './journal.js';
+
 // F15 — tainted-UGC envelope + out-of-band confirmation seam (B1).
 export * from './taint.js';
 export * from './confirm.js';
