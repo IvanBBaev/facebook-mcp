@@ -38,6 +38,15 @@ export {
   type JournalDeps,
 } from './journal.js';
 
+// F14 — stdio + Streamable HTTP transports (stdout purity, loopback fail-closed) (C12).
+export {
+  startTransport,
+  type ConnectableServer,
+  type TransportDeps,
+  type TransportHandle,
+  type TransportAddress,
+} from './transport.js';
+
 // F15 — tainted-UGC envelope + out-of-band confirmation seam (B1).
 export * from './taint.js';
 export * from './confirm.js';
