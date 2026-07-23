@@ -1,0 +1,118 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.IvanBBaev/facebook-mcp",
+  "description": "Facebook Pages MCP server for the Meta Graph API — identity, Page discovery, rate-limit diagnostics",
+  "repository": {
+    "url": "https://github.com/IvanBBaev/facebook-mcp",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@ivanbbaev/facebook-mcp",
+      "version": "0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "FB_ACCESS_TOKEN",
+          "description": "Primary user or system-user access token. At least one of FB_ACCESS_TOKEN, FB_SYSTEM_TOKEN or FB_PAGE_TOKEN must be set.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_SYSTEM_TOKEN",
+          "description": "System-user access token (Business Manager); takes precedence over FB_PAGE_TOKEN when both are set.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_PAGE_TOKEN",
+          "description": "Long-lived Page access token used as a fallback credential.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_APP_ID",
+          "description": "Meta app ID; combined with FB_APP_SECRET to authorize token inspection and sign calls.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FB_APP_SECRET",
+          "description": "Meta app secret; enables appsecret_proof so a stolen bare token cannot be used.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_PAGE_ID",
+          "description": "Default Facebook Page ID, used when a tool call omits an explicit profile.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FB_API_VERSION",
+          "description": "Graph API version to target. Defaults to the tested pinned version.",
+          "isRequired": false,
+          "format": "string",
+          "default": "v23.0"
+        },
+        {
+          "name": "FB_WRITE_MODE",
+          "description": "Write gating mode: plan (validating dry-run preview, default) or apply.",
+          "isRequired": false,
+          "format": "string",
+          "default": "plan",
+          "choices": ["plan", "apply"]
+        },
+        {
+          "name": "FB_TOOL_PACKAGES",
+          "description": "Comma-separated tool packages to expose (e.g. core,posts,reader); omit for the default profile.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FB_TRANSPORT",
+          "description": "Transport protocol: stdio (default) or http.",
+          "isRequired": false,
+          "format": "string",
+          "default": "stdio",
+          "choices": ["stdio", "http"]
+        },
+        {
+          "name": "FB_HTTP_TOKEN",
+          "description": "Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (fails closed without it).",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_HTTP_PORT",
+          "description": "Port for the HTTP transport (loopback only); used when FB_TRANSPORT=http.",
+          "isRequired": false,
+          "format": "number",
+          "default": "3000"
+        },
+        {
+          "name": "FB_MEDIA_DIR",
+          "description": "Directory permitted for local media uploads; unset means URL-only, local file access disabled.",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
+          "name": "FB_CONFIRM_TOKEN",
+          "description": "Operator confirmation token for out-of-band approval of destructive or spend actions when elicitation is unavailable.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

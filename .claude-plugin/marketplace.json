@@ -1,0 +1,11 @@
+{
+  "name": "facebook-mcp",
+  "owner": { "name": "Ivan Baev", "url": "https://github.com/IvanBBaev" },
+  "plugins": [
+    {
+      "name": "facebook-mcp",
+      "source": "./",
+      "description": "Facebook Pages MCP server for the Meta Graph API — identity, Page discovery and rate-limit diagnostics, with plan-and-apply write gating and secret redaction. Add with: /plugin marketplace add IvanBBaev/facebook-mcp"
+    }
+  ]
+}

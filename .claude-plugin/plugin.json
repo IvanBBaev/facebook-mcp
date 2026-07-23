@@ -1,0 +1,17 @@
+{
+  "name": "facebook-mcp",
+  "displayName": "Facebook Pages MCP",
+  "version": "0.0.0",
+  "description": "Drive Facebook Pages from your AI assistant over the Meta Graph API — token-aware identity, Page discovery and rate-limit diagnostics, on a safety-first core with plan-and-apply write gating and single-choke-point secret redaction.",
+  "author": { "name": "Ivan Baev", "url": "https://github.com/IvanBBaev" },
+  "homepage": "https://ivanbbaev.github.io/facebook-mcp/",
+  "repository": "https://github.com/IvanBBaev/facebook-mcp",
+  "license": "MIT",
+  "keywords": ["mcp", "facebook", "meta", "graph-api", "pages", "llm", "ai"],
+  "mcpServers": {
+    "facebook": {
+      "command": "npx",
+      "args": ["-y", "@ivanbbaev/facebook-mcp"]
+    }
+  }
+}
