@@ -50,3 +50,6 @@ export {
 // F15 — tainted-UGC envelope + out-of-band confirmation seam (B1).
 export * from './taint.js';
 export * from './confirm.js';
+
+// F16 — pre-flight doctor diagnostic (permission × package usability matrix).
+export * from './doctor.js';
