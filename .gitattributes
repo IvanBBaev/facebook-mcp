@@ -1,0 +1,21 @@
+# Normalize line endings so a Windows checkout does not turn every LF into CRLF.
+# Without this, `prettier --check` fails on the Windows CI leg for every text file
+# while passing on Linux/macOS.
+* text=auto eol=lf
+
+# Binary assets: never touch the bytes.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.mp4 binary
+*.woff binary
+*.woff2 binary
+
+# Lockfile: treat as generated so diffs stay collapsed in review.
+package-lock.json linguist-generated=true diff=json
+
+# The Pages site under docs/ is hand-written, not vendored — keep it in language stats.
+docs/index.html linguist-documentation=false
