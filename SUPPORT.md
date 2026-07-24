@@ -36,6 +36,24 @@ use the right channel below so issues stay searchable and triage stays sane.
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev
 workflow and the single check gate.
 
+## Funding the maintenance
+
+The project is MIT-licensed and free, with no paid tier and no commercial
+support offering. Maintenance happens in the maintainer's own time, so tips are
+welcome:
+
+- **[GitHub Sponsors](https://github.com/sponsors/IvanBBaev)** — one-off or
+  recurring, no platform fee.
+- **[Ko-fi](https://ko-fi.com/ivanbbaev)** — quick one-off support, no account
+  needed.
+- **[Donatree](https://donatr.ee/ivanbbaev/)** — every donation method on one
+  page, including local payment options.
+
+To be explicit: **donating buys no priority and no SLA.** Sponsored and
+unsponsored issues are triaged the same way. Starring the repository, writing a
+reproducible bug report, or telling another Page admin about the project helps
+just as much as money.
+
 ## Privacy: nothing phones home
 
 This is worth restating because it shapes what "support" can even see. The

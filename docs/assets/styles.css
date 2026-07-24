@@ -649,6 +649,63 @@ li {
   filter: brightness(1.08);
   color: var(--accent-ink);
 }
+/* Funding buttons keep each platform's own accent so they read at a glance. */
+.btn.sponsor {
+  color: #ea4aaa;
+  border-color: rgba(234, 74, 170, 0.35);
+  background: rgba(234, 74, 170, 0.08);
+}
+.btn.sponsor:hover {
+  color: #ff6fc0;
+  background: rgba(234, 74, 170, 0.14);
+}
+.btn.kofi {
+  color: #ff5e5b;
+  border-color: rgba(255, 94, 91, 0.35);
+  background: rgba(255, 94, 91, 0.08);
+}
+.btn.kofi:hover {
+  color: #ff8582;
+  background: rgba(255, 94, 91, 0.14);
+}
+.btn.tree {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.08);
+}
+.btn.tree:hover {
+  color: #6ee7b7;
+  background: rgba(52, 211, 153, 0.14);
+}
+
+/* ---- Sponsor button in the top bar ---- */
+.icon-btn.sponsor-btn {
+  display: inline-flex;
+  align-items: center;
+  width: auto;
+  gap: 7px;
+  padding: 0 12px;
+  color: #ea4aaa;
+  border-color: rgba(234, 74, 170, 0.35);
+  background: rgba(234, 74, 170, 0.08);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+}
+.icon-btn.sponsor-btn:hover {
+  color: #ff6fc0;
+  background: rgba(234, 74, 170, 0.16);
+}
+@media (max-width: 900px) {
+  .icon-btn.sponsor-btn .sponsor-label {
+    display: none;
+  }
+  .icon-btn.sponsor-btn {
+    padding: 0;
+    width: 36px;
+    justify-content: center;
+  }
+}
 
 /* ---- Hero badge chips ---- */
 .badges {
@@ -945,6 +1002,24 @@ th code {
   color: var(--write);
   background: rgba(245, 166, 35, 0.1);
   border: 1px solid rgba(245, 166, 35, 0.28);
+}
+/* Shipping status: live = implemented today, soon = designed and scheduled. */
+.pill.live {
+  color: var(--ok);
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.28);
+}
+.pill.soon {
+  color: var(--dim);
+  background: transparent;
+  border: 1px solid var(--hair);
+}
+.pill.soon a {
+  color: inherit;
+  text-decoration: none;
+}
+.pill.soon a:hover {
+  color: var(--text-2);
 }
 
 /* ---- Callouts ---- */

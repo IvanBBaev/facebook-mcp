@@ -13,24 +13,29 @@ MCP client (Claude, VS Code, the Inspector…) and operated locally by a Page ad
 using their own Meta developer app. Least-privilege tokens, plan-and-apply write
 safety, and no telemetry.
 
-> 🚧 **Status: pre-1.0, in active development.** Not yet published to npm. The
-> design is complete and documented; implementation is in progress. Interfaces
-> and scope may change until the first tagged release.
+> 🚧 **Status: pre-1.0, in active development.** Not yet published to npm.
+> The foundation — HTTP client, auth, write gating, transports, tool registry —
+> is complete and tested; **4 of the 35 planned tools are live today** (the
+> read-only `core` package). The publishing, reading, moderation and messaging
+> packages are next. Interfaces and scope may change until the first tagged
+> release. See the [roadmap](#roadmap) for what lands when.
 
 **Contents:** [Features](#features) · [Requirements](#requirements) ·
 [Setup](#setup) · [Configure credentials](#configure-credentials) ·
-[Tools](#tools) · [Security notes](#security-notes) ·
+[Tools](#tools) · [Roadmap](#roadmap) · [Security notes](#security-notes) ·
 [Documentation](#documentation) · [Support](#support) ·
 [Trademark](#trademark) · [License](#license)
 
 ## Features
 
-| Area                   | Capability                                                                |
-| ---------------------- | ------------------------------------------------------------------------- |
-| **Publishing**         | Text / link / photo / video / Reels posts, scheduling, edit & delete      |
-| **Reading & insights** | Page & post reads, cursor pagination, live-verified insight metrics       |
-| **Moderation**         | Comment hide/unhide/delete, message reads & replies                       |
-| **Ads (1.1)**          | Campaign/adset/ad read + status & budget control (opt-in, off by default) |
+| Area                      | Capability                                                                | Status                                                             |
+| ------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| **Core & diagnostics**    | Identity, Page listing, rate-limit usage, `doctor` pre-flight check       | ✅ **Available**                                                   |
+| **Reading**               | Page & post reads, Reels, reactions, cursor pagination                    | 🚧 [v0.2.0](https://github.com/IvanBBaev/facebook-mcp/milestone/2) |
+| **Publishing**            | Text / link / photo / video / Reels posts, scheduling, edit & delete      | 🚧 [v0.2.0](https://github.com/IvanBBaev/facebook-mcp/milestone/2) |
+| **Insights & moderation** | Live-verified metrics; comment hide/unhide/delete, replies, blocking      | 🚧 [v0.3.0](https://github.com/IvanBBaev/facebook-mcp/milestone/3) |
+| **Messaging**             | Conversation reads and replies within the 24-hour window                  | 🚧 [v0.4.0](https://github.com/IvanBBaev/facebook-mcp/milestone/4) |
+| **Ads**                   | Campaign/adset/ad read + status & budget control (opt-in, off by default) | 🚧 [v0.5.0](https://github.com/IvanBBaev/facebook-mcp/milestone/5) |
 
 The default profile exposes a deliberately small, curated tool surface — each
 tool wraps a real, verified capability rather than mirroring every Graph edge.
@@ -171,6 +176,25 @@ on the roadmap, and this table will grow as they land.
 
 <!-- GENERATED:TOOLS:END -->
 
+## Roadmap
+
+Work is tracked publicly on the
+[**facebook-mcp roadmap** board](https://github.com/users/IvanBBaev/projects/3)
+and grouped into release milestones:
+
+| Milestone                                                                               | Scope                                                             |
+| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| [v0.1.0](https://github.com/IvanBBaev/facebook-mcp/milestone/1) — Core                  | Foundation + `core` tools (done), live smoke harness              |
+| [v0.2.0](https://github.com/IvanBBaev/facebook-mcp/milestone/2) — Reader & publishing   | Post/Reels reads, publishing, scheduling, photo/video/Reels media |
+| [v0.3.0](https://github.com/IvanBBaev/facebook-mcp/milestone/3) — Insights & moderation | Page/post/Reel insights, comment moderation, blocking             |
+| [v0.4.0](https://github.com/IvanBBaev/facebook-mcp/milestone/4) — Messaging             | Conversations and message sending                                 |
+| [v0.5.0](https://github.com/IvanBBaev/facebook-mcp/milestone/5) — Ads                   | Ads read + control, opt-in and off by default                     |
+| [v1.0.0](https://github.com/IvanBBaev/facebook-mcp/milestone/6) — Stable                | Metadata SSOT, generated docs, release rail, npm publish          |
+
+The design behind each item is written up in advance in
+[`docs/analysis/`](docs/analysis/README.md) — the roadmap is a consequence of
+that corpus, not a replacement for it.
+
 ## Security notes
 
 - **Three-host fence.** Only `graph.facebook.com`, `graph-video.facebook.com`
@@ -211,9 +235,16 @@ going:
   recurring, no platform fee.
 - **[Ko-fi](https://ko-fi.com/ivanbbaev)** — quick one-off support (also accepts
   PayPal), the fallback for anyone without a GitHub account.
+- **[Donatree](https://donatr.ee/ivanbbaev/)** — every donation method on one
+  page, including local payment options.
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/IvanBBaev)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=kofi&logoColor=white)](https://ko-fi.com/ivanbbaev)
+[![Donate via Donatree](https://img.shields.io/badge/Donatree-Donate-34d399?style=flat-square&logo=liberapay&logoColor=white)](https://donatr.ee/ivanbbaev/)
+
+Donating buys no priority support and no SLA — see [SUPPORT.md](SUPPORT.md). If
+money is not an option, starring the repository or filing a good bug report
+helps just as much.
 
 ## Trademark
 

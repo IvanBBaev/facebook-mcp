@@ -1,7 +1,8 @@
 # Changelog
 
 The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
-The full development chronology lives in [WORKLOG.md](WORKLOG.md); the git history is one commit per task.
+Planned work is tracked on the [roadmap board](https://github.com/users/IvanBBaev/projects/3)
+and its [milestones](https://github.com/IvanBBaev/facebook-mcp/milestones); the git history is one commit per task.
 
 ## [Unreleased]
 
@@ -47,6 +48,23 @@ being filled out package by package.
   actually works, so misconfiguration surfaces in one pass.
 - **Distribution manifests.** An MCP Registry `server.json`, a Claude Code plugin
   bundle (`.claude-plugin/`), a `FUNDING.yml` sponsor button and this changelog.
+- **Documentation site.** A zero-build GitHub Pages site at
+  [ivanbbaev.github.io/facebook-mcp](https://ivanbbaev.github.io/facebook-mcp/),
+  including funding links and a per-package shipping status so the public page
+  never claims a capability that is not implemented yet.
+
+### Changed
+
+- **Honest capability reporting.** The README, the Pages site and the FAQ now
+  distinguish what ships today (the read-only `core` package, four tools) from
+  what is designed and scheduled, with every planned area linked to its release
+  milestone. A new README `Roadmap` section points at the public roadmap board.
+
+### Fixed
+
+- **Windows CI line endings.** A `.gitattributes` now normalises the tree to LF,
+  so a Windows checkout no longer rewrites every file to CRLF and fails
+  `prettier --check` on the Windows CI leg while Linux and macOS pass.
 
 ### Security
 

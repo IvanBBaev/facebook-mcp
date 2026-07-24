@@ -140,7 +140,7 @@ close the gap; none rely on the model policing itself.
 3. **Read-only profile for unattended UGC ingestion.** The default `core` profile
    already excludes `ads`; extend the principle. When an autonomous agent ingests
    UGC unattended, the **recommended configuration is a read-only package profile**
-   (`FB_TOOL_PACKAGES_READONLY` / a `readonly` preset) so that *reading untrusted
+   (`FB_PACKAGES_READONLY` / a `readonly` preset) so that *reading untrusted
    content* and *destructive/spend action* are never both enabled in the same
    session. Separation belongs in configuration, not in the model's judgment.
 

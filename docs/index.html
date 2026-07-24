@@ -115,10 +115,26 @@
               },
               {
                 "@type": "Question",
+                "name": "What actually works today?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "The foundation — HTTP client, auth, write gating, transports and the tool registry — is implemented and tested, and the read-only core package ships four tools: facebook_whoami, facebook_list_pages, facebook_get_page and facebook_usage. Publishing, reading, insights, moderation, messaging and ads are designed and scheduled across the v0.2.0 to v0.5.0 milestones."
+                }
+              },
+              {
+                "@type": "Question",
                 "name": "When will it be published to npm?",
                 "acceptedAnswer": {
                   "@type": "Answer",
                   "text": "Not yet. facebook-mcp is pre-1.0 and in active development; the design is complete and documented while implementation is in progress. An npm package will ship with the first tagged release. Until then you run it from source."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How can I support the project?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "facebook-mcp is MIT-licensed and free, with no paid tier. It is maintained by one person in their own time, so donations are welcome through GitHub Sponsors (github.com/sponsors/IvanBBaev), Ko-fi (ko-fi.com/ivanbbaev) or Donatree (donatr.ee/ivanbbaev). Donating buys no priority support and no SLA; starring the repository or filing a good bug report helps just as much."
                 }
               },
               {
@@ -168,8 +184,21 @@
         <a href="#architecture">Architecture</a>
         <a href="#security">Security</a>
         <a href="#faq">FAQ</a>
+        <a href="#support">Support</a>
       </nav>
       <span class="ver-pill" title="Development status">pre-1.0 · not on npm</span>
+      <a
+        class="icon-btn sponsor-btn"
+        href="https://github.com/sponsors/IvanBBaev"
+        aria-label="Sponsor facebook-mcp on GitHub Sponsors"
+        title="Sponsor this project"
+        rel="noopener"
+      >
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 14.25.345 6.6a3.98 3.98 0 0 1 .12-5.5A3.98 3.98 0 0 1 6.03 1.1L8 3.06 9.97 1.1a3.98 3.98 0 0 1 5.565.001 3.98 3.98 0 0 1 .12 5.5Z" />
+        </svg>
+        <span class="sponsor-label">Sponsor</span>
+      </a>
       <a
         class="icon-btn"
         href="https://github.com/IvanBBaev/facebook-mcp"
@@ -205,6 +234,7 @@
           <a href="#architecture">Architecture</a>
           <a href="#security">Security</a>
           <a href="#faq">FAQ</a>
+          <a href="#support">Support the project</a>
         </nav>
       </aside>
 
@@ -317,10 +347,10 @@
 
           <div class="stat-row" role="list" aria-label="Project facts">
             <div class="stat" role="listitem">
-              <b>7</b><span>tool packages</span>
+              <b>4/35</b><span>tools live today</span>
             </div>
             <div class="stat" role="listitem">
-              <b>~27</b><span>default tools</span>
+              <b>7</b><span>planned tool packages</span>
             </div>
             <div class="stat" role="listitem">
               <b>4</b><span>layers · core&larr;api&larr;mcp&larr;tools</span>
@@ -340,7 +370,10 @@
           <h2>Three things it does, in one place</h2>
           <p class="lead">
             Your assistant calls a small, curated set of tools. Each one wraps a
-            real, verified Graph API capability — not every raw edge.
+            real, verified Graph API capability — not every raw edge. The three
+            below are <strong>designed and scheduled, not yet shipped</strong> —
+            they land in
+            <a href="https://github.com/IvanBBaev/facebook-mcp/milestones">v0.2.0 and v0.3.0</a>.
           </p>
 
           <div class="tabs" role="tablist" aria-label="Example capabilities">
@@ -483,7 +516,9 @@
           <p class="lead">
             Grouped into packages you can enable or restrict. The default profile
             is publishing, reading, insights, moderation and messages — with ads
-            deliberately left off.
+            deliberately left off. The <strong>Ships in</strong> column is the
+            honest part: only <code>core</code> is live today, the rest is
+            designed and scheduled.
           </p>
 
           <div class="table-wrap">
@@ -493,28 +528,75 @@
                   <th scope="col">Area</th>
                   <th scope="col">What it covers</th>
                   <th scope="col">Default</th>
+                  <th scope="col">Ships in</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
+                  <td><strong>Core &amp; diagnostics</strong></td>
+                  <td>Identity, Page listing, rate-limit usage, <code>doctor</code> pre-flight</td>
+                  <td><span class="pill ro">on</span></td>
+                  <td><span class="pill live">live</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Reading</strong></td>
+                  <td>Page &amp; post reads, Reels, reactions, cursor pagination</td>
+                  <td><span class="pill ro">on</span></td>
+                  <td>
+                    <span class="pill soon"
+                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/2"
+                        >v0.2.0</a
+                      ></span
+                    >
+                  </td>
+                </tr>
+                <tr>
                   <td><strong>Publishing</strong></td>
                   <td>Text, link, photo, video &amp; Reels posts; scheduling; edit &amp; delete</td>
                   <td><span class="pill wr">on</span></td>
+                  <td>
+                    <span class="pill soon"
+                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/2"
+                        >v0.2.0</a
+                      ></span
+                    >
+                  </td>
                 </tr>
                 <tr>
-                  <td><strong>Reading &amp; insights</strong></td>
-                  <td>Page &amp; post reads, cursor pagination, live-verified insight metrics</td>
-                  <td><span class="pill ro">on</span></td>
-                </tr>
-                <tr>
-                  <td><strong>Moderation</strong></td>
-                  <td>Comment hide / unhide / delete; message reads &amp; replies</td>
+                  <td><strong>Insights &amp; moderation</strong></td>
+                  <td>Live-verified metrics; comment hide / unhide / delete; blocking</td>
                   <td><span class="pill wr">on</span></td>
+                  <td>
+                    <span class="pill soon"
+                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/3"
+                        >v0.3.0</a
+                      ></span
+                    >
+                  </td>
                 </tr>
                 <tr>
-                  <td><strong>Ads</strong> <span style="color: var(--dim)">(1.1)</span></td>
+                  <td><strong>Messaging</strong></td>
+                  <td>Conversation reads and replies inside the 24-hour window</td>
+                  <td><span class="pill wr">on</span></td>
+                  <td>
+                    <span class="pill soon"
+                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/4"
+                        >v0.4.0</a
+                      ></span
+                    >
+                  </td>
+                </tr>
+                <tr>
+                  <td><strong>Ads</strong></td>
                   <td>Campaign / ad-set / ad reads plus status &amp; budget control</td>
-                  <td><span class="pill" style="color: var(--dim); border: 1px solid var(--hair)">opt-in</span></td>
+                  <td><span class="pill soon">opt-in</span></td>
+                  <td>
+                    <span class="pill soon"
+                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/5"
+                        >v0.5.0</a
+                      ></span
+                    >
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -522,8 +604,16 @@
 
           <div class="cards" style="margin-top: 22px">
             <div class="card">
+              <div class="ico" aria-hidden="true">&#129517;</div>
+              <h3>Core &amp; diagnostics <span class="pill live">live</span></h3>
+              <p>
+                Classify your token, list the Pages you administer, read Graph
+                rate-limit usage and run <code>doctor</code> before you connect.
+              </p>
+            </div>
+            <div class="card">
               <div class="ico" aria-hidden="true">&#128227;</div>
-              <h3>Publishing</h3>
+              <h3>Publishing <span class="pill soon">v0.2.0</span></h3>
               <p>
                 Compose and schedule posts across every media type, then edit or
                 delete them — each write previewed before it runs.
@@ -531,7 +621,7 @@
             </div>
             <div class="card">
               <div class="ico" aria-hidden="true">&#128202;</div>
-              <h3>Reading &amp; insights</h3>
+              <h3>Reading &amp; insights <span class="pill soon">v0.2–0.3</span></h3>
               <p>
                 Pull Page and post data and live-verified insight metrics with
                 cursor pagination that never persists tokens.
@@ -539,7 +629,7 @@
             </div>
             <div class="card">
               <div class="ico" aria-hidden="true">&#128737;</div>
-              <h3>Moderation &amp; messages</h3>
+              <h3>Moderation &amp; messages <span class="pill soon">v0.3–0.4</span></h3>
               <p>
                 Hide, unhide or delete comments and read and reply to Page
                 conversations, keeping your community tidy.
@@ -547,7 +637,7 @@
             </div>
             <div class="card">
               <div class="ico" aria-hidden="true">&#128200;</div>
-              <h3>Ads — opt-in</h3>
+              <h3>Ads — opt-in <span class="pill soon">v0.5.0</span></h3>
               <p>
                 Read campaigns and control status and budget. Off by default
                 (Meta ships an official ads MCP); enable it deliberately.
@@ -961,12 +1051,25 @@ export FB_APP_SECRET=…   # appsecret_proof</code></p>
             read-only is recommended.
           </p>
 
+          <h3>What actually works today?</h3>
+          <p>
+            The foundation — HTTP client, auth, write gating, transports, tool
+            registry — is implemented and tested, and the read-only
+            <code>core</code> package ships four tools:
+            <code>facebook_whoami</code>, <code>facebook_list_pages</code>,
+            <code>facebook_get_page</code> and <code>facebook_usage</code>.
+            Everything else on this page is designed and scheduled; see the
+            <a href="https://github.com/users/IvanBBaev/projects/3" rel="noopener">roadmap board</a>
+            for what lands when.
+          </p>
+
           <h3>When will it be published to npm?</h3>
           <p>
             Not yet. facebook-mcp is pre-1.0 and in active development — the design
             is complete and documented while implementation is in progress. An npm
             package will ship with the first tagged release; until then you run it
-            from source.
+            from source. Progress is tracked in the
+            <a href="https://github.com/IvanBBaev/facebook-mcp/milestones" rel="noopener">milestones</a>.
           </p>
 
           <h3>Which MCP clients does it work with?</h3>
@@ -975,6 +1078,74 @@ export FB_APP_SECRET=…   # appsecret_proof</code></p>
             Claude Code, VS Code and Cursor. An optional loopback-only Streamable
             HTTP transport is available for advanced setups.
           </p>
+        </section>
+
+        <!-- ============ Support the project ============ -->
+        <section id="support">
+          <span class="eyebrow">Keep it going</span>
+          <h2>Support the project</h2>
+          <p class="lead">
+            facebook-mcp is MIT-licensed, free, collects nothing and is built by
+            one maintainer in their own time. There is no paid tier and never
+            will be — if it saves you an afternoon, a tip is what funds the next
+            milestone.
+          </p>
+
+          <div class="cards">
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#128153;</div>
+              <h3>GitHub Sponsors</h3>
+              <p>
+                One-off or recurring, no platform fee, and it shows up on the
+                repository. The best option if you already have a GitHub account.
+              </p>
+              <p>
+                <a class="btn sponsor" href="https://github.com/sponsors/IvanBBaev" rel="noopener"
+                  >Sponsor on GitHub</a
+                >
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#9749;</div>
+              <h3>Ko-fi</h3>
+              <p>
+                A quick one-off tip, card or PayPal, no account needed. The
+                fallback for anyone who does not use GitHub.
+              </p>
+              <p>
+                <a class="btn kofi" href="https://ko-fi.com/ivanbbaev" rel="noopener"
+                  >Buy me a coffee</a
+                >
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico" aria-hidden="true">&#127793;</div>
+              <h3>Donatree</h3>
+              <p>
+                A single page collecting every donation method in one place —
+                useful if you prefer a local payment option.
+              </p>
+              <p>
+                <a class="btn tree" href="https://donatr.ee/ivanbbaev/" rel="noopener"
+                  >Open Donatree</a
+                >
+              </p>
+            </div>
+          </div>
+
+          <div class="callout" style="margin-top: 26px">
+            <span class="c-ico" aria-hidden="true">&#128172;</span>
+            <p>
+              <strong>Not in a position to donate?</strong> That is completely
+              fine — starring the
+              <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">repository</a>,
+              filing a good bug report, or telling another Page admin about it
+              helps just as much. Support questions go through
+              <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/SUPPORT.md" rel="noopener"
+                >SUPPORT.md</a
+              >; donating buys no priority and no SLA.
+            </p>
+          </div>
         </section>
       </main>
     </div>
@@ -990,7 +1161,16 @@ export FB_APP_SECRET=…   # appsecret_proof</code></p>
           &nbsp;·&nbsp;
           <a href="https://github.com/IvanBBaev/facebook-mcp#readme" rel="noopener">README</a>
           &nbsp;·&nbsp;
+          <a href="https://github.com/users/IvanBBaev/projects/3" rel="noopener">Roadmap</a>
+          &nbsp;·&nbsp;
           <a href="https://modelcontextprotocol.io" rel="noopener">About MCP</a>
+        </nav>
+        <nav aria-label="Support the maintainer">
+          <a href="https://github.com/sponsors/IvanBBaev" rel="noopener">Sponsor</a>
+          &nbsp;·&nbsp;
+          <a href="https://ko-fi.com/ivanbbaev" rel="noopener">Ko-fi</a>
+          &nbsp;·&nbsp;
+          <a href="https://donatr.ee/ivanbbaev/" rel="noopener">Donatree</a>
         </nav>
       </div>
       <p class="disclaimer">
