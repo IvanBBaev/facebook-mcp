@@ -75,7 +75,9 @@ D01–D07 in doc 11's Wave 0).
 - Test harness: `withEnv`, `withFetch` + body-capture helper, fetch-thrower CI
   network fence (C13), manifest snapshot test, adversarial redaction suite,
   **spawn-level stdout-purity test** (C12, CC-CFG-1), retry-decision table
-  test, error-matrix snapshot, coverage floors 70/60/75 + ratchet, CI matrix
+  test, error-matrix snapshot, coverage floors + ratchet (proposed 70/60/75;
+  **shipped at 95 lines / 85 branches / 95 functions / 95 statements** in
+  `.c8rc.json` after the ratchet), CI matrix
   Node 22/24/26 + Windows leg, secret scanning + push protection, CodeQL,
   dependabot, SHA-pinned actions.
 - Doctor v1: token debug, permission×package matrix (CC-AUTH-4), active
@@ -116,7 +118,9 @@ period-boundary behavior recorded (CC-INS-5 ✎).
 - `api/posts-write.ts`, `api/media.ts` (photo, multi-photo with child cleanup
   — CC-MEDIA-10, resumable video with in-memory session state — CC-MEDIA-1/2/3,
   Reels state machine — CC-MEDIA-8/9), `facebook_get_video_status`
-  (CC-MEDIA-7), scheduling with ISO-8601-offset-only input (CC-SCHED-1/2/3).
+  (CC-MEDIA-7 — **shipped**: API function and tool both landed, in the
+  write-gated `posts` package), scheduling with ISO-8601-offset-only input
+  (CC-SCHED-1/2/3).
 - Tools: `posts` package with validating-dry-run previews (C4), plan_id
   binding on delete, scheduled lifecycle (publish-now/reschedule/cancel via
   `update_post` — CC-SCHED-5), annotation quadruples explicit (A11).
@@ -139,8 +143,14 @@ recorded (CC-PUB-9 ✎); sweeper leaves the Page empty.
 **Entry:** Phase 2 gate green; Messenger changelog re-pulled (CC-LIFE-5).
 
 - `api/comments.ts`, `api/messaging.ts`; private-reply one-shot/7-day and
-  24h-window semantics in error mapping only — no client-side windows
-  (CC-MOD-2, CC-MSG-1); tag sends never silently substituted.
+  24h-window semantics (CC-MOD-2, CC-MSG-1); tag sends never silently
+  substituted. **Shipped stricter than proposed:** the plan said "error mapping
+  only — no client-side windows", but both windows are now checked client-side
+  *before* anything leaves the process — a >7-day comment is refused as
+  `window_closed` and a closed messaging window is refused on every call,
+  including an `apply` that follows a still-valid preview. Spending the single
+  private reply, or messaging a person outside the window, is not worth a round
+  trip to find out.
 - Tools: `moderation` (bulk `ids ≤50` with per-ID outcomes — CC-MOD-5,
   hide/unhide + block/unblock symmetry — CC-MOD-7, apply-by-default per-package
   write mode — C4) + `messages` (trio negative-space descriptions — CC-MSG-4,
@@ -155,7 +165,8 @@ recorded (CC-PUB-9 ✎); sweeper leaves the Page empty.
 **Exit gate:** live smoke on a test-Page post's comments (reply, hide,
 unhide, delete); conversation list + read; reply-depth behavior recorded
 (CC-MOD-4 ✎). `send_message`/`private_reply`/`block_user` are marked
-live-unverifiable — operator-window runbook executed once manually (QA).
+live-unverifiable — operator-window runbook executed once manually (QA); the
+runbook lives at [`../runbooks/operator-window.md`](../runbooks/operator-window.md).
 
 ## Phase 4 — Distribution
 
@@ -171,6 +182,13 @@ author using Phases 1–3 weekly on the real Page (PM minor).
   provenance (repo public first), `.mcpb` + SHA-256 checksums, `mcpName` in
   the first publish, `server.json` + `mcp-publisher` (github-oidc, pinned
   binary), `.claude-plugin/` manifests — all from the metadata SSOT.
+  **Shipped stricter than proposed:** the pinned `mcp-publisher` is verified
+  against a SHA-256 committed to *this* repo rather than against the checksum
+  file published beside the binary (a checksum fetched over the channel it
+  polices proves nothing), and the `.mcpb` bundle carries a build-provenance
+  attestation that is re-verified with `gh attestation verify` before the asset
+  is attached to the Release — so both shipped artifacts, not just the npm
+  tarball, are traceable to this repository's workflow.
 
 **Exit gate:** `npx -y <pkg>` cold-start works in Claude Desktop/Code on
 macOS + Windows; a non-author completes onboarding in ≤20 min (PM #3).

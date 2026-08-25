@@ -17,12 +17,18 @@ jobs:
   analyze:
     runs-on: ubuntu-latest
     permissions:
+      actions: read # CodeQL reads the workflow run/artifact metadata it uploads against
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      # init and analyze are two entry points of one product and must always
+      # resolve to the SAME version — CodeQL aborts with "Loaded a configuration
+      # file for version X, but running version Y" otherwise. Bump both SHAs
+      # together; .github/dependabot.yml groups them into a single PR for that
+      # reason.
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           languages: javascript-typescript
           queries: security-and-quality
-      - uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7

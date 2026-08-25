@@ -162,11 +162,18 @@ function stripValue(value: unknown, ancestors: WeakSet<object>): unknown {
 // Structure-aware truncation
 // ---------------------------------------------------------------------------
 
-/** A reducible array slot: its current contents plus a setter into its parent. */
+/**
+ * A reducible array slot. Trimming happens IN PLACE (the array object keeps its
+ * identity) rather than by writing a fresh `slice` into the parent, because the
+ * child sites collected from inside it hold setters that close over this exact
+ * object: replacing it would detach every one of them, so a later string drop
+ * inside a RETAINED element would write into an orphan and change nothing in the
+ * rendered output. `original` is the snapshot the prefix search restores from.
+ */
 interface ArraySite {
-  readonly arr: readonly unknown[];
+  readonly arr: unknown[];
+  readonly original: readonly unknown[];
   readonly size: number;
-  readonly set: (v: unknown) => void;
 }
 
 /** A reducible large-string slot: its length plus a setter into its parent. */
@@ -221,12 +228,17 @@ function collectSites(
   seen.add(value);
 
   if (Array.isArray(value)) {
-    arrays.push({ arr: value, size: measure(value), set });
-    value.forEach((item, index) => {
+    const arr = value as unknown[];
+    arrays.push({ arr, original: arr.slice(), size: measure(arr) });
+    arr.forEach((item, index) => {
       collectSites(
         item,
         (nv) => {
-          value[index] = nv;
+          // The prefix search shortens this array in place, so an index past the
+          // retained prefix no longer exists. Writing to it would re-grow the array
+          // with a hole — `null` in the rendered JSON, and a longer result than the
+          // budget the drop was meant to buy.
+          if (index < arr.length) arr[index] = nv;
         },
         seen,
         arrays,
@@ -250,6 +262,17 @@ function collectSites(
   }
 }
 
+/**
+ * Reset `arr` in place to the first `n` elements of its snapshot. In place, not a
+ * fresh array, so the setters that child sites closed over keep pointing at the
+ * live node (see {@link ArraySite}); restoring from `original` is what lets the
+ * prefix search walk back up after overshooting.
+ */
+function setPrefix(arr: unknown[], original: readonly unknown[], n: number): void {
+  arr.length = 0;
+  for (let i = 0; i < n; i += 1) arr.push(original[i]);
+}
+
 function reduceToBudget(value: unknown, budget: number): Reduction {
   let root = value;
   const arrays: ArraySite[] = [];
@@ -271,13 +294,14 @@ function reduceToBudget(value: unknown, budget: number): Reduction {
   arrays.sort((a, b) => b.size - a.size);
   for (const site of arrays) {
     if (measure(root) <= budget) break;
-    const arr = site.arr;
+    const { arr, original } = site;
+    const before = measure(root);
     let lo = 0;
-    let hi = arr.length;
+    let hi = original.length;
     let best = 0;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      site.set(arr.slice(0, mid));
+      setPrefix(arr, original, mid);
       if (measure(root) <= budget) {
         best = mid;
         lo = mid + 1;
@@ -285,8 +309,12 @@ function reduceToBudget(value: unknown, budget: number): Reduction {
         hi = mid - 1;
       }
     }
-    site.set(arr.slice(0, best));
-    items += arr.length - best;
+    setPrefix(arr, original, best);
+    // Sorting biggest-first means an outer array is trimmed before the arrays
+    // nested in its tail, and those are no longer part of `root` at all. Trimming
+    // one is harmless but counting it would inflate the note with items the caller
+    // never lost here — so only a reduction the rendered root actually felt counts.
+    if (original.length > best && measure(root) < before) items += original.length - best;
   }
 
   // Lever 2: drop oversized string leaves (never a mid-string cut).
@@ -294,8 +322,11 @@ function reduceToBudget(value: unknown, budget: number): Reduction {
     strings.sort((a, b) => b.len - a.len);
     for (const site of strings) {
       if (measure(root) <= budget) break;
+      const before = measure(root);
       site.set(`[dropped ${site.len} chars]`);
-      fields += 1;
+      // Same honesty guard as above: a string that lived in a dropped array tail is
+      // already gone from the output, so replacing it is a no-op worth no mention.
+      if (measure(root) < before) fields += 1;
     }
   }
 

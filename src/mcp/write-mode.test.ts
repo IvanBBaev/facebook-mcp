@@ -90,6 +90,61 @@ test('authorize: safe/reversible honor the FB_WRITE_MODE default and an explicit
   assert.equal(PLAN_TTL_MS, 5 * 60 * 1000);
 });
 
+test('authorize: requirePlanId gives a low tier the two-step gate without raising it', () => {
+  const base = { tier: 'reversible', requirePlanId: true } as const;
+
+  // The env default no longer covers the call, and neither does apply:true alone.
+  assert.equal(authorize({ ...base, defaultWriteMode: 'apply' }).mode, 'plan');
+  assert.equal(
+    authorize({ ...base, apply: true, defaultWriteMode: 'apply' }).mode,
+    'plan',
+  );
+  assert.equal(
+    authorize({ ...base, apply: true, planId: 'p1', defaultWriteMode: 'plan' }).mode,
+    'apply',
+  );
+  // An empty plan_id is not a plan_id.
+  assert.equal(
+    authorize({ ...base, apply: true, planId: '', defaultWriteMode: 'apply' }).mode,
+    'plan',
+  );
+  // requirePlanId:false is the same as omitting it — no accidental escalation.
+  assert.equal(
+    authorize({ tier: 'reversible', requirePlanId: false, defaultWriteMode: 'apply' })
+      .mode,
+    'apply',
+  );
+});
+
+test('requirePlanId does not summon the out-of-band confirmer — that stays tier-driven', async () => {
+  let confirmations = 0;
+  const approver: Confirmer = {
+    confirm: () => {
+      confirmations += 1;
+      return Promise.resolve({ confirmed: true, method: 'operator_token' as const });
+    },
+  };
+  const { gate } = makeGate({ confirmer: approver });
+
+  const action = makeAction({
+    tool: 'facebook_create_post',
+    tier: 'reversible',
+    requirePlanId: true,
+    perform: () => Promise.resolve({ id: 'published' }),
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const applied = await gate.execute({
+    ...action,
+    apply: true,
+    planId: planned.preview.planId,
+  });
+
+  assert.ok(applied.kind === 'result' && applied.result.applied);
+  assert.equal(confirmations, 0, 'publishing is plan-bound, not confirmation-bound');
+});
+
 // --- plan → apply happy path (plan_id binding) ------------------------------
 
 test('plan then apply performs the mutation exactly once when bound to its plan_id', async () => {
@@ -290,6 +345,169 @@ test('an apply whose params differ from the plan is rejected as plan_mismatch', 
   );
 });
 
+test('an apply against a different Page than the plan is rejected as plan_mismatch', async () => {
+  // The Page is bound identity, not a parameter: `params` is byte-identical here
+  // and only the resolved Page differs, which is exactly the cross-talk the
+  // plan_id binding exists to stop (same tool, same tier, same payload, wrong
+  // audience). `profile` is a per-call argument the model picks, so nothing else
+  // in the apply call would catch this.
+  const { gate } = makeGate();
+  let performed = 0;
+  const base = makeAction({
+    tool: 'facebook_create_post',
+    tier: 'reversible',
+    requirePlanId: true,
+    pageId: '111',
+    params: { message: 'Hi', published: true },
+    perform: (): Promise<string> => {
+      performed += 1;
+      return Promise.resolve('x');
+    },
+  });
+  const planned = await gate.execute(base);
+  assert.ok(planned.kind === 'preview');
+
+  await assert.rejects(
+    gate.execute({
+      ...base,
+      pageId: '222',
+      apply: true,
+      planId: planned.preview.planId,
+    }),
+    (err: unknown) => err instanceof WriteGateError && err.code === 'plan_mismatch',
+  );
+  assert.equal(performed, 0, 'a plan minted for another Page must not publish');
+
+  // The plan is untouched by the rejection: the original Page can still apply it.
+  const applied = await gate.execute({
+    ...base,
+    apply: true,
+    planId: planned.preview.planId,
+  });
+  assert.ok(applied.kind === 'result');
+  assert.equal(applied.result.applied, true);
+  assert.equal(performed, 1);
+});
+
+// --- single-use under concurrency (CC-MCP-3) --------------------------------
+
+test('two concurrent applies bound to one plan_id perform exactly once', async () => {
+  // The realistic shape of this: an MCP client puts several tools/call requests
+  // in flight at once. Both applies resolve the same plan before either reaches
+  // the mutation, so a plan claimed only after `perform` would authorize two.
+  const { gate, journal } = makeGate();
+  let performed = 0;
+  let releasePerform = (): void => {};
+  const held = new Promise<void>((resolve) => {
+    releasePerform = resolve;
+  });
+  const action = makeAction({
+    tool: 'facebook_create_ad_set',
+    tier: 'spend',
+    params: { dailyBudget: 1000 },
+    perform: async (): Promise<string> => {
+      performed += 1;
+      await held; // keep the first apply inside perform while the second arrives
+      return 'adset-1';
+    },
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const { planId } = planned.preview;
+
+  const first = gate.execute({ ...action, apply: true, planId });
+  const second = gate.execute({ ...action, apply: true, planId });
+  releasePerform();
+
+  const results = await Promise.allSettled([first, second]);
+  const fulfilled = results.filter((r) => r.status === 'fulfilled');
+  const rejected = results.filter((r) => r.status === 'rejected');
+
+  assert.equal(performed, 1, 'one authorization must never fund two mutations');
+  assert.equal(fulfilled.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.ok(
+    rejected[0]?.status === 'rejected' &&
+      rejected[0].reason instanceof WriteGateError &&
+      rejected[0].reason.code === 'plan_not_found',
+    'the loser of the race must be refused, not queued',
+  );
+  assert.equal(journal.entries.length, 1);
+});
+
+test('a denied confirmation hands the plan back so the same preview can be retried', async () => {
+  // Claiming the plan up front must not turn a fixable refusal into a re-plan:
+  // a wrong or missing confirm_token is the operator's to correct, and the
+  // preview they approved is still valid.
+  let approve = false;
+  const confirmer: Confirmer = {
+    confirm: () =>
+      Promise.resolve(
+        approve
+          ? ({ confirmed: true, method: 'operator_token' } as const)
+          : ({ confirmed: false, method: 'denied' } as const),
+      ),
+  };
+  const { gate } = makeGate({ confirmer });
+  let performed = 0;
+  const action = makeAction({
+    tier: 'irreversible',
+    perform: (): Promise<string> => {
+      performed += 1;
+      return Promise.resolve('x');
+    },
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const { planId } = planned.preview;
+
+  await assert.rejects(
+    gate.execute({ ...action, apply: true, planId }),
+    (err: unknown) => err instanceof WriteGateError && err.code === 'confirmation_denied',
+  );
+  assert.equal(performed, 0);
+
+  approve = true;
+  const applied = await gate.execute({ ...action, apply: true, planId });
+  assert.ok(applied.kind === 'result');
+  assert.equal(applied.result.applied, true);
+  assert.equal(performed, 1);
+});
+
+test('an ambiguous perform failure spends the plan — a retry cannot duplicate the write', async () => {
+  // The mutation may well have landed (socket written, response lost). Handing
+  // the plan back here would invite exactly the duplicate the journal exists to
+  // let an operator reconcile.
+  const { gate, journal } = makeGate();
+  let performed = 0;
+  const action = makeAction({
+    tier: 'irreversible',
+    perform: (): Promise<string> => {
+      performed += 1;
+      return Promise.reject(new Error('socket hang up'));
+    },
+    classifyOutcome: (): 'attempted' => 'attempted',
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const { planId } = planned.preview;
+
+  await assert.rejects(
+    gate.execute({ ...action, apply: true, planId }),
+    /socket hang up/,
+  );
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+
+  await assert.rejects(
+    gate.execute({ ...action, apply: true, planId }),
+    (err: unknown) => err instanceof WriteGateError && err.code === 'plan_not_found',
+  );
+  assert.equal(performed, 1, 'the ambiguous attempt must not be silently repeated');
+});
+
 // --- out-of-band confirmation (B1 / F15 seam) -------------------------------
 
 test('high-tier apply consults the confirmer and refuses when denied (B1)', async () => {
@@ -347,6 +565,112 @@ test('high-tier apply proceeds and passes tier/summary to the confirmer when app
   assert.equal(requests.length, 1);
   assert.equal(requests[0]?.tier, 'irreversible');
   assert.equal(requests[0]?.summary, 'Delete post 777');
+});
+
+// --- per-call confirm_token threading (D12) ---------------------------------
+
+// Placeholder operator token — never a real secret.
+const CONFIRM_TOKEN = 'confirm-token-PLACEHOLDER';
+
+/** A confirmer that approves and records both arguments it was called with. */
+function recordingConfirmer(): {
+  confirmer: Confirmer;
+  calls: { request: ConfirmationRequest; operatorToken: string | undefined }[];
+} {
+  const calls: { request: ConfirmationRequest; operatorToken: string | undefined }[] = [];
+  return {
+    calls,
+    confirmer: {
+      confirm: (request: ConfirmationRequest, operatorToken?: string) => {
+        calls.push({ request, operatorToken });
+        return Promise.resolve({ confirmed: true, method: 'operator_token' as const });
+      },
+    },
+  };
+}
+
+test('a gated apply hands confirm_token to the confirmer as a SEPARATE argument (D12)', async () => {
+  const { confirmer, calls } = recordingConfirmer();
+  const { gate } = makeGate({ confirmer });
+  const action = makeAction({
+    tier: 'irreversible',
+    summary: 'Delete post 123',
+    confirmToken: CONFIRM_TOKEN,
+    perform: (): Promise<string> => Promise.resolve('gone'),
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const applied = await gate.execute({
+    ...action,
+    apply: true,
+    planId: planned.preview.planId,
+  });
+  assert.ok(applied.kind === 'result');
+  assert.equal(applied.result.applied, true);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.operatorToken, CONFIRM_TOKEN);
+  // The ConfirmationRequest is forwarded verbatim to the MCP client by the
+  // elicitation path, so the secret must not travel inside it — not under any
+  // key, not embedded in the summary.
+  const request = calls[0]?.request;
+  assert.ok(request !== undefined);
+  assert.ok(
+    !JSON.stringify(request).includes(CONFIRM_TOKEN),
+    'the confirmation request must not carry the operator token',
+  );
+});
+
+test('an apply without a confirm_token passes undefined as the second argument (D12)', async () => {
+  const { confirmer, calls } = recordingConfirmer();
+  const { gate } = makeGate({ confirmer });
+  const action = makeAction({
+    tier: 'spend',
+    tool: 'facebook_update_ad_budget',
+    params: { adSetId: 'a1', dailyBudget: 5000 },
+    summary: 'Raise daily budget to 5000',
+    perform: (): Promise<string> => Promise.resolve('ok'),
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  await gate.execute({ ...action, apply: true, planId: planned.preview.planId });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.operatorToken, undefined);
+});
+
+test('the per-call confirm_token is never written to the journal (D12)', async () => {
+  const { confirmer } = recordingConfirmer();
+  const { gate, journal } = makeGate({ confirmer });
+  const action = makeAction({
+    tier: 'spend',
+    tool: 'facebook_update_ad_budget',
+    params: { adSetId: 'a1', dailyBudget: 5000 },
+    summary: 'Raise daily budget to 5000',
+    metadata: { adSetId: 'a1' },
+    confirmToken: CONFIRM_TOKEN,
+    perform: (): Promise<string> => Promise.resolve('ok'),
+  });
+
+  const planned = await gate.execute(action);
+  assert.ok(planned.kind === 'preview');
+  const applied = await gate.execute({
+    ...action,
+    apply: true,
+    planId: planned.preview.planId,
+  });
+  assert.ok(applied.kind === 'result');
+  assert.equal(applied.result.applied, true);
+
+  assert.equal(journal.entries.length, 1);
+  for (const entry of journal.entries) {
+    assert.ok(
+      !JSON.stringify(entry).includes(CONFIRM_TOKEN),
+      'the journal is an audit trail, not a secret store',
+    );
+  }
 });
 
 // --- journal outcomes on perform failure ------------------------------------

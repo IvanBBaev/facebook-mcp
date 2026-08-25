@@ -4,8 +4,9 @@
 // "Package `core` (always on)").
 //
 //   * facebook_whoami     — classify the configured token (type / validity /
-//                           scopes / expiry) + report server + API version.
-//                           Server-owned envelope (structuredContent, CC-MCP-7).
+//                           scopes / expiry) + report server, MCP SDK and API
+//                           version. Server-owned envelope (structuredContent,
+//                           CC-MCP-7).
 //   * facebook_list_pages — the Pages the operator administers (`/me/accounts`):
 //                           id, name, category, tasks, and token presence.
 //   * facebook_get_page   — metadata for one resolved Page (profile-scoped).
@@ -16,9 +17,9 @@
 // (debugToken, parseUsageHeaders) and the `mcp` authoring/shaping helpers
 // (defineTool, shapeResult, shapeEnvelope). It never reaches into a sibling
 // tool package and depends only on the injected {@link ToolContext} — no
-// globals, no AsyncLocalStorage (C14). The server version is INJECTED via
-// `opts.serverVersion` rather than read from `package.json`, which would sit
-// outside `rootDir` and break the build.
+// globals, no AsyncLocalStorage (C14). The server and MCP SDK versions are
+// INJECTED via `opts` rather than read from `package.json` / `node_modules`,
+// which would sit outside `rootDir` and break the build.
 
 import { z } from 'zod';
 
@@ -84,6 +85,7 @@ const whoamiOutputSchema = z.object({
     name: z.string(),
     version: z.string(),
     apiVersion: z.string(),
+    sdkVersion: z.string(),
   }),
   token: z.object({
     type: z.string(),
@@ -100,13 +102,24 @@ const whoamiOutputSchema = z.object({
 });
 
 /**
+ * The version trio the whoami envelope reports. Both values are INJECTED by the
+ * bootstrap (see {@link createCorePackage}); this layer resolves neither.
+ */
+interface CoreVersions {
+  /** This server's own version, read from `package.json` at runtime. */
+  readonly serverVersion: string;
+  /** The `@modelcontextprotocol/sdk` version this install actually loaded. */
+  readonly sdkVersion: string;
+}
+
+/**
  * Build the whoami envelope from the classified token. `neverExpiring` is only
  * meaningful for a valid token whose `expiresAt` is absent (Graph `expires_at`
  * 0 ⇒ undefined — the System-User signature). `error` is set on the token-less
  * / debug-failure paths so the caller still gets a schema-valid envelope.
  */
 function buildWhoamiPayload(
-  serverVersion: string,
+  versions: CoreVersions,
   settings: Settings,
   info: DebugTokenInfo,
   error?: string,
@@ -114,8 +127,9 @@ function buildWhoamiPayload(
   return {
     server: {
       name: 'facebook-mcp',
-      version: serverVersion,
+      version: versions.serverVersion,
       apiVersion: settings.apiVersion,
+      sdkVersion: versions.sdkVersion,
     },
     token: {
       type: info.type,
@@ -203,19 +217,20 @@ function buildUsagePayload(snapshot: UsageSnapshot): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the always-on `core` package. `opts.serverVersion` is injected (not
- * read from `package.json`) so the module stays inside `rootDir`. All four
+ * Build the always-on `core` package. Both versions in `opts` are injected (not
+ * read from `package.json`, not resolved from `node_modules`) so the module
+ * stays inside `rootDir` and this layer keeps no filesystem dependency. All four
  * tools are read-only; `enabledByDefault` is `true` and the registry forces
  * `core` on regardless of selection.
  */
-export function createCorePackage(opts: { serverVersion: string }): PackageSpec {
+export function createCorePackage(opts: CoreVersions): PackageSpec {
   const whoami = defineTool({
     name: 'facebook_whoami',
     title: 'Who am I',
     description:
       'Report the identity behind the configured token (type, validity, granted ' +
-      'permissions, expiry) plus the server and pinned Graph API version. Run this ' +
-      'first to diagnose auth problems.',
+      'permissions, expiry) plus the server, MCP SDK and pinned Graph API version. ' +
+      'Run this first to diagnose auth problems.',
     inputSchema: z.object({}),
     outputSchema: whoamiOutputSchema,
     annotations: READ_ONLY,
@@ -226,7 +241,7 @@ export function createCorePackage(opts: { serverVersion: string }): PackageSpec 
       if (runtime === undefined) {
         return shapeEnvelope(
           buildWhoamiPayload(
-            opts.serverVersion,
+            opts,
             settings,
             UNKNOWN_TOKEN,
             'No access token configured — set FB_ACCESS_TOKEN, FB_SYSTEM_TOKEN, or FB_PAGE_TOKEN.',
@@ -240,16 +255,13 @@ export function createCorePackage(opts: { serverVersion: string }): PackageSpec 
           accessToken: debugCredential(settings, runtime),
           signal: ctx.signal,
         });
-        return shapeEnvelope(
-          buildWhoamiPayload(opts.serverVersion, settings, info),
-          shape,
-        );
+        return shapeEnvelope(buildWhoamiPayload(opts, settings, info), shape);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return shapeEnvelope(
-          buildWhoamiPayload(opts.serverVersion, settings, UNKNOWN_TOKEN, message),
-          { ...shape, isError: true },
-        );
+        return shapeEnvelope(buildWhoamiPayload(opts, settings, UNKNOWN_TOKEN, message), {
+          ...shape,
+          isError: true,
+        });
       }
     },
   });

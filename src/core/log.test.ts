@@ -91,6 +91,62 @@ test('a bigint field is serialized (never throws)', () => {
   assert.equal(rec.n, '10');
 });
 
+test('an unserializable record falls back to a minimal line instead of throwing', () => {
+  const { lines, logger, clock } = harness();
+  // A node pointing back at its parent is what real payloads look like; the
+  // redactor passes the cycle through, so JSON.stringify throws on it.
+  const node: Record<string, unknown> = { name: 'response' };
+  node.self = node;
+
+  assert.doesNotThrow(() => logger.error('upload failed', { node }));
+
+  assert.equal(lines.length, 1, 'the log line must not be lost');
+  const line = lines[0]!;
+  assert.ok(line.endsWith('\n'));
+  const rec = JSON.parse(line) as Record<string, unknown>;
+  assert.equal(rec.msg, 'upload failed');
+  assert.equal(rec.level, 'error');
+  assert.equal(rec.time, clock.now());
+  assert.equal(rec.logError, 'record serialization failed');
+  // The offending field is dropped whole, so nothing of it can be partially
+  // serialized into the fallback line.
+  assert.equal('node' in rec, false);
+});
+
+test('the serialization fallback is not a redaction bypass (C3)', () => {
+  // The fallback used to re-emit the raw `msg` argument instead of a redacted
+  // one, which made it the single path in the logger that skipped the C3
+  // choke-point. It takes two independent things to trigger — an unserializable
+  // field AND a secret in the message — so nothing in the codebase exercises it
+  // today; that is precisely why it needs a test rather than a code reading.
+  //
+  // Reaching it with the REAL redactor is deliberate: the fake one passes a
+  // cycle straight through, but `createRedactor` already breaks cycles, clones
+  // Dates and leaves bigints to the replacer. What it cannot neutralize is an
+  // own enumerable `toJSON` — a function value is copied by reference — so a
+  // payload whose own serializer throws is what actually still reaches the
+  // catch in production.
+  const lines: string[] = [];
+  const secret = 'EAAsecret-token-value-000000';
+  const clock = createFakeClock(1_700_000_000_000);
+  const redactor = createRedactor({ secrets: [secret] });
+  const logger = createLogger({ clock, redactor, write: (l) => lines.push(l) });
+
+  const payload = {
+    id: 'response',
+    toJSON(): never {
+      throw new Error('this value refuses to serialize');
+    },
+  };
+  logger.error(`token exchange failed for ${secret}`, { payload });
+
+  const line = lines[0]!;
+  const rec = JSON.parse(line) as Record<string, unknown>;
+  assert.equal(rec.logError, 'record serialization failed', 'the fallback ran');
+  assert.ok(!line.includes(secret), 'the secret must not reach the sink');
+  assert.equal(rec.msg, 'token exchange failed for [REDACTED]');
+});
+
 test('stderr-only: default logger writes to stderr and NEVER stdout (CC-CFG-1)', () => {
   const clock = createFakeClock(42);
   const redactor = createFakeRedactor();

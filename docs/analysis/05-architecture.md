@@ -7,16 +7,16 @@ says "as in servicenow-mcp", the pattern is described in
 
 ## Stack
 
-- **TypeScript ESM**, target ES2022, module Node16, `strict` +
-  `noUncheckedIndexedAccess`. Node ≥ 20 (`.nvmrc` 22), `engine-strict`.
+- **TypeScript ESM**, target ES2023, module/moduleResolution NodeNext, `strict` +
+  `noUncheckedIndexedAccess`. Node ≥ 22 (`.nvmrc` 22), `engine-strict`.
 - **Runtime deps (3):** `@modelcontextprotocol/sdk` ^1.29, `zod` ^3, `dotenv`.
   SDK v2 migration deferred until GA (codemod path exists).
 - **Tests:** `node:test` + `node:assert/strict` against built output; `c8`
   coverage gates; `fast-check` for property tests where useful.
 - **Lint/format:** ESLint 9 flat config + typescript-eslint 8 (type-checked),
   `no-floating-promises: error`, prettier.
-- Entry: `src/index.ts` → `build/`; CommonJS `bin/*.cjs` launcher with a Node
-  version guard.
+- Entry: `src/index.ts` → `build/`; ESM `bin/facebook-mcp.mjs` launcher with a
+  Node version guard.
 
 ## Layering (lint-enforced)
 
@@ -165,7 +165,9 @@ never import `core/http` directly.
    **resumable-session state is in-memory** ("resume within one server
    lifetime") — durable state via MCP Tasks is deferred. Long uploads emit
    progress via a `progressToken`; video creates return a `video_id` +
-   `processing` state polled by `facebook_get_video_status`.
+   `processing` state polled by `facebook_get_video_status` (**roadmap — not
+   shipped**: `getVideoStatus` exists in `src/api/media-video.ts` but no
+   `ToolSpec` exposes it).
 10. **Transport**: stdio default; `FB_TRANSPORT=http` → Streamable HTTP that
     **fails closed** — it refuses to start without `FB_HTTP_TOKEN`, binds
     `127.0.0.1` only, validates the `Origin` header (DNS-rebinding guard), and

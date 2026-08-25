@@ -134,6 +134,36 @@ test('over-budget payload is truncated to valid JSON with a note (CC-MCP-4)', ()
   assert.ok((note as string).includes('list item'));
 });
 
+test('the truncation note counts only what the caller actually lost', () => {
+  const redactor = createFakeRedactor();
+  // `outer` is the biggest array, so it is trimmed first — to nothing, because a
+  // single element does not fit. That drops ONE list item. `inner` is then dead
+  // weight hanging off a detached element: it is still on the reduction worklist,
+  // and counting its 50 entries would tell the caller they lost 51 items when the
+  // payload only ever offered 1 at that level.
+  const payload = {
+    outer: [{ inner: Array.from({ length: 50 }, (_v, i) => i) }],
+    blob: 'y'.repeat(4_000),
+  };
+  const budget = 1_000;
+
+  const result = shapeResult(payload, { maxResultChars: budget, redactor });
+  const text = result.content[0]?.text ?? '';
+  assert.ok(text.length <= budget, 'within budget');
+
+  const parsed = parseObj(text);
+  assert.deepEqual(parsed.outer, [], 'the outer array really was emptied');
+  assert.equal(parsed.blob, '[dropped 4000 chars]', 'the large field really was dropped');
+
+  const note = String(parsed._truncation);
+  assert.match(note, /dropped 1 list item\(s\) and 1 large field\(s\)/);
+  assert.doesNotMatch(
+    note,
+    /51 list item/,
+    'items behind a dropped element are not lost twice',
+  );
+});
+
 test('a payload within budget is rendered compact and text-only (CC-MCP-7)', () => {
   const redactor = createFakeRedactor();
   const result = shapeResult(

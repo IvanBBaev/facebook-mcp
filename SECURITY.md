@@ -90,6 +90,24 @@ These are properties the design commits to; grounded in the corpus:
   a media directory is explicitly configured; when set, resolved paths are
   `realpath`-canonicalized and asserted contained within it (symlink-safe), with
   an extension/MIME allowlist.
+- **No install-time code execution.** The package declares no `preinstall` /
+  `install` / `postinstall` / `prepare` script, and a guard in `npm run check`
+  fails the build if one is ever added. Installing this server runs nothing; the
+  post-install check is the `doctor` subcommand, which the operator runs
+  deliberately.
+- **Publishing happens only on the rail.** Releases are cut by a tag-triggered
+  GitHub Actions workflow using npm Trusted Publishing (OIDC) — there is no
+  long-lived npm token anywhere, and `package.json` refuses a local publish.
+  Both shipped artifacts are traceable back to this repository: the npm tarball
+  via `npm publish --provenance`, and the `.mcpb` desktop bundle via a
+  build-provenance attestation that the workflow re-verifies before the asset is
+  attached to the Release. You can check the bundle yourself with
+  `gh attestation verify <file>.mcpb --repo IvanBBaev/facebook-mcp`.
+- **Pinned, independently verified release toolchain.** Every third-party action
+  is pinned to a commit SHA, and the `mcp-publisher` binary is verified against a
+  SHA-256 committed to this repository — not against a checksum file fetched from
+  the same place as the binary, which would prove nothing. A mismatch fails the
+  release.
 
 Operators who handle a suspected credential compromise, need to halt writes
 immediately, or are decommissioning an install should follow the operator

@@ -7,8 +7,9 @@
 //
 // Strict order, with NO silent downgrade to "just allow" (CC-MCP-6):
 //   1. MCP elicitation, when the client supports it (injected `elicit` seam).
-//   2. Operator-token fallback: an operator-supplied token compared, in
-//      constant time, against the configured `Settings.confirmToken`.
+//   2. Operator-token fallback: the token supplied WITH the call (the gated
+//      tools' `confirm_token` argument, threaded through the write gate)
+//      compared, in constant time, against the configured `Settings.confirmToken`.
 //   3. Otherwise -> denied.
 //
 // The returned `method` ALWAYS reports truthfully how the decision was obtained
@@ -45,10 +46,12 @@ export interface ElicitOutcome {
 export type ElicitCapability = (request: ConfirmationRequest) => Promise<ElicitOutcome>;
 
 /**
- * Resolves the operator-supplied token authorizing THIS request (e.g. a
- * `confirm_token` tool argument). Injected because request-scoped values are
- * passed explicitly, never read from ambient context (C14). Returns `undefined`
- * when the caller supplied no token.
+ * Fallback resolver for the operator-supplied token, used only when the caller
+ * did not pass one to `confirm()` directly. The primary route is the per-call
+ * `operatorToken` argument, which the write gate threads from the tool's
+ * `confirm_token` input; this seam remains for a deployment that sources the
+ * token some other way. Injected because request-scoped values are passed
+ * explicitly, never read from ambient context (C14).
  */
 export type OperatorTokenResolver = (
   request: ConfirmationRequest,
@@ -60,8 +63,28 @@ export interface ConfirmerDeps {
   readonly elicit?: ElicitCapability;
   /** Settings carrying the configured operator token (`confirmToken`). */
   readonly settings: Pick<Settings, 'confirmToken'>;
-  /** Resolves the operator-supplied token for the request; omit ⇒ never supplied. */
+  /** Fallback token resolver; consulted only when `confirm()` got no per-call token. */
   readonly resolveOperatorToken?: OperatorTokenResolver;
+}
+
+/** Longest elicitation-failure text carried into a denial note. */
+const MAX_ELICIT_FAILURE_CHARS = 200;
+
+/**
+ * One line describing why an advertised elicitation prompt did not complete.
+ *
+ * The text ends up in a tool error the model reads, so it is length-capped and
+ * kept to the thrown message: the {@link ConfirmationRequest} it came from holds
+ * no secret (tool, tier, plan id, human summary), and no token is in scope here.
+ */
+function describeElicitFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const oneLine = raw.replace(/\s+/g, ' ').trim();
+  const text =
+    oneLine.length > MAX_ELICIT_FAILURE_CHARS
+      ? `${oneLine.slice(0, MAX_ELICIT_FAILURE_CHARS)}…`
+      : oneLine;
+  return `elicitation failed (${text.length > 0 ? text : 'no reason given'})`;
 }
 
 /** Constant-time string equality over SHA-256 digests (length-safe). */
@@ -86,31 +109,50 @@ function constantTimeEqual(a: string, b: string): boolean {
 export function createConfirmer(deps: ConfirmerDeps): Confirmer {
   const { elicit, settings, resolveOperatorToken } = deps;
 
+  /**
+   * Why the token route was reached, when it was reached as a FALLBACK. Prefixed
+   * onto the denial note so the caller can tell "the client has no elicitation"
+   * from "the prompt was shown and blew up", which look identical otherwise.
+   */
+  function denialNote(reason: string, elicitFailure: string | undefined): string {
+    return elicitFailure === undefined ? reason : `${elicitFailure}; ${reason}`;
+  }
+
   async function viaOperatorToken(
     request: ConfirmationRequest,
+    perCallToken: string | undefined,
+    elicitFailure?: string,
   ): Promise<ConfirmationResponse> {
     const expected = settings.confirmToken;
     const hasExpected = typeof expected === 'string' && expected.length > 0;
-    const supplied = await resolveOperatorToken?.(request);
-    if (
-      hasExpected &&
-      typeof supplied === 'string' &&
-      supplied.length > 0 &&
-      constantTimeEqual(expected, supplied)
-    ) {
+    // The per-call token wins: it is the concrete authorization for THIS write,
+    // whereas the resolver is a construction-time seam that may answer for a
+    // different notion of "current call".
+    const supplied = perCallToken ?? (await resolveOperatorToken?.(request));
+    const hasSupplied = typeof supplied === 'string' && supplied.length > 0;
+    if (hasExpected && hasSupplied && constantTimeEqual(expected, supplied)) {
       return { confirmed: true, method: 'operator_token' };
     }
+    // Three distinguishable failures, because the fix differs for each: configure
+    // FB_CONFIRM_TOKEN / pass `confirm_token` on the call / pass the RIGHT one.
+    // None of them names or echoes a token value.
+    const reason = !hasExpected
+      ? 'no operator token is configured (set FB_CONFIRM_TOKEN)'
+      : hasSupplied
+        ? 'the supplied confirm_token did not match'
+        : 'no confirm_token was supplied with this call';
     return {
       confirmed: false,
       method: 'denied',
-      note: hasExpected
-        ? 'operator token did not match'
-        : 'no elicitation support and no operator token configured',
+      note: denialNote(reason, elicitFailure),
     };
   }
 
   return {
-    async confirm(request: ConfirmationRequest): Promise<ConfirmationResponse> {
+    async confirm(
+      request: ConfirmationRequest,
+      operatorToken?: string,
+    ): Promise<ConfirmationResponse> {
       if (elicit) {
         try {
           const outcome = await elicit(request);
@@ -119,14 +161,16 @@ export function createConfirmer(deps: ConfirmerDeps): Confirmer {
             method: 'elicitation',
             ...(outcome.note !== undefined ? { note: outcome.note } : {}),
           };
-        } catch {
+        } catch (error) {
           // Elicitation was advertised but failed to complete. Do NOT claim an
           // elicitation result; fall through to the operator-token path, whose
           // method is reported truthfully (still never a silent "just allow").
-          return viaOperatorToken(request);
+          // The reason is carried forward so the denial does not misreport a
+          // failed prompt as a client that never had elicitation at all.
+          return viaOperatorToken(request, operatorToken, describeElicitFailure(error));
         }
       }
-      return viaOperatorToken(request);
+      return viaOperatorToken(request, operatorToken);
     },
   };
 }

@@ -153,13 +153,154 @@ test('rotates the live file at the size threshold, keeping a single generation (
   }
 });
 
+test('repeated rotations stay at one generation and keep the NEWEST one (G-RUN-1)', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    const journalPath = path.join(dir, 'journal.ndjson');
+    const maxBytes = 512;
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      maxBytes,
+    });
+
+    // Two rotations, each with a distinguishable live file planted beforehand.
+    // A single rotation only proves `.2` is never created on the first pass; the
+    // bound is about what happens on the SECOND, where the retained generation
+    // has to be dropped rather than shifted down to `.2`.
+    await writeFile(journalPath, `${'A'.repeat(maxBytes)}\n`);
+    assert.equal(await journal.append(entry({ summary: 'after first rotation' })), 'ok');
+    const rotated = rotatedJournalPath(journalPath);
+    assert.match(await readFile(rotated, 'utf8'), /^A+$/m);
+
+    await writeFile(journalPath, `${'B'.repeat(maxBytes)}\n`);
+    assert.equal(await journal.append(entry({ summary: 'after second rotation' })), 'ok');
+
+    const kept = await readFile(rotated, 'utf8');
+    assert.match(kept, /^B+$/m, 'the retained generation is the most recent one');
+    assert.ok(
+      !kept.includes('AAAA'),
+      'the older generation was dropped, not appended to',
+    );
+    await assert.rejects(
+      stat(path.join(dir, 'journal.2.ndjson')),
+      'generations must not accumulate on disk',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the journal directory it creates is 0700 on POSIX (Security #7)', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    // `mkdtemp` already makes ITS directory 0700, so point at a nested path the
+    // journal has to create itself — that is the one whose mode is under test.
+    const journalDir = path.join(dir, 'nested', 'state');
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath: path.join(journalDir, 'journal.ndjson'),
+    });
+
+    assert.equal(await journal.append(entry()), 'ok');
+
+    if (isPosix) {
+      // The file is 0600, but a group- or world-readable PARENT still exposes the
+      // entry names and sizes, and a writable one lets anyone swap the file out.
+      assert.equal((await stat(journalDir)).mode & 0o777, 0o700);
+      assert.equal((await stat(path.join(dir, 'nested'))).mode & 0o777, 0o700);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent appends that race a rotation all reach disk, in submission order', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    const journalPath = path.join(dir, 'journal.ndjson');
+    // Big enough that the eight entries below (~112 bytes each) never cross it on
+    // their own, so the ONLY rotation in this test is the one the burst races.
+    const maxBytes = 2048;
+    // Plant an already-over-size live file, so the burst below starts on the exact
+    // edge where rotation happens: every caller stats the same over-size file at
+    // once. Unserialized, they all decide to rotate — one `rename` wins and the
+    // rest fail with ENOENT, silently dropping their entries (CC-LIFE-2).
+    await writeFile(journalPath, `${'x'.repeat(maxBytes)}\n`);
+
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      maxBytes,
+    });
+
+    const total = 8;
+    const statuses = await Promise.all(
+      Array.from({ length: total }, (_, i) =>
+        journal.append(entry({ summary: `concurrent ${i}` })),
+      ),
+    );
+    assert.deepEqual(
+      statuses,
+      Array.from({ length: total }, () => 'ok'),
+    );
+
+    // Exactly one rotation: the planted content is the retained generation, and
+    // every one of the eight entries is in the live file.
+    assert.match(await readFile(rotatedJournalPath(journalPath), 'utf8'), /^x+$/m);
+    const lines = nonEmptyLines(await readFile(journalPath, 'utf8'));
+    assert.equal(lines.length, total, 'no entry may be lost to the rotation race');
+    assert.deepEqual(
+      lines.map((l) => parseLine(l).summary),
+      Array.from({ length: total }, (_, i) => `concurrent ${i}`),
+      'the queue is FIFO, so entries land in the order they were submitted',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('one failed append does not poison the writes queued behind it', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    const journalPath = path.join(dir, 'journal.ndjson');
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      onError: () => undefined,
+    });
+
+    // A value `JSON.stringify` refuses: the entry fails before it ever reaches the
+    // queue, but a shared promise chain is exactly the kind of thing a rejection
+    // can wedge, so the next caller has to still get through.
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const bad = await journal.append(entry({ metadata: circular }));
+    assert.equal(bad, 'failed');
+
+    assert.equal(await journal.append(entry({ summary: 'after the failure' })), 'ok');
+    const lines = nonEmptyLines(await readFile(journalPath, 'utf8'));
+    assert.equal(lines.length, 1);
+    assert.equal(parseLine(lines[0]).summary, 'after the failure');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a write failure returns "failed" without throwing and redacts the note (CC-LIFE-1)', async () => {
   const dir = await tmpJournalDir();
   try {
     // Plant a regular FILE where the journal wants a directory: mkdir → ENOTDIR.
     const blocker = path.join(dir, 'blocker');
     await writeFile(blocker, 'x');
-    const journalPath = path.join(blocker, 'nested', 'journal.ndjson');
+    // The failing path SEGMENT is the registered secret, so the OS error message
+    // quotes it back — which is how a filesystem error becomes a leak channel and
+    // why the note is worth asserting on, not just counting.
+    const journalPath = path.join(blocker, 'SECRET', 'journal.ndjson');
 
     const redactor = createFakeRedactor({ secrets: ['SECRET'] });
     const errors: string[] = [];
@@ -176,6 +317,10 @@ test('a write failure returns "failed" without throwing and redacts the note (CC
     assert.equal(errors.length, 1);
     // The failure note was routed through the redactor choke-point.
     assert.equal(redactor.stringCalls.length, 1);
+    const note = errors[0] ?? '';
+    assert.match(note, /ENOTDIR|not a directory/, 'the note still says what went wrong');
+    assert.ok(!note.includes('SECRET'), 'the raw secret must not survive in the note');
+    assert.ok(note.includes('[REDACTED]'), 'it was replaced, not merely dropped');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

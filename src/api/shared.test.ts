@@ -192,6 +192,24 @@ test('fetchPage: cursor expiry ⇒ empty partial + truncated + restart note (CC-
   assert.equal(page.note, CURSOR_EXPIRED_NOTE);
 });
 
+test('fetchPage: paging.next without an extractable cursor is truncated, not terminal', async () => {
+  const fake = createFakeFbRequest();
+  // Graph promised another page and handed back nothing to reach it: no `after`
+  // in the next URL, no `cursors.after`.
+  fake.enqueue(
+    fbOk({ data: items('a'), paging: { next: 'https://graph.facebook.com/e?limit=25' } }),
+  );
+
+  const page = await fetchPage<Item>(fake.fn, EDGE);
+  assert.deepEqual([...page.data], items('a'));
+  // Reported as terminal, a caller would stop here and call the listing
+  // complete while rows remain. `fetchAll` reads this exact wire shape the same
+  // way — the two must not disagree about one response (CC-PAGE-3).
+  assert.equal(page.truncated, true);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(page.note, MISSING_CURSOR_NOTE);
+});
+
 test('fetchPage: a non-cursor error propagates', async () => {
   const fake = createFakeFbRequest();
   fake.enqueue(fbErr(new GraphApiError('boom', { code: 1, httpStatus: 500 })));

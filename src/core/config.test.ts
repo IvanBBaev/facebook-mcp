@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { withEnv } from '../testing/index.js';
@@ -141,6 +141,62 @@ test('statFileProtection flags group/other-readable files (doctor honesty)', asy
   await writeFile(target, 'x', { mode: 0o644 });
   const prot = await statFileProtection(target);
   assert.equal(prot.ownerOnly, false);
+});
+
+// --- CC-CFG-4: the Windows branches, exercised from POSIX ---
+//
+// Both functions take an injectable `platform`, so the win32 arms are reachable
+// on any host. That matters more than usual here: these are the claims the
+// server makes about how well a *credential file* is protected, and the only
+// place they run for real is a CI job nobody reads until it goes red. Asserting
+// them locally keeps the honesty note from drifting into a lie.
+
+test('CC-CFG-4: atomicWriteFile on Windows still writes, and refuses to claim 0600', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-cfg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'nested', 'secret.env');
+
+  const result = await atomicWriteFile(target, 'FB_ACCESS_TOKEN=fake-token\n', {
+    platform: 'win32',
+  });
+
+  // The write itself is not conditional on the platform — only the claim is.
+  assert.equal(await readFile(target, 'utf8'), 'FB_ACCESS_TOKEN=fake-token\n');
+  assert.equal(result.path, target);
+  assert.equal(result.restricted, false, 'no POSIX enforcement to claim');
+  assert.equal(result.mode, 0o600, 'the requested mode is still reported');
+  assert.match(String(result.note), /not enforced on Windows/);
+  assert.match(String(result.note), /%APPDATA%/);
+});
+
+test('CC-CFG-4: statFileProtection reports no owner-only guarantee on Windows', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-cfg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const target = path.join(dir, 'secret.env');
+  await writeFile(target, 'x', { mode: 0o600 });
+
+  const prot = await statFileProtection(target, 'win32');
+
+  // Even on bits that would read as owner-only under POSIX, the win32 answer is
+  // `false`: the NTFS ACL is what protects the file and we did not inspect it.
+  assert.equal(prot.ownerOnly, false);
+  assert.equal(prot.posixPermissions, false);
+  assert.equal(prot.note, describeFileProtection('win32').note);
+});
+
+test('atomicWriteFile removes the temp file when the rename fails', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-cfg-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // A directory at the target path makes rename() fail after the temp file is
+  // already on disk — the one window in which a half-written credential file
+  // could be left behind, world-readable name and all.
+  const target = path.join(dir, 'occupied');
+  await mkdir(target);
+
+  await assert.rejects(() => atomicWriteFile(target, 'FB_ACCESS_TOKEN=fake-token\n'));
+
+  const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'));
+  assert.deepEqual(leftovers, [], 'the temp file must not survive a failed rename');
 });
 
 // --- CC-CFG-1 (context): env-first + quiet loading ---

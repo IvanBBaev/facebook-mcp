@@ -87,6 +87,14 @@ export interface Settings {
 
   // Write gating & media
   readonly writeMode: WriteMode;
+  /**
+   * Whether `FB_WRITE_MODE` was actually set by the operator, as opposed to
+   * falling back to the compiled-in default. A package's `writeModeDefault`
+   * applies only while this is false: an operator who typed the variable has
+   * spoken about every package, which is what keeps `FB_WRITE_MODE=plan` a
+   * working kill switch over a package that ships `apply`. Absent ⇒ not set.
+   */
+  readonly writeModeExplicit?: boolean;
   /** `FB_MEDIA_DIR`; `undefined` ⇒ local file access disabled, URL-only (C11). */
   readonly mediaDir?: string;
 
@@ -271,6 +279,13 @@ export interface MultipartRequest extends FbRequestBase {
 export interface RuploadRequest extends FbRequestBase {
   readonly protocol: 'rupload';
   readonly method: 'POST';
+  /**
+   * Full rupload path, `/{api-name}/{version}/{id}` — the version is the SECOND
+   * segment here, unlike a Graph edge path. The caller owns it end to end (core
+   * validates but never injects a version), so pass Meta's `upload_url` pathname
+   * verbatim when it gives one.
+   */
+  readonly path: string;
   /** `file_offset` header value — byte offset this chunk begins at. */
   readonly fileOffset: number;
   /** Raw binary chunk body. */
@@ -368,6 +383,15 @@ export interface Redactor {
  * an ambient context (C14).
  */
 export type PageRef = string;
+
+/**
+ * The synthetic profile key of the default Page (`FB_PAGE_ID`) when referenced
+ * explicitly. Lives here because it is shared contract, not registry detail: the
+ * settings loader must RESERVE it (a `FB_PROFILE_DEFAULT_PAGE_ID` would otherwise
+ * define a second, silently-shadowed profile under the same key) and the registry
+ * must MINT it. One literal, so the two can never drift apart.
+ */
+export const DEFAULT_PROFILE_KEY = 'default';
 
 /** A fully resolved Page: its ID, display name, and the token to act as it. */
 export interface ResolvedPage {
@@ -704,7 +728,13 @@ export interface TaintedContent<T = string> {
   readonly warning: string;
 }
 
-/** Request for out-of-band confirmation of a destructive/spend action (B1). */
+/**
+ * Request for out-of-band confirmation of a destructive/spend action (B1).
+ *
+ * This object is SENT TO THE CLIENT verbatim by the elicitation path, so it must
+ * never carry a secret. The operator token travels as a separate argument to
+ * {@link Confirmer.confirm}.
+ */
 export interface ConfirmationRequest {
   readonly tool: string;
   readonly tier: WriteTier;
@@ -729,5 +759,15 @@ export interface ConfirmationResponse {
  * (`mcp/confirm.ts`) implements it.
  */
 export interface Confirmer {
-  confirm(request: ConfirmationRequest): Promise<ConfirmationResponse>;
+  /**
+   * @param request What is being confirmed. Carries no secret — the elicitation
+   *   path forwards it to the client.
+   * @param operatorToken The token supplied with THIS call (the tool's
+   *   `confirm_token` argument), passed separately from `request` for that
+   *   reason, and passed explicitly rather than read from ambient state (C14).
+   */
+  confirm(
+    request: ConfirmationRequest,
+    operatorToken?: string,
+  ): Promise<ConfirmationResponse>;
 }

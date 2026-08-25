@@ -1,85 +1,138 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.IvanBBaev/facebook-mcp",
-  "description": "Facebook Pages MCP server for the Meta Graph API — identity, Page discovery, rate-limit diagnostics",
+  "description": "Facebook Pages MCP server for the Meta Graph API — publishing, insights, moderation, messaging",
   "repository": {
     "url": "https://github.com/IvanBBaev/facebook-mcp",
     "source": "github"
   },
-  "version": "0.0.0",
+  "version": "0.7.0",
+  "websiteUrl": "https://ivanbbaev.github.io/facebook-mcp/",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ivanbbaev/facebook-mcp",
-      "version": "0.0.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "name": "FB_ACCESS_TOKEN",
-          "description": "Primary user or system-user access token. At least one of FB_ACCESS_TOKEN, FB_SYSTEM_TOKEN or FB_PAGE_TOKEN must be set.",
-          "isRequired": true,
+          "name": "FB_SYSTEM_TOKEN",
+          "description": "System-user access token (Business Manager). Takes precedence over FB_ACCESS_TOKEN and FB_PAGE_TOKEN when several are set.",
+          "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
-          "name": "FB_SYSTEM_TOKEN",
-          "description": "System-user access token (Business Manager); takes precedence over FB_PAGE_TOKEN when both are set.",
+          "name": "FB_ACCESS_TOKEN",
+          "description": "Primary user access token. At least one of FB_SYSTEM_TOKEN, FB_ACCESS_TOKEN or FB_PAGE_TOKEN must be set.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
           "name": "FB_PAGE_TOKEN",
-          "description": "Long-lived Page access token used as a fallback credential.",
+          "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
           "name": "FB_APP_ID",
-          "description": "Meta app ID; combined with FB_APP_SECRET to authorize token inspection and sign calls.",
+          "description": "Meta app ID; combined with FB_APP_SECRET it forms the app access token used to authorize /debug_token inspection.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "FB_APP_SECRET",
-          "description": "Meta app secret; enables appsecret_proof so a stolen bare token cannot be used.",
+          "description": "Meta app secret. When set, appsecret_proof is attached to every call so a stolen bare token cannot be used on its own.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
           "name": "FB_PAGE_ID",
-          "description": "Default Facebook Page ID, used when a tool call omits an explicit profile.",
+          "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "FB_API_VERSION",
-          "description": "Graph API version to target. Defaults to the tested pinned version.",
+          "description": "Graph API version to target. Defaults to the tested pinned version; other values are accepted verbatim as an escape hatch but are not tested.",
           "isRequired": false,
           "format": "string",
           "default": "v23.0"
         },
         {
+          "name": "FB_REQUEST_TIMEOUT_MS",
+          "description": "Per-request timeout in milliseconds; integer in [1, 600000].",
+          "isRequired": false,
+          "format": "number",
+          "default": "60000"
+        },
+        {
+          "name": "FB_HOST_CONCURRENCY",
+          "description": "Maximum number of in-flight requests per Graph host; integer in [1, 64].",
+          "isRequired": false,
+          "format": "number",
+          "default": "4"
+        },
+        {
+          "name": "FB_MAX_RESULT_CHARS",
+          "description": "Character budget applied by the result shaper before a tool result is truncated; integer in [500, 10000000].",
+          "isRequired": false,
+          "format": "number",
+          "default": "25000"
+        },
+        {
           "name": "FB_WRITE_MODE",
-          "description": "Write gating mode: plan (validating dry-run preview, default) or apply.",
+          "description": "Write gating mode: plan (validating dry-run preview, the default) or apply. It never covers the irreversible and spend tiers, which always need a per-call apply plus a plan_id.",
           "isRequired": false,
           "format": "string",
           "default": "plan",
           "choices": ["plan", "apply"]
         },
         {
+          "name": "FB_CONFIRM_TOKEN",
+          "description": "Operator confirmation token for out-of-band approval of irreversible or spend actions. The server prompts through MCP elicitation where the client supports it; otherwise the caller passes this value as the confirm_token tool argument.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FB_MEDIA_DIR",
+          "description": "Directory permitted for local media uploads. Unset means URL-only uploads and no local file access at all.",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
+          "name": "FB_JOURNAL_PATH",
+          "description": "Path to the append-only write journal. Defaults to the XDG/%APPDATA% state path; the file is created owner-only (0600) and rotates by size.",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
           "name": "FB_TOOL_PACKAGES",
-          "description": "Comma-separated tool packages to expose (e.g. core,posts,reader); omit for the default profile.",
+          "description": "Comma-separated tool packages or profiles to expose (e.g. core,posts,reader, or the profiles core|all|reader|publisher|moderator|ads). Omit for the default profile, which excludes ads.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FB_PACKAGES_DENY",
+          "description": "Comma-separated packages to exclude even when FB_TOOL_PACKAGES enables them. Deny wins over allow.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FB_PACKAGES_READONLY",
+          "description": "Comma-separated packages whose write tools are not registered at all; the read tools of those packages stay available.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "FB_TRANSPORT",
-          "description": "Transport protocol: stdio (default) or http.",
+          "description": "Transport protocol: stdio (default) or http. The http transport binds 127.0.0.1 only and fails closed without FB_HTTP_TOKEN.",
           "isRequired": false,
           "format": "string",
           "default": "stdio",
@@ -87,30 +140,37 @@
         },
         {
           "name": "FB_HTTP_TOKEN",
-          "description": "Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (fails closed without it).",
+          "description": "Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it).",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
         },
         {
           "name": "FB_HTTP_PORT",
-          "description": "Port for the HTTP transport (loopback only); used when FB_TRANSPORT=http.",
+          "description": "Port for the HTTP transport (loopback only); used when FB_TRANSPORT=http. Integer in [1, 65535].",
           "isRequired": false,
           "format": "number",
           "default": "3000"
         },
         {
-          "name": "FB_MEDIA_DIR",
-          "description": "Directory permitted for local media uploads; unset means URL-only, local file access disabled.",
+          "name": "FB_AD_ACCOUNT_ID",
+          "description": "Default ad account ID (act_… or the bare numeric id) for the opt-in ads package.",
           "isRequired": false,
-          "format": "filepath"
+          "format": "string"
         },
         {
-          "name": "FB_CONFIRM_TOKEN",
-          "description": "Operator confirmation token for out-of-band approval of destructive or spend actions when elicitation is unavailable.",
+          "name": "FB_ADS_BUDGET_CEILING",
+          "description": "Hard ceiling for any ads budget write, in minor currency units (e.g. cents). Non-negative integer; a write above it is refused.",
           "isRequired": false,
-          "isSecret": true,
-          "format": "string"
+          "format": "number"
+        },
+        {
+          "name": "FB_LOG_LEVEL",
+          "description": "Stderr log verbosity: debug, info, warn or error. Logs never go to stdout — that is the stdio protocol channel.",
+          "isRequired": false,
+          "format": "string",
+          "default": "info",
+          "choices": ["debug", "info", "warn", "error"]
         }
       ]
     }

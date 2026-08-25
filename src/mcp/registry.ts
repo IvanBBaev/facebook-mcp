@@ -17,7 +17,13 @@
 // No runtime Zod here — the registry only ever sees `ToolSpec.inputSchema` as an
 // opaque `ZodTypeAny` (Arch nit: Zod is quarantined to `define.ts`).
 
-import type { PackageName, PackageSpec, Settings, ToolSpec } from '../core/index.js';
+import type {
+  PackageName,
+  PackageSpec,
+  Settings,
+  ToolSpec,
+  WriteMode,
+} from '../core/index.js';
 import {
   DEFAULT_PROFILE_PACKAGES,
   expandSelection,
@@ -46,6 +52,44 @@ export interface ToolRegistry {
   get(name: string): ToolSpec | undefined;
   /** Whether a tool with `name` is in the resolved set. */
   has(name: string): boolean;
+  /**
+   * The write mode that governs `name` — see {@link effectiveWriteMode} for how
+   * `PackageSpec.writeModeDefault` and `settings.writeMode` combine. An unknown
+   * tool falls back to `settings.writeMode`; that arm is unreachable through the
+   * bootstrap, which resolves the spec first and errors on a name it does not
+   * have. The bootstrap builds one {@link WriteGate} per distinct result.
+   */
+  writeModeFor(name: string): WriteMode;
+}
+
+/**
+ * Fold a package's declared default into the operator's `FB_WRITE_MODE`.
+ *
+ * Two claims have to hold at once, and which one applies turns on whether the
+ * operator actually SET the variable:
+ *
+ * - `FB_WRITE_MODE` is a global kill switch. An operator who typed it has spoken
+ *   about every package, so it wins outright — `FB_WRITE_MODE=plan` forces plan
+ *   even on `moderation`, which ships `'apply'`.
+ * - A package default is what governs an operator who said nothing. That is the
+ *   whole point of `moderation`'s `writeModeDefault: 'apply'` (A6 / UX #6):
+ *   hiding a comment is reversible, high-volume work that must not stack a plan
+ *   preview on every call. Folding it into the compiled-in default with a
+ *   most-restrictive rule would make the declaration permanently inert, since a
+ *   package default of `'apply'` can only ever loosen.
+ *
+ * Loosening is bounded by design: the `irreversible` and `spend` tiers ignore the
+ * write mode entirely (C4) and still demand an explicit `apply` plus a `plan_id`
+ * plus out-of-band confirmation. What a package default can reach is exactly the
+ * `reversible` tier.
+ */
+export function effectiveWriteMode(
+  globalMode: WriteMode,
+  packageDefault: WriteMode | undefined,
+  globalExplicit = false,
+): WriteMode {
+  if (globalExplicit) return globalMode;
+  return packageDefault ?? globalMode;
 }
 
 /**
@@ -95,6 +139,7 @@ export function createRegistry(
 
   const tools: ToolSpec[] = [];
   const byToolName = new Map<string, ToolSpec>();
+  const writeModeByToolName = new Map<string, WriteMode>();
   const packageNames: PackageName[] = [];
 
   for (const name of sortByCanonical(selected)) {
@@ -107,6 +152,12 @@ export function createRegistry(
     }
     packageNames.push(name);
     const dropWrites = readOnly.has(name);
+    // Constant per package, so it is resolved once rather than per tool.
+    const packageWriteMode = effectiveWriteMode(
+      settings.writeMode,
+      pkg.writeModeDefault,
+      settings.writeModeExplicit === true,
+    );
     for (const tool of pkg.tools) {
       // writeTier absent ⇒ read-only tool (ToolSpec contract): keep it.
       if (dropWrites && tool.writeTier !== undefined) {
@@ -119,6 +170,7 @@ export function createRegistry(
       }
       const stamped: ToolSpec = { ...tool, package: pkg.name };
       byToolName.set(stamped.name, stamped);
+      writeModeByToolName.set(stamped.name, packageWriteMode);
       tools.push(stamped);
     }
   }
@@ -128,5 +180,6 @@ export function createRegistry(
     packageNames,
     get: (name) => byToolName.get(name),
     has: (name) => byToolName.has(name),
+    writeModeFor: (name) => writeModeByToolName.get(name) ?? settings.writeMode,
   };
 }

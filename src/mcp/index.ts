@@ -53,3 +53,6 @@ export * from './confirm.js';
 
 // F16 — pre-flight doctor diagnostic (permission × package usability matrix).
 export * from './doctor.js';
+
+// R05 — guided `setup-token` onboarding (classify → exchange → Page → env file).
+export * from './setup-token.js';

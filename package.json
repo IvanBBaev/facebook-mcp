@@ -1,7 +1,6 @@
 {
   "name": "@ivanbbaev/facebook-mcp",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0",
   "mcpName": "io.github.IvanBBaev/facebook-mcp",
   "description": "Local-first TypeScript MCP server for the Meta Graph API that lets an MCP client publish, read and moderate Facebook Pages through your own Meta developer app, with least-privilege tokens, plan-and-apply write safety and no telemetry.",
   "license": "MIT",
@@ -23,6 +22,11 @@
     "build",
     "!build/**/*.map",
     "!build/**/*.test.js",
+    "!build/**/*.test.d.ts",
+    "!build/testing",
+    "!build/core/fakes",
+    "!build/mcp/transport.spawn-fixture.*",
+    "!build/mcpb",
     "bin"
   ],
   "engines": {
@@ -36,7 +40,14 @@
     "format:check": "prettier --check .",
     "test": "node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
     "coverage": "npm run build && c8 node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test"
+    "smoke": "node scripts/smoke/run.mjs",
+    "metadata": "npm run build && node scripts/gen-metadata.mjs --write",
+    "metadata:check": "node scripts/gen-metadata.mjs --check",
+    "pack:mcpb": "npm run build && node scripts/pack-mcpb.mjs",
+    "guard:no-install-scripts": "node -e \"const s=JSON.parse(require('fs').readFileSync('package.json','utf8')).scripts||{};const bad=['preinstall','install','postinstall','prepare'].filter(k=>k in s);if(bad.length){console.error('Policy violation: package.json declares install lifecycle script(s): '+bad.join(', ')+'. This package runs no code at install time; the post-install check is the doctor subcommand, run by the user.');process.exit(1)}console.log('no install lifecycle scripts declared - ok')\"",
+    "check": "npm run guard:no-install-scripts && npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test",
+    "preversion": "node -e \"console.error('Refusing: do not bump the version with npm version. scripts/metadata.config.mjs is the version SSOT and npm run metadata re-stamps package.json from it, silently reverting the bump. Edit identity.version there, then run npm run metadata. See docs/runbooks/release.md.');process.exit(1)\"",
+    "prepublishOnly": "node -e \"if(!process.env.GITHUB_ACTIONS&&process.env.ALLOW_LOCAL_PUBLISH!=='1'){console.error('Refusing: publishing happens in .github/workflows/release.yml, triggered by a v*.*.* tag, never from a laptop. The one documented exception is the first-ever publish that reserves the npm name (docs/runbooks/release.md, One-time setup); for that, and only that, set ALLOW_LOCAL_PUBLISH=1.');process.exit(1)}\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

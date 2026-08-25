@@ -1,6 +1,6 @@
 // Tests for the `core` tool package (task F16): the four read-only tools
 // (facebook_whoami / facebook_list_pages / facebook_get_page / facebook_usage)
-// and the package-level invariants (always-on, read-only, server-version
+// and the package-level invariants (always-on, read-only, server + SDK version
 // injection). Every Graph call is served by `createFakeFbRequest` — the network
 // fence guarantees no real fetch escapes. Placeholder tokens only; never a real
 // secret in a fixture.
@@ -34,6 +34,7 @@ import { createCorePackage } from './core.js';
 // ---------------------------------------------------------------------------
 
 const SERVER_VERSION = '9.9.9';
+const SDK_VERSION = '8.8.8';
 
 /** A recording no-op logger (satisfies the contract without side effects). */
 function makeLogger(): Logger {
@@ -94,9 +95,10 @@ function makeCtx(
 
 /** Look a tool up in the built package by name (fails loudly if renamed). */
 function tool(name: string): ToolSpec {
-  const spec = createCorePackage({ serverVersion: SERVER_VERSION }).tools.find(
-    (t) => t.name === name,
-  );
+  const spec = createCorePackage({
+    serverVersion: SERVER_VERSION,
+    sdkVersion: SDK_VERSION,
+  }).tools.find((t) => t.name === name);
   assert.ok(spec, `expected a tool named ${name}`);
   return spec;
 }
@@ -120,7 +122,10 @@ function lastJson(fb: FakeFbRequest): JsonRequest {
 // ---------------------------------------------------------------------------
 
 test('createCorePackage builds the always-on read-only package with four tools', () => {
-  const pkg = createCorePackage({ serverVersion: SERVER_VERSION });
+  const pkg = createCorePackage({
+    serverVersion: SERVER_VERSION,
+    sdkVersion: SDK_VERSION,
+  });
   assert.equal(pkg.name, 'core');
   assert.equal(pkg.enabledByDefault, true);
   assert.deepEqual(
@@ -138,7 +143,10 @@ test('createCorePackage builds the always-on read-only package with four tools',
 
 test('only the server-owned envelopes (whoami, usage) declare an outputSchema', () => {
   const byName = new Map(
-    createCorePackage({ serverVersion: SERVER_VERSION }).tools.map((t) => [t.name, t]),
+    createCorePackage({
+      serverVersion: SERVER_VERSION,
+      sdkVersion: SDK_VERSION,
+    }).tools.map((t) => [t.name, t]),
   );
   assert.ok(byName.get('facebook_whoami')?.outputSchema, 'whoami has outputSchema');
   assert.ok(byName.get('facebook_usage')?.outputSchema, 'usage has outputSchema');
@@ -176,6 +184,7 @@ test('whoami classifies a valid non-expiring system-user token (neverExpiring)',
     name: 'facebook-mcp',
     version: SERVER_VERSION, // injected, not read from package.json
     apiVersion: 'v23.0',
+    sdkVersion: SDK_VERSION, // injected, not resolved from node_modules
   });
   assert.deepEqual(sc.token, {
     type: 'SYSTEM_USER',
@@ -246,6 +255,7 @@ test('whoami returns a schema-valid error envelope when no token is configured',
     name: 'facebook-mcp',
     version: SERVER_VERSION,
     apiVersion: 'v23.0',
+    sdkVersion: SDK_VERSION,
   });
   assert.deepEqual(sc?.token, {
     type: 'UNKNOWN',

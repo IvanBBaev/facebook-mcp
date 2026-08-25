@@ -112,8 +112,12 @@ MCP (protocol), CFG (config), LIFE (process lifecycle).
   verbatim with the filename attached.
 - **CC-MEDIA-7 ⚠ Video "created" ≠ video "ready".** Processing is async; the
   post may 404 or render empty briefly. Handling: video creates return
-  `video_id` + `processing` state; `facebook_get_video_status` polls;
-  descriptions warn that immediate `get_post` may not reflect the video.
+  `video_id` + `processing` state; `facebook_get_video_status` polls it
+  (**shipped** — API function and read-only `ToolSpec` both landed, in the
+  write-gated `posts` package, and it takes a bare video id rather than a
+  `{page-id}_{post-id}` composite); descriptions warn that immediate `get_post`
+  may not reflect the video. ✎ Unverified against real Graph, in common with the
+  whole surface.
 - **CC-MEDIA-8 Reels daily cap (30/24h) exhausted.** Handling: mapped error
   explains the cap and when it resets (from `estimated_time_to_regain_access`
   if present); smoke tests budget Reels deliberately (B2).

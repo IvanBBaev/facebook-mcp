@@ -30,6 +30,14 @@
 
 import { createHmac } from 'node:crypto';
 
+import { ETA_MINUTES_TO_MS } from './error-matrix.js';
+import {
+  ambiguousWriteAction,
+  classifyGraphError,
+  classifyNetworkError,
+  matchErrorRow,
+  type GraphErrorEnvelope,
+} from './errors.js';
 import { GraphApiError, USAGE_HEADERS } from './types.js';
 import type {
   Clock,
@@ -123,10 +131,62 @@ export function resolveHostBase(hosts: HostAllowlist, host: GraphHost): string {
 }
 
 /**
+ * Is this path segment a relative-traversal segment?
+ *
+ * The WHATWG URL parser resolves `.` and `..` when `pathname` is assigned, and it
+ * treats the percent-encoded spellings as equivalent — `%2e%2e` walks up exactly
+ * like `..` does. So the check has to run over a decoded view, and encoding the
+ * segment cannot substitute for it: `encodeURIComponent('..')` is `'..'`.
+ */
+function isDotSegment(segment: string): boolean {
+  const decoded = segment.replace(/%2e/gi, '.');
+  return decoded === '.' || decoded === '..';
+}
+
+/**
+ * Escape every segment of a normalised pathname and refuse traversal segments.
+ *
+ * Edge paths are built by interpolating ids the model supplies — `/{post_id}`,
+ * `/{comment_id}`, `/{conversation_id}` — and those ids routinely originate in
+ * untrusted content (a comment body, a Page name). Without containment here, an
+ * id of `../../me/accounts` retargets the request at a completely different edge
+ * while keeping the method: `DELETE /{post_id}` becomes `DELETE /me/accounts`.
+ * A tool-level allowlist cannot catch that, because the tool really did call the
+ * edge it said it would. Two call sites already carry their own shape regex
+ * (`POST_ID_SHAPE` in `../api/insights.ts`, `ACT_ID` in `../api/ads-read.ts`);
+ * this makes the guarantee hold for every path, including the ones nobody
+ * remembered to constrain.
+ *
+ * Exported so the upload protocols contain their paths identically — rupload and
+ * multipart ids come from exactly the same untrusted places (`./http-upload.ts`).
+ */
+export function containPathname(pathname: string, who: string): string {
+  // `slice(1)` drops the empty string the leading '/' produces. Empty inner
+  // segments are preserved as-is: they make a malformed edge Graph will reject,
+  // not a different one.
+  const safeSegments = pathname
+    .split('/')
+    .slice(1)
+    .map((segment) => {
+      if (isDotSegment(segment)) {
+        throw new Error(
+          `${who}: path segment '${segment}' would traverse outside its edge ('${pathname}')`,
+        );
+      }
+      // No caller pre-encodes (there is no other encodeURIComponent on a path in
+      // this tree), so this cannot double-encode. `-`, `_`, `.` and `~` are left
+      // alone, which covers every real Graph id shape: `123_456`, `act_123`, `v23.0`.
+      return encodeURIComponent(segment);
+    });
+  return `/${safeSegments.join('/')}`;
+}
+
+/**
  * Build the request URL from a trusted hostname + a relative edge path. Rejects
  * absolute-URL / protocol-relative paths so a crafted `path` can never redirect
- * the request off the allowlisted host (CC-NET-7). The API version is prepended
- * unless the path already carries a `/vNN.N` segment.
+ * the request off the allowlisted host (CC-NET-7), and contains every segment
+ * (see {@link containPathname}). The API version is prepended unless the path
+ * already carries a `/vNN.N` segment.
  */
 function buildUrl(
   hostname: string,
@@ -143,8 +203,9 @@ function buildUrl(
   if (!/^\/v\d+(?:\.\d+)?(?:\/|$)/.test(pathname)) {
     pathname = `/${apiVersion}${pathname}`;
   }
+
   const url = new URL(`https://${hostname}`);
-  url.pathname = pathname;
+  url.pathname = containPathname(pathname, 'fbRequest');
   const qs = query.toString();
   if (qs.length > 0) {
     url.search = qs;
@@ -410,7 +471,13 @@ interface ParsedGraphError {
   readonly message?: string;
   readonly type?: string;
   readonly fbtraceId?: string;
-  readonly etaSeconds?: number;
+  /**
+   * `estimated_time_to_regain_access` verbatim. Graph's documented unit is
+   * MINUTES — see `ETA_MINUTES_TO_MS` in `./error-matrix.js`, CC-NET-3, and the
+   * matching conversion in `./errors.js`. Reading it as seconds under-reports a
+   * block by 60×: a 30-minute lockout surfaces to the operator as half a minute.
+   */
+  readonly etaMinutes?: number;
 }
 
 /** Parse the `{error: {...}}` envelope defensively; `undefined` if not present. */
@@ -425,13 +492,18 @@ function parseGraphErrorEnvelope(bodyText: string): ParsedGraphError | undefined
     message: strOr(err.message),
     type: strOr(err.type),
     fbtraceId: strOr(err.fbtrace_id),
-    etaSeconds:
+    etaMinutes:
       numOr(err.estimated_time_to_regain_access) ??
       (errorData ? numOr(errorData.estimated_time_to_regain_access) : undefined),
   };
 }
 
-/** Best-effort coarse category; F06's matrix is the definitive one downstream. */
+/**
+ * Coarse category for a body code the F06 matrix does NOT recognize. The matrix
+ * is the authority for every code it knows (see {@link actionForResponse}); this
+ * fallback only has to keep an unclassified error from surfacing as `unknown`
+ * when the HTTP status alone already says something useful (5xx ⇒ transient).
+ */
 export function bestEffortCategory(
   status: number,
   code: number | undefined,
@@ -477,6 +549,65 @@ interface GraphErrorOptions {
 }
 
 /**
+ * The F06 classification for a parsed envelope, or `undefined` when the matrix
+ * does not recognize the code. `classifyGraphError` is total (an unknown code
+ * yields the `unknown` action), so the row has to be probed separately — an
+ * unrecognized code must fall through to {@link bestEffortCategory}, which still
+ * reads the HTTP status, rather than collapse to `unknown`.
+ */
+function matrixAction(parsed: ParsedGraphError | undefined): ErrorAction | undefined {
+  if (parsed?.code === undefined) return undefined;
+  if (!matchErrorRow(parsed.code, parsed.subcode)) return undefined;
+  const envelope: GraphErrorEnvelope = {
+    code: parsed.code,
+    ...(parsed.subcode !== undefined ? { error_subcode: parsed.subcode } : {}),
+    // The matrix converts this to ms itself (Graph's unit is MINUTES).
+    ...(parsed.etaMinutes !== undefined
+      ? { estimated_time_to_regain_access: parsed.etaMinutes }
+      : {}),
+  };
+  return classifyGraphError(envelope);
+}
+
+/**
+ * Build the {@link ErrorAction} for a real Graph error response.
+ *
+ * Every code the F06 matrix knows is classified BY the matrix, so a live error
+ * carries the same category/retryable/nextTool/operator guidance the matrix
+ * already defines for it — including the next tool to run (`facebook_whoami`,
+ * `facebook_usage`, `facebook_list_posts`) and the ETA computed from the
+ * envelope. Without this the transport re-derived a coarse category of its own
+ * and no live error ever reached the model with a next step.
+ *
+ * The retry loop's `options` still win where it knows better than the table:
+ * once retries are exhausted a throttle is no longer `retryable` no matter what
+ * the row says. An overridden category discards the row's text, because guidance
+ * written for a different category would misdescribe the error.
+ */
+function actionForResponse(
+  status: number,
+  parsed: ParsedGraphError | undefined,
+  options: GraphErrorOptions,
+): ErrorAction {
+  const classified = matrixAction(parsed);
+  const category =
+    options.category ?? classified?.category ?? bestEffortCategory(status, parsed?.code);
+  const row = classified?.category === category ? classified : undefined;
+  const retryAfterMs = options.retryAfterMs ?? row?.retryAfterMs;
+  const retryable =
+    options.retryable ??
+    row?.retryable ??
+    (category === 'rate_limit' || category === 'transient');
+  return {
+    category,
+    retryable,
+    operatorText: row?.operatorText ?? operatorTextFor(category),
+    ...(row?.nextTool !== undefined ? { nextTool: row.nextTool } : {}),
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
+}
+
+/**
  * Construct a {@link GraphApiError} from a raw error response, redacting the
  * surfaced message. Exported so F08 raises errors through the same path.
  */
@@ -487,20 +618,13 @@ export function graphErrorFromResponse(
   options: GraphErrorOptions = {},
 ): GraphApiError {
   const parsed = parseGraphErrorEnvelope(bodyText);
-  const category = options.category ?? bestEffortCategory(status, parsed?.code);
   const rawMessage =
     parsed?.message ??
     (bodyText.length > 0 ? bodyText.slice(0, ERROR_BODY_SNIPPET) : `HTTP ${status}`);
   const message = redactor.redactString(
     `Graph API error (HTTP ${status}): ${rawMessage}`,
   );
-  const action: ErrorAction = {
-    category,
-    retryable:
-      options.retryable ?? (category === 'rate_limit' || category === 'transient'),
-    operatorText: operatorTextFor(category),
-    ...(options.retryAfterMs !== undefined ? { retryAfterMs: options.retryAfterMs } : {}),
-  };
+  const action = actionForResponse(status, parsed, options);
   return new GraphApiError(message, {
     code: parsed?.code ?? 0,
     subcode: parsed?.subcode,
@@ -512,24 +636,31 @@ export function graphErrorFromResponse(
   });
 }
 
+/**
+ * The C2 ambiguous-write error. The action comes from F06 so the surfaced
+ * guidance names the verify-tool (`nextTool`) instead of only saying "verify".
+ */
 function ambiguousError(status: number, detail: string, cause?: unknown): GraphApiError {
-  const action: ErrorAction = {
-    category: 'ambiguous',
-    retryable: false,
-    operatorText: operatorTextFor('ambiguous'),
-  };
   return new GraphApiError(
     `ambiguous write outcome (${detail}) — do NOT retry; verify first`,
-    { code: 0, httpStatus: status, action, cause },
+    { code: 0, httpStatus: status, action: ambiguousWriteAction({ detail }), cause },
   );
 }
 
-function networkError(err: unknown, redactor: Redactor): GraphApiError {
-  const action: ErrorAction = {
-    category: 'transient',
-    retryable: true,
-    operatorText: operatorTextFor('transient'),
-  };
+/**
+ * A network fault with no Graph envelope, classified by F06 (CC-NET-5). Routing
+ * it through `classifyNetworkError` is what puts the CC-NET-6 proxy self-
+ * diagnosis in front of the operator — a TLS-interception middlebox produces
+ * exactly these connect failures and resets, and the hint names the env vars to
+ * check. Reached only when retries are exhausted; a write whose request may have
+ * been sent never gets here (it throws {@link ambiguousError} first).
+ */
+function networkError(err: unknown, redactor: Redactor, isWrite: boolean): GraphApiError {
+  const action = classifyNetworkError({
+    phase: isProvablyNotSent(err) ? 'connect' : 'response',
+    isWrite,
+    reason: redactor.redactString(errorMessage(err)),
+  });
   return new GraphApiError(
     redactor.redactString(`network request failed: ${errorMessage(err)}`),
     { code: 0, httpStatus: 0, action, cause: err },
@@ -750,7 +881,7 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
             await backoff(attempt, undefined, req.signal);
             continue;
           }
-          throw networkError(err, redactor);
+          throw networkError(err, redactor, isWrite);
         }
 
         const responseHeaders = extractResponseHeaders(response);
@@ -793,8 +924,8 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
         // verdict === 'retry'
         if (attempt <= retry.maxRetries) {
           const etaMs =
-            kind === 'throttle' && parsed?.etaSeconds !== undefined
-              ? parsed.etaSeconds * 1000
+            kind === 'throttle' && parsed?.etaMinutes !== undefined
+              ? parsed.etaMinutes * ETA_MINUTES_TO_MS
               : undefined;
           logger.warn('fbRequest.retry', {
             host: req.host,
@@ -811,7 +942,9 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
         // Retries exhausted.
         if (kind === 'throttle') {
           const etaMs =
-            parsed?.etaSeconds !== undefined ? parsed.etaSeconds * 1000 : undefined;
+            parsed?.etaMinutes !== undefined
+              ? parsed.etaMinutes * ETA_MINUTES_TO_MS
+              : undefined;
           throw graphErrorFromResponse(status, bodyText, redactor, {
             category: 'rate_limit',
             retryable: false,

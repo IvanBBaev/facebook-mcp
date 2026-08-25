@@ -36,7 +36,7 @@ Three findings shape the design:
 |---|---|
 | [01-goals-and-scope.md](01-goals-and-scope.md) | Goals, target user, use cases, in/out of scope |
 | [02-market-and-positioning.md](02-market-and-positioning.md) | Prior art, gaps, competitive positioning, naming/distribution |
-| [03-meta-api-landscape.md](03-meta-api-landscape.md) | Graph API v25.0 facts the design depends on |
+| [03-meta-api-landscape.md](03-meta-api-landscape.md) | Graph API v23.0 facts the design depends on |
 | [04-auth-and-security.md](04-auth-and-security.md) | Token strategy, permissions, security model |
 | [05-architecture.md](05-architecture.md) | Stack, layering, patterns, key design decisions |
 | [06-tool-catalog.md](06-tool-catalog.md) | Proposed tool surface: packages, tools, annotations |
@@ -48,7 +48,9 @@ Three findings shape the design:
 
 ## Status
 
-- **Phase:** pre-code. No `src/` exists yet; this corpus precedes implementation by design.
+- **Phase:** implemented, unreleased. This corpus preceded implementation by
+  design; `src/` now holds the full server. Nothing has been verified against the
+  live Graph API yet, and nothing is published.
 - **Reviews:** seven role-based senior reviews completed 2026-07-21/22 (see
   `docs/reviews/`), consolidated in
   [../reviews/SUMMARY.md](../reviews/SUMMARY.md) — 2 Blockers, all verdicts
@@ -57,5 +59,6 @@ Three findings shape the design:
   [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) (waves +
   exclusive file ownership); [08-roadmap.md](08-roadmap.md) keeps governing
   verification/release gates.
-- **Next step:** run Wave 0 (D01–D07 corpus corrections, parallel), clear the
-  user gates U1–U4, then dispatch Wave 1 per doc 11.
+- **Next step:** verification against a live Page / ad account (the ✎-marked
+  runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md)),
+  then the release rail in [../runbooks/release.md](../runbooks/release.md).

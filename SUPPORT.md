@@ -36,6 +36,29 @@ use the right channel below so issues stay searchable and triage stays sane.
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev
 workflow and the single check gate.
 
+## What is committed to stay maintained
+
+A single maintainer cannot promise the whole surface forever, so the scope of
+that promise was fixed **before** launch rather than after enthusiasm ran out
+(see the post-launch checkpoints in
+[`docs/analysis/08-roadmap.md`](docs/analysis/08-roadmap.md)):
+
+- The **minimum maintained core** is `core` + `reader` + `posts` + `insights`.
+  These packages get bug fixes and Meta-changelog upkeep for as long as the
+  project is published at all.
+- `moderation`, `messages` and `ads` ship on the same terms as everything else
+  today, but they are the packages a scope reduction would touch first.
+- At **90 days after launch** the project is measured against a pre-committed
+  adoption bar (≥100 weekly downloads / ≥25 stars / ≥3 non-author issues). If it
+  is not met, the declared outcome is a **downgrade to a personal tool**: the
+  minimum core keeps being maintained, the rest becomes as-is. That is a
+  reduction in support, not a deletion — nothing is unpublished and the MIT
+  licence keeps every fork viable.
+
+This is written down so you can plan around it. If a package outside the minimum
+core is load-bearing for you, say so in an issue — usage that is visible is
+usage that counts at the checkpoint.
+
 ## Funding the maintenance
 
 The project is MIT-licensed and free, with no paid tier and no commercial

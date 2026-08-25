@@ -17,7 +17,11 @@
 // `retryAfterMs` this module emits is always a SURFACED estimate, never a sleep
 // instruction (see ErrorAction docs in types.ts).
 
-import { GraphApiError, type ErrorAction } from './index.js';
+// Imported from `./types.js` rather than the `./index.js` barrel on purpose: the
+// HTTP client (`./http.js`) classifies real Graph responses through this module,
+// and the barrel re-exports http.js — going through it would make the two files
+// mutually dependent at module-evaluation time.
+import { GraphApiError, type ErrorAction } from './types.js';
 import { ERROR_MATRIX, ETA_MINUTES_TO_MS, type ErrorMatrixRow } from './error-matrix.js';
 
 /**
@@ -177,7 +181,10 @@ export function graphErrorFromNonJson(
           retryable: false,
           operatorText:
             `HTTP ${httpStatus} returned a non-JSON error body (not a Graph envelope). ` +
-            'Inspect the status and the surfaced body snippet; do not retry automatically.',
+            'Inspect the status and the surfaced body snippet; do not retry automatically. ' +
+            // An HTML body where a Graph envelope belongs is the classic
+            // interception signature (CC-NET-6).
+            PROXY_ENV_HINT,
         });
   const message = snippet
     ? `Non-JSON error body (HTTP ${httpStatus}): ${snippet}`
@@ -207,6 +214,18 @@ const NETWORK_PHASE_REASON: Readonly<Record<NetworkPhase, string>> = {
   unknown: 'network fault',
 };
 
+/**
+ * The CC-NET-6 self-diagnosis line. A corporate proxy or TLS-interception
+ * middlebox produces exactly the symptoms above — connect failures, resets, and
+ * HTML bodies where a Graph envelope belongs — and this server adds no custom CA
+ * handling, so the operator has to look at their proxy environment themselves.
+ * Named env vars, because "check your proxy" is not actionable on its own.
+ */
+export const PROXY_ENV_HINT =
+  'If you are behind a corporate proxy or TLS interception, check HTTPS_PROXY, ' +
+  'HTTP_PROXY, ALL_PROXY and NO_PROXY (and their lowercase forms): facebook-mcp ' +
+  'installs no custom CA and honors only the standard Node/undici proxy defaults.';
+
 function networkTransientAction(reason: string, provablyNotSent: boolean): ErrorAction {
   const context = provablyNotSent
     ? 'the request provably never reached Facebook'
@@ -216,7 +235,8 @@ function networkTransientAction(reason: string, provablyNotSent: boolean): Error
     retryable: true,
     operatorText:
       `Network fault (${reason}) — ${context}. Safe to retry idempotent reads after a short ` +
-      'backoff; the api layer caps any internal wait at 60s and applies jitter.',
+      'backoff; the api layer caps any internal wait at 60s and applies jitter. ' +
+      PROXY_ENV_HINT,
   });
 }
 

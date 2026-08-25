@@ -14,11 +14,13 @@ import {
   retryVerdict,
   bestEffortCategory,
   type FbRequestDeps,
+  type HostSemaphores,
 } from './http.js';
 import { GraphApiError } from './index.js';
 import type {
   FbRequest,
   FbResponse,
+  GraphHost,
   HostAllowlist,
   Logger,
   LogFields,
@@ -127,14 +129,15 @@ async function settle<T>(clock: FakeClock, promise: Promise<T>): Promise<T> {
   return tracked;
 }
 
-function throttleBody(code: number, etaSeconds?: number): unknown {
+/** `estimated_time_to_regain_access` is MINUTES — Graph's documented unit (CC-NET-3). */
+function throttleBody(code: number, etaMinutes?: number): unknown {
   return {
     error: {
       message: 'rate limited',
       type: 'OAuthException',
       code,
-      ...(etaSeconds !== undefined
-        ? { error_data: { estimated_time_to_regain_access: etaSeconds } }
+      ...(etaMinutes !== undefined
+        ? { error_data: { estimated_time_to_regain_access: etaMinutes } }
         : {}),
     },
   };
@@ -256,6 +259,38 @@ test('logs never contain the raw token (C3)', async () => {
   });
 });
 
+test('every credential the request derives is registered with the redactor (C3)', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: {} });
+    // The clean run above proves nothing about the registration: `logger.entries`
+    // is empty of the token whether or not `addSecret` was ever called. Assert on
+    // the registered SET so removing any of the three calls fails here — the
+    // registration is what protects the code paths this test does not exercise.
+    const redactor = createFakeRedactor();
+    const fbRequest = createFbRequest(makeDeps({ redactor }));
+    await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' });
+
+    const proof = computeAppSecretProof(TOKEN, APP_SECRET);
+    assert.deepEqual([...redactor.secrets].sort(), [TOKEN, proof, APP_SECRET].sort());
+  });
+});
+
+test('with no app secret configured, only the token is registered (C3)', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: {} });
+    // No secret ⇒ no proof to compute and nothing else to register. Pinning the
+    // exact set keeps the two `appSecret` guards from being widened into an
+    // unconditional `addSecret(settings.appSecret!)`.
+    const redactor = createFakeRedactor();
+    const fbRequest = createFbRequest(
+      makeDeps({ redactor, settings: makeSettings({ appSecret: undefined }) }),
+    );
+    await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' });
+
+    assert.deepEqual(redactor.secrets, [TOKEN]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Host allowlist / URL safety (CC-NET-7)
 // ---------------------------------------------------------------------------
@@ -293,6 +328,47 @@ test('CC-NET-7: an absolute-URL path cannot redirect the request off-host', asyn
   });
 });
 
+test('CC-NET-7: a traversal segment in an interpolated id cannot retarget the edge', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const fbRequest = createFbRequest(makeDeps());
+    // Ids reach `path` by interpolation and routinely originate in untrusted
+    // content. Assigning `url.pathname` resolves dot segments — including their
+    // percent-encoded spelling — so without containment `DELETE /{post_id}`
+    // silently becomes `DELETE /me/accounts` on the very same allowlisted host.
+    for (const postId of ['../../me/accounts', '%2e%2e/%2E%2e/me/accounts']) {
+      await assert.rejects(
+        fbRequest({
+          protocol: 'json',
+          host: 'graph',
+          method: 'DELETE',
+          path: `/${postId}`,
+        }),
+        /would traverse outside its edge/,
+        `id '${postId}' escaped its edge`,
+      );
+    }
+    assert.equal(mock.requests.length, 0);
+  });
+});
+
+test('CC-NET-7: real Graph id shapes survive containment unescaped', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.fallback({ json: { data: [] } });
+    const fbRequest = createFbRequest(makeDeps());
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/act_123_456/insights',
+    });
+    const recorded = mock.lastRequest();
+    assert.ok(recorded);
+    // `-`, `_`, `.` and `~` are left alone by encodeURIComponent, which covers
+    // every id shape Graph actually emits: `123_456`, `act_123`, `v21.0`.
+    assert.equal(new URL(recorded.url).pathname, '/v21.0/act_123_456/insights');
+  });
+});
+
 test('CC-NET-7: a redirect response is refused, never followed', async () => {
   await withFetch(async (mock: FetchMock) => {
     mock.enqueue({ status: 302, headers: { location: 'https://evil.example/' } });
@@ -304,6 +380,12 @@ test('CC-NET-7: a redirect response is refused, never followed', async () => {
     );
     // Exactly one attempt — the redirect is terminal, not retried.
     assert.equal(mock.requests.length, 1);
+    // The refusal above is our own status check, which would pass just as well if
+    // the client asked the platform to FOLLOW redirects — in that case a real
+    // runtime would have chased the 302 to evil.example with the Authorization
+    // header attached and never handed us the 3xx to refuse. `manual` is what
+    // makes the check reachable, so it is asserted where the check is.
+    assert.equal(mock.lastRequest()?.redirect, 'manual');
   });
 });
 
@@ -446,8 +528,8 @@ test('CC-NET-3: backoff honors estimated_time_to_regain_access but caps at 60s',
     pendingSleeps: () => base.pendingSleeps(),
   };
   await withFetch(async (mock: FetchMock) => {
-    // An ETA of 3600s (3_600_000 ms) must be clamped to the 60s cap.
-    mock.enqueue({ status: 400, json: throttleBody(4, 3600) });
+    // An ETA of 60 MINUTES (3_600_000 ms) must be clamped to the 60s cap.
+    mock.enqueue({ status: 400, json: throttleBody(4, 60) });
     mock.enqueue({ status: 200, json: {} });
 
     const fbRequest = createFbRequest(makeDeps({ clock, rng: () => 1 }));
@@ -458,6 +540,27 @@ test('CC-NET-3: backoff honors estimated_time_to_regain_access but caps at 60s',
     assert.equal(sleeps.length, 1);
     // rng()=1 ⇒ equal jitter yields the full base; base clamped to the 60s cap.
     assert.equal(sleeps[0], 60_000);
+  });
+});
+
+test('CC-NET-3: the surfaced retry-after reads the ETA as minutes, not seconds', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const clock = createFakeClock();
+    // Graph documents `estimated_time_to_regain_access` in MINUTES, and the
+    // matrix converts it with ETA_MINUTES_TO_MS. Reading it as seconds here
+    // would tell the operator "retry in 30s" for a half-hour block.
+    mock.on(() => true, { status: 400, json: throttleBody(4, 30) });
+    const fbRequest = createFbRequest(makeDeps({ clock, retry: { maxRetries: 0 } }));
+    await assert.rejects(
+      settle(
+        clock,
+        fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      ),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'rate_limit' &&
+        err.action.retryAfterMs === 30 * 60_000,
+    );
   });
 });
 
@@ -518,7 +621,10 @@ test('C2 / CC-NET-5: a 5xx on a write is ambiguous and never retried', async () 
         err.action !== undefined &&
         err.action.category === 'ambiguous' &&
         err.action.retryable === false &&
-        /do NOT retry/.test(err.action.operatorText),
+        /[Dd]o NOT retry/.test(err.action.operatorText) &&
+        // The guidance comes from F06, so it names the tool to verify with
+        // instead of only telling the model to verify somehow.
+        err.action.nextTool === 'facebook_list_posts',
     );
     assert.equal(mock.requests.length, 1, 'the write must not be replayed');
   });
@@ -583,6 +689,114 @@ test('506 duplicate is surfaced and never retried', async () => {
         err instanceof GraphApiError &&
         err.code === 506 &&
         err.action?.category === 'duplicate',
+    );
+    assert.equal(mock.requests.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F06 delegation — live Graph errors carry the matrix classification
+// ---------------------------------------------------------------------------
+
+test('F06: a live Graph error is classified by the matrix, next tool included', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 400,
+      json: {
+        error: { message: 'Session expired', code: 190, error_subcode: 463 },
+      },
+    });
+    const fbRequest = createFbRequest(makeDeps());
+    await assert.rejects(
+      fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'auth' &&
+        err.action.retryable === false &&
+        // The matrix row for 190/463, not a category-level platitude.
+        err.action.nextTool === 'facebook_whoami' &&
+        /code 190\/463/.test(err.action.operatorText),
+    );
+  });
+});
+
+test('F06: the subcode picks the more specific row (100/33 is not_found, 100 is validation)', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 400,
+      json: { error: { message: 'gone', code: 100, error_subcode: 33 } },
+    });
+    mock.enqueue({ status: 400, json: { error: { message: 'bad arg', code: 100 } } });
+    const fbRequest = createFbRequest(makeDeps());
+    const categoryOf = async (): Promise<string | undefined> => {
+      try {
+        await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/x' });
+        return undefined;
+      } catch (err) {
+        return err instanceof GraphApiError ? err.action?.category : undefined;
+      }
+    };
+    assert.equal(await categoryOf(), 'not_found');
+    assert.equal(await categoryOf(), 'validation');
+  });
+});
+
+test('F06: a throttle surfaced after retries keeps the row guidance but not its retryability', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const clock = createFakeClock();
+    mock.on(() => true, { status: 400, json: throttleBody(4, 30) });
+    const fbRequest = createFbRequest(makeDeps({ clock, retry: { maxRetries: 0 } }));
+    await assert.rejects(
+      settle(
+        clock,
+        fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      ),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'rate_limit' &&
+        // Retries are spent, so the transport overrides the row's `retryable`...
+        err.action.retryable === false &&
+        // ...while the row still supplies the guidance and the ETA.
+        err.action.nextTool === 'facebook_usage' &&
+        err.action.retryAfterMs === 30 * 60_000 &&
+        /facebook_usage/.test(err.action.operatorText),
+    );
+  });
+});
+
+test('F06: a code the matrix does not know still reads the HTTP status', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const clock = createFakeClock();
+    // `classifyGraphError` is total and would call code 99999 `unknown`; the
+    // status says 5xx, which is the more useful classification for a GET.
+    mock.on(() => true, { status: 503, json: { error: { message: 'x', code: 99999 } } });
+    const fbRequest = createFbRequest(makeDeps({ clock, retry: { maxRetries: 0 } }));
+    await assert.rejects(
+      settle(
+        clock,
+        fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      ),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'transient' &&
+        err.action.retryable === true,
+    );
+  });
+});
+
+test('CC-NET-6: a network fault surfaces the proxy self-diagnosis', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // No programmed response ⇒ the mock rejects. A GET, so it is transient
+    // rather than the C2 ambiguous path a write would take.
+    const fbRequest = createFbRequest(makeDeps({ retry: { maxRetries: 0 } }));
+    await assert.rejects(
+      fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'transient' &&
+        err.action.retryable === true &&
+        /HTTPS_PROXY/.test(err.action.operatorText) &&
+        /installs no custom CA/.test(err.action.operatorText),
     );
     assert.equal(mock.requests.length, 1);
   });
@@ -736,10 +950,42 @@ test('createHostSemaphores limits concurrency and hands a permit to the next wai
   releaseC();
 });
 
-test('a shared semaphore serializes requests but they all complete', async () => {
+/**
+ * Wrap a real semaphore set so the test can see it being used. Counting alone is
+ * what makes the injection observable: a client that quietly built its own set
+ * would still serve six requests, so "six responses came back" proves nothing
+ * about `deps.semaphores`.
+ */
+function spySemaphores(inner: HostSemaphores): HostSemaphores & {
+  readonly acquired: GraphHost[];
+  live: number;
+  peak: number;
+} {
+  const spy = {
+    acquired: [] as GraphHost[],
+    live: 0,
+    peak: 0,
+    async acquire(host: GraphHost): Promise<() => void> {
+      spy.acquired.push(host);
+      const release = await inner.acquire(host);
+      spy.live += 1;
+      spy.peak = Math.max(spy.peak, spy.live);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        spy.live -= 1;
+        release();
+      };
+    },
+  };
+  return spy;
+}
+
+test('every request takes a permit from the INJECTED set and always returns it', async () => {
   await withFetch(async (mock: FetchMock) => {
     mock.on(() => true, { status: 200, json: { ok: true } });
-    const semaphores = createHostSemaphores(2);
+    const semaphores = spySemaphores(createHostSemaphores(2));
     const fbRequest = createFbRequest(makeDeps({ semaphores }));
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
@@ -748,6 +994,45 @@ test('a shared semaphore serializes requests but they all complete', async () =>
     );
     assert.equal(results.length, 6);
     assert.equal(mock.requests.length, 6);
+
+    // The injected set is consulted per request, and under the host it is going
+    // to dial — a per-host budget charged to the wrong host throttles nothing.
+    assert.equal(semaphores.acquired.length, 6);
+    assert.deepEqual([...new Set(semaphores.acquired)], ['graph']);
+
+    // Permits are only a budget if the client waits for them: dropping the
+    // `await` on acquire would let all six run at once and push the peak past
+    // the limit. (How far past is timing-dependent, so the assertion is the
+    // ceiling; that the ceiling BINDS at all is pinned by the unit test above.)
+    assert.ok(
+      semaphores.peak >= 1 && semaphores.peak <= 2,
+      `peak was ${String(semaphores.peak)}`,
+    );
+
+    // A permit leaked on the success path deadlocks the next caller rather than
+    // failing anything here, so the balance is checked where it is still cheap.
+    assert.equal(semaphores.live, 0, 'every permit taken was handed back');
+  });
+});
+
+test('a request that fails terminally still hands its permit back', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // 400 is terminal: no retry, straight to a throw. The release lives in a
+    // `finally`, and this is the path that proves it — an early `return` style
+    // release would strand the permit and wedge the host for the whole process.
+    mock.on(() => true, { status: 400, json: { error: { message: 'bad', code: 100 } } });
+    const semaphores = spySemaphores(createHostSemaphores(1));
+    const fbRequest = createFbRequest(makeDeps({ semaphores }));
+
+    await assert.rejects(
+      fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      GraphApiError,
+    );
+
+    assert.equal(semaphores.acquired.length, 1);
+    assert.equal(semaphores.live, 0);
+    // The single permit is genuinely free again, not merely uncounted.
+    (await semaphores.acquire('graph'))();
   });
 });
 
@@ -761,17 +1046,29 @@ test('a non-JSON protocol is delegated to the uploadHandler when provided', asyn
     seen.push(req);
     return Promise.resolve({ data: { delegated: true } as T, headers: {}, status: 201 });
   };
-  const fbRequest = createFbRequest(makeDeps({ uploadHandler }));
-  const res = await fbRequest({
+  const semaphores = spySemaphores(createHostSemaphores(2));
+  const fbRequest = createFbRequest(makeDeps({ uploadHandler, semaphores }));
+  const request: FbRequest = {
     protocol: 'multipart',
     host: 'graph',
     method: 'POST',
     path: '/me/photos',
     files: [{ name: 'source', data: new Uint8Array([1, 2, 3]) }],
-  });
+  };
+  const res = await fbRequest(request);
+
   assert.deepEqual(res.data, { delegated: true });
   assert.equal(res.status, 201);
+  // Counting the call leaves the seam's actual contract untested: the handler
+  // owns the whole request, so it has to arrive intact — a path rewritten or a
+  // file part dropped on the way through would still count as one call.
   assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0], request);
+
+  // This host's permits are NOT charged here: uploads run long and the upload
+  // client acquires from the same shared set itself, so taking one here too
+  // would double-charge — and, at a limit of one, deadlock against itself.
+  assert.equal(semaphores.acquired.length, 0);
 });
 
 test('a non-JSON protocol without an uploadHandler rejects with a clear error', async () => {

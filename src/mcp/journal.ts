@@ -20,6 +20,11 @@
 //     (`journal.ndjson` → `journal.1.ndjson`, ~5 MB default) so it cannot grow
 //     without bound (G-RUN-1). Rotation is check-before-append, so the live file
 //     may slightly exceed the cap before the next append rotates it — "~5 MB".
+//   * SERIALIZED. Concurrent tool calls append concurrently, and rotation is a
+//     read-modify-write across three syscalls; the writes therefore run one at a
+//     time on an internal FIFO queue. Without it two callers racing a rotation
+//     lose an entry outright (the second `rename` hits ENOENT), which defeats the
+//     whole point of the file.
 //
 // All time is read through the injected `Clock` (no `Date.now()`), so the stamped
 // `timestamp` is deterministic under test.
@@ -98,6 +103,33 @@ export function createJournal(deps: JournalDeps): Journal {
     await rename(filePath, rotated);
   }
 
+  // Writes are serialized on one promise chain. Concurrent tool calls each end in
+  // an `append`, and check-then-rotate-then-write is not atomic: two callers can
+  // both stat an over-size file, both `rm` the retained generation and both try to
+  // `rename` it — the loser fails with ENOENT and DROPS ITS ENTRY, which is the one
+  // thing the journal exists to prevent (CC-LIFE-2). Interleaved rotations can also
+  // discard the retained generation that G-RUN-1 promises to keep. Ordering is
+  // FIFO, so entries land in the order they were submitted.
+  //
+  // The chain never rejects: each link swallows the outcome so one failed write
+  // cannot poison the writes queued behind it.
+  let queue: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const run = queue.then(job, job);
+    queue = run.catch(() => undefined);
+    return run;
+  }
+
+  async function writeLine(line: string): Promise<void> {
+    await mkdir(dir, { recursive: true, ...(isPosix ? { mode: 0o700 } : {}) });
+    await maybeRotate();
+    await appendFile(filePath, line, { mode: 0o600 });
+    if (isPosix) {
+      // Guarantee the exact 0600 bits regardless of umask / prior file mode.
+      await chmod(filePath, 0o600);
+    }
+  }
+
   async function append(entry: JournalEntryInput): Promise<JournalStatus> {
     try {
       const full: JournalEntry = { ...entry, timestamp: deps.clock.now() };
@@ -106,13 +138,7 @@ export function createJournal(deps: JournalDeps): Journal {
       const redacted = deps.redactor.redact(full);
       const line = `${JSON.stringify(redacted)}\n`;
 
-      await mkdir(dir, { recursive: true, ...(isPosix ? { mode: 0o700 } : {}) });
-      await maybeRotate();
-      await appendFile(filePath, line, { mode: 0o600 });
-      if (isPosix) {
-        // Guarantee the exact 0600 bits regardless of umask / prior file mode.
-        await chmod(filePath, 0o600);
-      }
+      await enqueue(() => writeLine(line));
       return 'ok';
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

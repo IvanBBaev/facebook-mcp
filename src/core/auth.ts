@@ -4,14 +4,17 @@
 // Two independent pieces live here:
 //
 //   * `debugToken()` — asks Graph's `/debug_token` edge to classify a token
-//     (USER vs PAGE vs SYSTEM_USER), report validity, scopes and expiry. The
-//     doctor / `facebook_whoami` (F16) use it; multi-page setups use the type to
-//     refuse a user token where a Page token is required (CC-AUTH-2).
+//     (USER vs PAGE vs SYSTEM_USER), report validity, scopes, granular scopes
+//     and expiry. The doctor / `facebook_whoami` (F16) use it. The type is
+//     REPORTED, never used to refuse a call: under C1 a base USER token is the
+//     supported setup (Page tokens are derived from it), so the api layer
+//     annotates a silently-empty read instead of refusing it (CC-AUTH-2 — see
+//     `EMPTY_PAGE_TOKEN_HINT` in `api/comments.ts`).
 //
 //   * `createPageTokenResolver()` — the C1 resolver. It derives a Page token
 //     from the base user/system-user token, caches it, and on Graph error 190
-//     invalidates and re-derives **once** before failing with actionable
-//     guidance. A configured long-lived Page token override is a first-class
+//     (or 100 with a stale-object subcode — CC-AUTH-7) invalidates and
+//     re-derives **once** before failing with actionable guidance. A configured long-lived Page token override is a first-class
 //     fallback (never derived, never re-derived). Every token is registered with
 //     the redactor the moment it exists so it can never survive a log/result.
 //
@@ -34,6 +37,27 @@ import { GraphApiError } from './types.js';
  */
 export const ERROR_CODE_TOKEN_INVALID = 190;
 
+/**
+ * Graph's broad "invalid parameter" code. On its own it means nothing about the
+ * token — a misspelled field or a bad id raises it too — so it is only a cache
+ * signal together with one of {@link STALE_OBJECT_SUBCODES} (CC-AUTH-7).
+ */
+export const ERROR_CODE_INVALID_PARAM = 100;
+
+/**
+ * Subcodes of error 100 that mean "the object this Page id points at is gone or
+ * moved", i.e. exactly the CC-AUTH-7 rail (Page merged, renamed, unpublished):
+ *
+ *   * 21 — "Page ID X was migrated to page ID Y" (merge / rename).
+ *   * 33 — object does not exist, cannot be accessed, or was deleted.
+ *
+ * CC-AUTH-7 decides the resolver cache invalidates on "190/100". Code 100 is
+ * qualified by these subcodes on purpose: an unqualified 100 would drop the
+ * cached Page token (and burn a re-derivation + one operation retry) on every
+ * parameter typo, which the corner case never intended.
+ */
+export const STALE_OBJECT_SUBCODES: readonly number[] = [21, 33];
+
 // ---------------------------------------------------------------------------
 // debug_token — token type detection
 // ---------------------------------------------------------------------------
@@ -41,12 +65,33 @@ export const ERROR_CODE_TOKEN_INVALID = 190;
 /** Token classes distinguished by `debug_token`; anything unrecognized ⇒ `UNKNOWN`. */
 export type TokenType = 'USER' | 'PAGE' | 'SYSTEM_USER' | 'APP' | 'UNKNOWN';
 
+/**
+ * One `granular_scopes` entry: a permission plus the asset ids it was actually
+ * granted over. Meta reports asset-scoped permissions (`pages_*`, `ads_*`, ...)
+ * here; an entry whose `targetIds` is empty means the permission string survives
+ * but no asset is attached to it any more — the CC-AUTH-5 signature of a deleted
+ * system user or an app removed from the Business.
+ */
+export interface GranularScope {
+  readonly scope: string;
+  readonly targetIds: readonly string[];
+}
+
 /** Parsed, normalized subset of a `debug_token` response. Times are epoch ms. */
 export interface DebugTokenInfo {
   readonly type: TokenType;
   readonly valid: boolean;
   readonly appId?: string;
   readonly scopes: readonly string[];
+  /**
+   * Per-asset grants behind {@link DebugTokenInfo.scopes} (CC-AUTH-5). Always
+   * present from {@link debugToken} — empty when Graph reported none (an older
+   * token, or an app with no asset-scoped permission), which is NOT the same as
+   * "granted over zero assets". Optional only so hand-built fallback stubs (e.g.
+   * the `UNKNOWN` token in the tools layer) stay valid without asserting a
+   * granular-scope answer they never had.
+   */
+  readonly granularScopes?: readonly GranularScope[];
   /** Epoch ms; `undefined` ⇒ never-expiring (Graph `expires_at` 0) — doctor warns. */
   readonly expiresAt?: number;
   /** Epoch ms of data-access expiry, when present. */
@@ -63,6 +108,10 @@ interface DebugTokenData {
   readonly is_valid?: boolean;
   readonly app_id?: string;
   readonly scopes?: readonly string[];
+  readonly granular_scopes?: readonly {
+    readonly scope?: string;
+    readonly target_ids?: readonly string[];
+  }[];
   /** Unix **seconds**; 0 ⇒ never-expiring. */
   readonly expires_at?: number;
   readonly data_access_expires_at?: number;
@@ -102,12 +151,37 @@ function secondsToMs(seconds: number | undefined): number | undefined {
   return seconds * 1000;
 }
 
+/**
+ * Parse `granular_scopes` defensively (CC-NET-2): entries without a `scope`
+ * string are dropped, and a missing/malformed `target_ids` becomes `[]` rather
+ * than throwing — an empty target list is itself the CC-AUTH-5 signal.
+ */
+function normalizeGranularScopes(raw: unknown): readonly GranularScope[] {
+  if (!Array.isArray(raw)) return [];
+  const entries = raw as readonly unknown[];
+  const out: GranularScope[] = [];
+  for (const item of entries) {
+    const entry = item as { scope?: unknown; target_ids?: unknown } | null;
+    const scope = entry?.scope;
+    if (typeof scope !== 'string' || scope.length === 0) continue;
+    const rawIds = entry?.target_ids;
+    const ids = Array.isArray(rawIds)
+      ? (rawIds as readonly unknown[]).filter(
+          (id): id is string => typeof id === 'string',
+        )
+      : [];
+    out.push({ scope, targetIds: ids });
+  }
+  return out;
+}
+
 function normalizeDebugToken(data: DebugTokenData): DebugTokenInfo {
   return {
     type: toTokenType(data.type),
     valid: data.is_valid === true,
     appId: data.app_id,
     scopes: data.scopes ?? [],
+    granularScopes: normalizeGranularScopes(data.granular_scopes),
     expiresAt: secondsToMs(data.expires_at),
     dataAccessExpiresAt: secondsToMs(data.data_access_expires_at),
     profileId: data.profile_id,
@@ -117,9 +191,10 @@ function normalizeDebugToken(data: DebugTokenData): DebugTokenInfo {
 
 /**
  * Classify a token via Graph's `/debug_token` edge. The result feeds the doctor
- * (validity / scopes / expiry / type) and the CC-AUTH-2 guard (a USER token
- * where a PAGE token is required returns silent empty data, so tools must refuse
- * up front rather than trust an empty list).
+ * (validity / scopes / granular scopes / expiry / type), which reports the type
+ * so an operator can see whether a USER token is about to read a Page-only edge
+ * (CC-AUTH-2) and reads {@link DebugTokenInfo.granularScopes} to tell a
+ * malformed token from a revoked asset grant (CC-AUTH-5).
  */
 export async function debugToken(
   inputToken: string,
@@ -198,6 +273,38 @@ interface CacheEntry {
 
 function isTokenDead(err: unknown): boolean {
   return err instanceof GraphApiError && err.code === ERROR_CODE_TOKEN_INVALID;
+}
+
+/**
+ * Error 100 with a stale-object subcode — the Page this id points at was merged,
+ * renamed or unpublished, so the cached derivation is worthless (CC-AUTH-7).
+ */
+function isStalePageObject(err: unknown): boolean {
+  return (
+    err instanceof GraphApiError &&
+    err.code === ERROR_CODE_INVALID_PARAM &&
+    err.subcode !== undefined &&
+    STALE_OBJECT_SUBCODES.includes(err.subcode)
+  );
+}
+
+/** The CC-AUTH-7 cache signal: drop the cached Page token and re-derive once. */
+function invalidatesPageCache(err: unknown): boolean {
+  return isTokenDead(err) || isStalePageObject(err);
+}
+
+/** Re-throw a stale-Page error with the "the Page itself moved" guidance. */
+function stalePageError(message: string, cause: unknown): GraphApiError {
+  const g = cause instanceof GraphApiError ? cause : undefined;
+  return new GraphApiError(message, {
+    code: g?.code ?? ERROR_CODE_INVALID_PARAM,
+    subcode: g?.subcode,
+    type: g?.type,
+    fbtraceId: g?.fbtraceId,
+    httpStatus: g?.httpStatus ?? 400,
+    action: g?.action,
+    cause,
+  });
 }
 
 /** Re-throw a token-death error with operator-actionable guidance, preserving the cause. */
@@ -303,10 +410,18 @@ export function createPageTokenResolver(deps: PageTokenResolverDeps): PageTokenR
     try {
       return await op(token);
     } catch (err) {
-      if (!isTokenDead(err)) throw err;
+      if (!invalidatesPageCache(err)) throw err;
 
       // An override token has no re-derivation source — fail with guidance now.
       if (overrides[pageId] !== undefined) {
+        if (isStalePageObject(err)) {
+          throw stalePageError(
+            `Page ${pageId} no longer resolves (Graph error 100) — it was merged, ` +
+              `renamed or unpublished. Re-run facebook_list_pages for the current ` +
+              `Page ID and update FB_PAGE_ID / FB_PROFILE_<NAME>_ID.`,
+            err,
+          );
+        }
         throw tokenDeadError(
           `Configured Page token for Page ${pageId} is invalid (Graph error 190). ` +
             `Refresh FB_PAGE_TOKEN / FB_PROFILE_<NAME>_TOKEN and run the doctor ` +
@@ -321,6 +436,15 @@ export function createPageTokenResolver(deps: PageTokenResolverDeps): PageTokenR
       try {
         return await op(fresh);
       } catch (err2) {
+        if (isStalePageObject(err2)) {
+          throw stalePageError(
+            `Page ${pageId} still does not resolve after one re-derivation (Graph ` +
+              `error 100) — the Page was merged, renamed or unpublished. Re-run ` +
+              `facebook_list_pages for the current Page ID and update ` +
+              `FB_PAGE_ID / FB_PROFILE_<NAME>_ID.`,
+            err2,
+          );
+        }
         if (isTokenDead(err2)) {
           throw tokenDeadError(
             `Page token for Page ${pageId} is still invalid after one ` +

@@ -32,6 +32,7 @@
 
 import {
   computeAppSecretProof,
+  containPathname,
   extractResponseHeaders,
   createHostSemaphores,
   graphErrorFromResponse,
@@ -198,29 +199,63 @@ export function parseFileOffset(
 // ---------------------------------------------------------------------------
 
 /**
- * Build an upload URL from a trusted hostname + relative edge path. Rejects
- * absolute / protocol-relative paths so a crafted `path` cannot redirect off the
- * allowlisted host (CC-NET-7); prepends the API version unless already present.
- * Uploads carry no query string — auth is header-based (C3).
+ * Reject absolute / protocol-relative paths so a crafted `path` cannot redirect
+ * off the allowlisted host (CC-NET-7), and normalise to a leading slash.
  */
-function buildUploadUrl(hostname: string, path: string, apiVersion: string): string {
+function assertRelativeUploadPath(path: string): string {
   if (path.includes('://') || path.startsWith('//')) {
     throw new Error(
       `fbRequest(upload): path must be a relative edge path, not an absolute URL ('${path}')`,
     );
   }
-  let pathname = path.startsWith('/') ? path : `/${path}`;
-  if (!/^\/v\d+(?:\.\d+)?(?:\/|$)/.test(pathname)) {
-    pathname = `/${apiVersion}${pathname}`;
-  }
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
+/**
+ * Pin an already-validated pathname onto a trusted hostname. Uploads carry no
+ * query string — auth is header-based (C3).
+ *
+ * Every segment is contained by {@link containPathname}: an upload path
+ * interpolates ids the model supplies (`/{video-id}`, `/{page-id}/photos`) just
+ * like a Graph edge does, so a `..` segment would otherwise retarget the request
+ * at a different edge on the same allowlisted host.
+ */
+function finalizeUploadUrl(hostname: string, pathname: string): string {
   const url = new URL(`https://${hostname}`);
-  url.pathname = pathname;
+  url.pathname = containPathname(pathname, 'fbRequest(upload)');
   if (url.hostname !== hostname || url.protocol !== 'https:') {
     throw new Error(
       `fbRequest(upload): refusing off-allowlist URL for host '${hostname}'`,
     );
   }
   return url.toString();
+}
+
+/**
+ * Graph edge paths carry the API version as their FIRST segment
+ * (`/v25.0/{page-id}/photos`), so it is prepended unless the caller already
+ * supplied one. Multipart only — see {@link buildRuploadUrl}.
+ */
+function buildMultipartUrl(hostname: string, path: string, apiVersion: string): string {
+  const pathname = assertRelativeUploadPath(path);
+  return finalizeUploadUrl(
+    hostname,
+    /^\/v\d+(?:\.\d+)?(?:\/|$)/.test(pathname) ? pathname : `/${apiVersion}${pathname}`,
+  );
+}
+
+/**
+ * The rupload host does NOT use the Graph layout: its paths are
+ * `/{api-name}/{version}/{id}` — the version is the SECOND segment
+ * (`/video-upload/v25.0/{video-id}`). Prepending a version here, as the Graph
+ * builder does, would emit `/v25.0/video-upload/v25.0/{video-id}`, a URL Meta
+ * never documented. The caller's path is therefore authoritative: the `api`
+ * layer owns the rupload layout, either verbatim from Meta's `upload_url`
+ * (Reels) or composed from the api-name plus the configured version. Core only
+ * validates it.
+ */
+function buildRuploadUrl(hostname: string, path: string): string {
+  return finalizeUploadUrl(hostname, assertRelativeUploadPath(path));
 }
 
 function resolveUploadToken(
@@ -403,7 +438,7 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       }
     }
 
-    const url = buildUploadUrl(hostname, req.path, settings.apiVersion);
+    const url = buildMultipartUrl(hostname, req.path, settings.apiVersion);
     // Content-Type is intentionally omitted: `fetch` derives the multipart
     // boundary from the FormData body itself.
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
@@ -472,8 +507,16 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
     const hostname = resolveHostBase(settings.hosts, req.host);
     const token = resolveUploadToken(req, settings);
     redactor.addSecret(token);
+    // No `appsecret_proof` here, deliberately — this is NOT an oversight, and the
+    // asymmetry with `multipartRequest` above is by design. rupload is not a
+    // Graph edge: Meta documents it as `Authorization: OAuth <token>` plus offset
+    // headers on a raw-binary body, with no proof parameter (see
+    // docs/reviews/01-software-architect.md §4). There is nowhere to put one that
+    // Meta reads — the body is the file bytes, and a query param both fails to
+    // apply and violates C3's keep-credentials-out-of-URLs rule. The `graph` and
+    // `graph-video` hosts, which do read it, attach it on every call.
 
-    const url = buildUploadUrl(hostname, req.path, settings.apiVersion);
+    const url = buildRuploadUrl(hostname, req.path);
     const timeoutMs = req.timeoutMs ?? settings.requestTimeoutMs;
     const chunkStart = req.fileOffset;
     const chunkEnd = chunkStart + req.chunk.byteLength;
@@ -490,19 +533,37 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
     };
 
     // Ask the server where it is (used when a failed response carries no offset).
+    //
+    // The probe is itself a network call and fails like one — a DNS blip, a
+    // timeout, a mid-flight reset. Unclassified, that rejection escapes the
+    // handler as a bare `TypeError`, and every layer above reads it as an
+    // unknown failure: no category, no retry verdict, no operator text. It is
+    // the same transport fault that sent us here, so it is classified the same
+    // way — an abort and an already-classified error still pass through.
     const probeServerOffset = async (): Promise<number | undefined> => {
-      const probe = await doFetch(
-        url,
-        'GET',
-        { authorization: `OAuth ${token}` },
-        undefined,
-        timeoutMs,
-        req.signal,
-      );
-      const probeHeaders = extractResponseHeaders(probe);
-      feedUsage(probeHeaders);
-      const text = await probe.text();
-      return parseFileOffset(probeHeaders, text);
+      try {
+        const probe = await doFetch(
+          url,
+          'GET',
+          { authorization: `OAuth ${token}` },
+          undefined,
+          timeoutMs,
+          req.signal,
+        );
+        const probeHeaders = extractResponseHeaders(probe);
+        feedUsage(probeHeaders);
+        const text = await probe.text();
+        return parseFileOffset(probeHeaders, text);
+      } catch (err) {
+        if (req.signal?.aborted === true) throw err;
+        if (err instanceof GraphApiError) throw err;
+        throw transientUploadError(
+          0,
+          `offset probe failed: ${errorMessage(err)}`,
+          redactor,
+          err,
+        );
+      }
     };
 
     // Map a server offset to the unacknowledged tail of THIS chunk, or refuse.
@@ -512,9 +573,23 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       if (serverOffset === undefined) {
         throw transientUploadError(0, 'server offset unavailable to resume', redactor);
       }
-      if (serverOffset < chunkStart || serverOffset >= chunkEnd) {
+      // `chunkEnd` is the most likely offset to see here, not an error: the
+      // server took every byte and the fault hit on the way back. There is no
+      // tail left to resend, so this is not a desync — treating it as one throws
+      // away a chunk the server already holds (for a large video, a very
+      // expensive restart of an upload that was in fact complete). It is a
+      // transient fault: the api layer re-reads the server offset, sees this
+      // window closed, and moves to the next one (CC-MEDIA-2).
+      if (serverOffset === chunkEnd) {
+        throw transientUploadError(
+          0,
+          `server acknowledged the whole chunk (offset ${serverOffset}) — nothing left to resend`,
+          redactor,
+        );
+      }
+      if (serverOffset < chunkStart || serverOffset > chunkEnd) {
         throw restartUploadError(
-          `server offset ${serverOffset} outside chunk window [${chunkStart}, ${chunkEnd})`,
+          `server offset ${serverOffset} outside chunk window [${chunkStart}, ${chunkEnd}]`,
           redactor,
         );
       }

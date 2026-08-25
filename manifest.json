@@ -1,0 +1,268 @@
+{
+  "manifest_version": "0.2",
+  "name": "facebook-mcp",
+  "display_name": "Facebook Pages MCP",
+  "version": "0.7.0",
+  "description": "Facebook Pages MCP server for the Meta Graph API — publishing, insights, moderation, messaging",
+  "long_description": "Local-first TypeScript MCP server for the Meta Graph API that lets an MCP client publish, read and moderate Facebook Pages through your own Meta developer app, with least-privilege tokens, plan-and-apply write safety and no telemetry.",
+  "author": {
+    "name": "Ivan Baev",
+    "email": "ivanbbaev@gmail.com",
+    "url": "https://github.com/IvanBBaev"
+  },
+  "homepage": "https://github.com/IvanBBaev/facebook-mcp#readme",
+  "documentation": "https://ivanbbaev.github.io/facebook-mcp/",
+  "support": "https://github.com/IvanBBaev/facebook-mcp/issues",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "facebook",
+    "meta",
+    "graph-api",
+    "pages",
+    "llm",
+    "ai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IvanBBaev/facebook-mcp"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "build/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/build/index.js"],
+      "env": {
+        "FB_SYSTEM_TOKEN": "${user_config.system_token}",
+        "FB_ACCESS_TOKEN": "${user_config.access_token}",
+        "FB_PAGE_TOKEN": "${user_config.page_token}",
+        "FB_APP_ID": "${user_config.app_id}",
+        "FB_APP_SECRET": "${user_config.app_secret}",
+        "FB_PAGE_ID": "${user_config.page_id}",
+        "FB_WRITE_MODE": "${user_config.write_mode}",
+        "FB_MEDIA_DIR": "${user_config.media_dir}",
+        "FB_TOOL_PACKAGES": "${user_config.tool_packages}"
+      }
+    }
+  },
+  "tools_generated": false,
+  "tools": [
+    {
+      "name": "facebook_whoami",
+      "description": "Report the identity behind the configured token (type, validity, granted permissions, expiry) plus the server, MCP SDK and pinned Graph API version."
+    },
+    {
+      "name": "facebook_list_pages",
+      "description": "List the Facebook Pages the operator administers (via /me/accounts): id, name, category, the granted tasks, and whether a Page token is available."
+    },
+    {
+      "name": "facebook_get_page",
+      "description": "Fetch metadata for one Page — name, category, follower/fan counts, publish state, new-Page-experience flag and video upload limits."
+    },
+    {
+      "name": "facebook_usage",
+      "description": "Report the most recent Graph rate-limit signals (X-App-Usage, X-Business-Use-Case-Usage, x-fb-ads-insights-throttle) as usage percentages, so you can back off before…"
+    },
+    {
+      "name": "facebook_list_posts",
+      "description": "List a Page's posts, one cursor page at a time."
+    },
+    {
+      "name": "facebook_get_post",
+      "description": "Fetch ONE post by its composite id (\"{page-id}_{post-id}\" as returned by facebook_list_posts)."
+    },
+    {
+      "name": "facebook_list_reels",
+      "description": "List a Page's Reels via the /video_reels edge — the ONLY place Reels are readable."
+    },
+    {
+      "name": "facebook_get_reactions",
+      "description": "Read the reactions on one post: a `totals` map per reaction type (LIKE / LOVE / CARE / HAHA / WOW / SAD / ANGRY), the overall `total`, and the list of reacting users."
+    },
+    {
+      "name": "facebook_create_post",
+      "description": "Create a Page post: plain text, a link, a multi-link card carousel, or a multi-photo carousel."
+    },
+    {
+      "name": "facebook_create_photo_post",
+      "description": "Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled."
+    },
+    {
+      "name": "facebook_create_video_post",
+      "description": "Upload a video to a Page."
+    },
+    {
+      "name": "facebook_create_reel",
+      "description": "Publish a Facebook Reel through the three-phase upload (start → transfer → finish) with an explicit video_state: PUBLISHED, DRAFT or SCHEDULED."
+    },
+    {
+      "name": "facebook_update_post",
+      "description": "Edit a Page post the app itself created, or move it through the scheduled-post lifecycle."
+    },
+    {
+      "name": "facebook_delete_post",
+      "description": "Permanently delete a Page post the app itself created — including a scheduled one, which is the only way to cancel it."
+    },
+    {
+      "name": "facebook_list_scheduled_posts",
+      "description": "List the Page posts that are queued to publish later, each with its publish time echoed in UTC and in Page-local time."
+    },
+    {
+      "name": "facebook_get_video_status",
+      "description": "Poll where one video stands in Meta's pipeline: uploading, processing, ready or error."
+    },
+    {
+      "name": "facebook_page_insights",
+      "description": "Read Graph insights for one Page in a compact flat shape: one row per metric per data point ({metric, date, value}, plus `breakdown` for by-action-type metrics) and one…"
+    },
+    {
+      "name": "facebook_post_insights",
+      "description": "Read Graph insights for one published post (post_media_view, post_clicks, post_reactions_by_type_total, video metrics, ...) in the same compact flat shape as…"
+    },
+    {
+      "name": "facebook_reel_insights",
+      "description": "Read Graph insights for one Reel from /{video-id}/video_insights — the edge Reel metrics actually live on, which facebook_post_insights cannot reach."
+    },
+    {
+      "name": "facebook_list_comments",
+      "description": "List the comments on a post, photo, video or another comment, newest-first by default."
+    },
+    {
+      "name": "facebook_get_comment",
+      "description": "Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window)."
+    },
+    {
+      "name": "facebook_reply_to_comment",
+      "description": "Post a PUBLIC reply under a comment — visible to everyone who can see the thread."
+    },
+    {
+      "name": "facebook_hide_comment",
+      "description": "Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores)."
+    },
+    {
+      "name": "facebook_delete_comment",
+      "description": "PERMANENTLY delete up to 50 comments."
+    },
+    {
+      "name": "facebook_private_reply",
+      "description": "Send a private message to the author of a comment."
+    },
+    {
+      "name": "facebook_block_user",
+      "description": "Add up to 50 PSIDs to the Page's blocked list: they can no longer comment on the Page or message it."
+    },
+    {
+      "name": "facebook_unblock_user",
+      "description": "Remove up to 50 PSIDs from the Page's blocked list, restoring their ability to comment and message."
+    },
+    {
+      "name": "facebook_list_conversations",
+      "description": "List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet."
+    },
+    {
+      "name": "facebook_get_conversation",
+      "description": "Read one Messenger thread newest-message-first: sender, timestamp, direction and body, plus typed placeholders for images, stickers, files and shared links (attachments…"
+    },
+    {
+      "name": "facebook_send_message",
+      "description": "Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE)."
+    },
+    {
+      "name": "facebook_list_campaigns",
+      "description": "List campaigns under one ad account, a cursor page at a time."
+    },
+    {
+      "name": "facebook_list_adsets",
+      "description": "List ad sets under one ad account, a cursor page at a time."
+    },
+    {
+      "name": "facebook_list_ads",
+      "description": "List individual ads under one ad account, a cursor page at a time."
+    },
+    {
+      "name": "facebook_get_ad_object",
+      "description": "Read one campaign, ad set or ad by id."
+    },
+    {
+      "name": "facebook_ads_insights",
+      "description": "Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad."
+    },
+    {
+      "name": "facebook_ads_report_status",
+      "description": "Probe one async insights report run and, with fetch_results:true, read its rows once it has completed."
+    },
+    {
+      "name": "facebook_update_ad_object",
+      "description": "Pause or resume an ads object, or change its budget."
+    }
+  ],
+  "user_config": {
+    "system_token": {
+      "type": "string",
+      "title": "System User token",
+      "description": "System-user access token (Business Manager). Takes precedence over FB_ACCESS_TOKEN and FB_PAGE_TOKEN when several are set.",
+      "required": false,
+      "sensitive": true
+    },
+    "access_token": {
+      "type": "string",
+      "title": "User access token",
+      "description": "Primary user access token. At least one of FB_SYSTEM_TOKEN, FB_ACCESS_TOKEN or FB_PAGE_TOKEN must be set.",
+      "required": false,
+      "sensitive": true
+    },
+    "page_token": {
+      "type": "string",
+      "title": "Page access token",
+      "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured.",
+      "required": false,
+      "sensitive": true
+    },
+    "app_id": {
+      "type": "string",
+      "title": "Meta app ID",
+      "description": "Meta app ID; combined with FB_APP_SECRET it forms the app access token used to authorize /debug_token inspection.",
+      "required": false
+    },
+    "app_secret": {
+      "type": "string",
+      "title": "Meta app secret",
+      "description": "Meta app secret. When set, appsecret_proof is attached to every call so a stolen bare token cannot be used on its own.",
+      "required": false,
+      "sensitive": true
+    },
+    "page_id": {
+      "type": "string",
+      "title": "Default Page ID",
+      "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument.",
+      "required": false
+    },
+    "write_mode": {
+      "type": "string",
+      "title": "Write mode",
+      "description": "Write gating mode: plan (validating dry-run preview, the default) or apply. It never covers the irreversible and spend tiers, which always need a per-call apply plus a plan_id.",
+      "required": false,
+      "default": "plan"
+    },
+    "media_dir": {
+      "type": "directory",
+      "title": "Local media directory",
+      "description": "Directory permitted for local media uploads. Unset means URL-only uploads and no local file access at all.",
+      "required": false
+    },
+    "tool_packages": {
+      "type": "string",
+      "title": "Tool packages",
+      "description": "Comma-separated tool packages or profiles to expose (e.g. core,posts,reader, or the profiles core|all|reader|publisher|moderator|ads). Omit for the default profile, which excludes ads.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"],
+    "runtimes": {
+      "node": ">=22"
+    }
+  }
+}

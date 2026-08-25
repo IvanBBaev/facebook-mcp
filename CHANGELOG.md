@@ -6,9 +6,17 @@ and its [milestones](https://github.com/IvanBBaev/facebook-mcp/milestones); the 
 
 ## [Unreleased]
 
-Pre-1.0 work in progress — **not yet released to npm.** The design corpus is
-complete and the foundation is implemented and tested; the tool surface is still
-being filled out package by package.
+## [0.7.0] - 2026-08-25
+
+First public release. **Pre-1.0 on purpose, and the version number is the
+warning:** the design corpus is complete and all seven tool packages are
+implemented, registered and unit-tested against recorded responses, but what is
+still outstanding for 1.0 is verification, not implementation. The live
+exit-gate smoke runs against a real test Page have not been executed, so no tool
+in this release has been confirmed against the real Graph API. Treat every
+capability below as "implemented and tested in isolation", not as "proven in
+production" — and expect the 1.0 line to be the one that carries live
+verification, not new surface area.
 
 ### Added
 
@@ -25,6 +33,32 @@ being filled out package by package.
   with Page-token presence but never the token value), `facebook_get_page`
   (metadata for one resolved Page) and `facebook_usage` (the most recent Graph
   rate-limit headers as usage percentages).
+- **`reader` tool package (read-only).** Four tools: `facebook_list_posts`,
+  `facebook_get_post`, `facebook_list_reels` and `facebook_get_reactions` — Page
+  feed and Reels listing with cursor pagination, and reaction breakdowns.
+- **`posts` tool package (writes).** Eight tools: text, photo, video and Reel
+  publishing (`facebook_create_post`, `facebook_create_photo_post`,
+  `facebook_create_video_post`, `facebook_create_reel`), scheduling and the
+  scheduled-post list (`facebook_list_scheduled_posts`), edit and delete
+  (`facebook_update_post`, `facebook_delete_post`), and upload-state polling for
+  large media (`facebook_get_video_status`). Video and Reel uploads are
+  resumable and report progress to clients that request it.
+- **`insights` tool package (read-only).** `facebook_page_insights` and
+  `facebook_post_insights`, with metric names validated before the call so an
+  unknown metric fails locally instead of returning a silently empty series.
+- **`moderation` tool package (writes).** Eight tools: comment listing and
+  reading, reply, hide, delete, the one-shot `facebook_private_reply` (7-day
+  window and single-attempt rule checked client-side before anything is sent),
+  and the reversible `facebook_block_user` / `facebook_unblock_user` pair.
+- **`messages` tool package (writes).** `facebook_list_conversations`,
+  `facebook_get_conversation` and `facebook_send_message`, with the 24-hour
+  standard messaging window evaluated on every call — including on an `apply`
+  that follows a stale preview — and an ambiguous send recorded as `attempted`
+  rather than `failed`, so a lost response never invites a double-send.
+- **`ads` tool package (opt-in, not part of 1.0).** Campaign / ad-set / ad
+  listing and reading, guarded status and budget updates, and asynchronous
+  insight reports (`facebook_ads_insights`, `facebook_ads_report_status`). Off
+  unless explicitly enabled; it ships as a supported capability in 1.1.0.
 - **Tools-as-data authoring.** `defineTool` (schema-validated, annotation-typed
   tool specs) and a central package registry that expands the default profile,
   forces `core` on and applies the deny / read-only package policy.
@@ -46,8 +80,30 @@ being filled out package by package.
 - **`doctor` diagnostic.** A startup self-check that aggregates every `FB_*`
   configuration problem into one report and probes whether the configured token
   actually works, so misconfiguration surfaces in one pass.
+- **`setup-token` subcommand.** An interactive first-run helper that exchanges a
+  short-lived user token for a long-lived Page token and writes it to the env
+  file with owner-only permissions. It never prints, logs or echoes a token
+  value, and it warns when a token is passed on the command line, where `ps` and
+  the shell history can see it.
+- **Progress notifications.** Long uploads emit MCP `notifications/progress`
+  frames when — and only when — the client supplied a progress token. Delivery is
+  best-effort and detached, so a closed stream can never fail an upload that
+  otherwise succeeded.
 - **Distribution manifests.** An MCP Registry `server.json`, a Claude Code plugin
-  bundle (`.claude-plugin/`), a `FUNDING.yml` sponsor button and this changelog.
+  bundle (`.claude-plugin/`), an MCPB desktop bundle built by
+  `scripts/pack-mcpb.mjs`, a `FUNDING.yml` sponsor button and this changelog. All
+  of them, plus the README env table and `.env.example`, are generated from a
+  single metadata source (`scripts/metadata.config.mjs`) and checked for drift in
+  CI, so the shipped manifests cannot disagree with the code.
+- **CI-only publishing.** A tag-triggered release workflow publishes to npm with
+  provenance from GitHub Actions; the package declares no install lifecycle
+  scripts, and a guard fails the build if one is ever added. Local publishing and
+  `npm version` are both refused by design — see
+  [`docs/runbooks/release.md`](docs/runbooks/release.md).
+- **Operator runbooks.** Seven procedural guides under `docs/runbooks/` —
+  onboarding, credential rotation, kill switch, the ~4-week Meta app upkeep pass,
+  offboarding, the release cut, and the operator window for the three tools no
+  automated test can cover.
 - **Documentation site.** A zero-build GitHub Pages site at
   [ivanbbaev.github.io/facebook-mcp](https://ivanbbaev.github.io/facebook-mcp/),
   including funding links and a per-package shipping status so the public page
@@ -55,10 +111,11 @@ being filled out package by package.
 
 ### Changed
 
-- **Honest capability reporting.** The README, the Pages site and the FAQ now
-  distinguish what ships today (the read-only `core` package, four tools) from
-  what is designed and scheduled, with every planned area linked to its release
-  milestone. A new README `Roadmap` section points at the public roadmap board.
+- **Honest capability reporting.** The README, the Pages site and the FAQ
+  distinguish what is implemented from what is designed and scheduled, with every
+  planned area linked to its release milestone, and they now state plainly that
+  nothing has been verified against the real Graph API yet. A README `Roadmap`
+  section points at the public roadmap board.
 
 ### Fixed
 
@@ -75,5 +132,16 @@ being filled out package by package.
   choke-point across logs, errors, tool results and the journal; the
   `appsecret_proof` signature (when `FB_APP_SECRET` is set) makes a stolen bare
   token unusable.
+- **Release-toolchain integrity.** The `mcp-publisher` binary used to list the
+  server on the MCP Registry is verified against a SHA-256 committed to this
+  repository rather than against a checksum file fetched from the same place as
+  the binary; the upstream checksums file is kept only as a warning-level
+  cross-check. A mismatch fails the release.
+- **Attested desktop bundle.** The `.mcpb` bundle now carries a GitHub
+  build-provenance attestation, re-verified with `gh attestation verify` before
+  the asset is attached to the Release — so the file on the Release page can be
+  proven to have come out of this repository's workflow, which a checksum
+  published beside it cannot do.
 
-[Unreleased]: https://github.com/IvanBBaev/facebook-mcp/commits/main
+[Unreleased]: https://github.com/IvanBBaev/facebook-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/IvanBBaev/facebook-mcp/releases/tag/v0.7.0

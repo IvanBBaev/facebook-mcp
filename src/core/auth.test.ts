@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { debugToken, createPageTokenResolver, ERROR_CODE_TOKEN_INVALID } from './auth.js';
+import {
+  debugToken,
+  createPageTokenResolver,
+  ERROR_CODE_INVALID_PARAM,
+  ERROR_CODE_TOKEN_INVALID,
+  STALE_OBJECT_SUBCODES,
+} from './auth.js';
 import { GraphApiError } from './types.js';
 import type { JsonRequest } from './types.js';
 import {
@@ -389,4 +395,239 @@ test('runWithPageToken: a non-190 error is rethrown as-is, never retried (CC-AUT
   );
 
   assert.equal(opCalls, 1); // permission errors are never retried
+});
+
+// ---------------------------------------------------------------------------
+// CC-AUTH-5 — granular_scopes surfaced by debug_token
+// ---------------------------------------------------------------------------
+
+test('debugToken surfaces granular_scopes with their target asset ids', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (r) => r.path === '/debug_token',
+    fbOk({
+      data: {
+        type: 'SYSTEM_USER',
+        is_valid: true,
+        scopes: ['pages_show_list', 'ads_read'],
+        granular_scopes: [
+          { scope: 'pages_show_list', target_ids: ['100', '200'] },
+          { scope: 'ads_read', target_ids: ['act_1'] },
+        ],
+      },
+    }),
+  );
+
+  const info = await debugToken('EAA-system-token', {
+    fbRequest: fb.fn,
+    accessToken: 'app-1|app-secret',
+  });
+
+  assert.deepEqual(
+    (info.granularScopes ?? []).map((entry) => [entry.scope, [...entry.targetIds]]),
+    [
+      ['pages_show_list', ['100', '200']],
+      ['ads_read', ['act_1']],
+    ],
+  );
+});
+
+test('debugToken reports a granular scope that lost every target asset (CC-AUTH-5)', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (r) => r.path === '/debug_token',
+    fbOk({
+      data: {
+        type: 'SYSTEM_USER',
+        is_valid: true,
+        scopes: ['pages_show_list'],
+        granular_scopes: [{ scope: 'pages_show_list', target_ids: [] }],
+      },
+    }),
+  );
+
+  const info = await debugToken('EAA-system-token', {
+    fbRequest: fb.fn,
+    accessToken: 'app-1|app-secret',
+  });
+
+  // Valid token, permission still listed, but no asset behind it.
+  assert.equal(info.valid, true);
+  assert.deepEqual([...info.scopes], ['pages_show_list']);
+  assert.deepEqual(info.granularScopes, [{ scope: 'pages_show_list', targetIds: [] }]);
+});
+
+test('debugToken parses malformed granular_scopes defensively (CC-NET-2)', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (r) => r.path === '/debug_token',
+    fbOk({
+      data: {
+        type: 'USER',
+        is_valid: true,
+        granular_scopes: [
+          { target_ids: ['100'] }, // no scope name ⇒ dropped
+          { scope: '', target_ids: ['100'] }, // empty scope name ⇒ dropped
+          { scope: 'pages_show_list', target_ids: 'nope' }, // not an array ⇒ []
+          { scope: 'ads_read', target_ids: ['act_1', 7] }, // non-string id dropped
+          { scope: 'read_insights' }, // absent target_ids ⇒ []
+        ],
+      },
+    }),
+  );
+
+  const info = await debugToken('EAA-user-token', {
+    fbRequest: fb.fn,
+    accessToken: 'app-1|app-secret',
+  });
+
+  assert.deepEqual(info.granularScopes, [
+    { scope: 'pages_show_list', targetIds: [] },
+    { scope: 'ads_read', targetIds: ['act_1'] },
+    { scope: 'read_insights', targetIds: [] },
+  ]);
+});
+
+test('debugToken reports no granular scopes when Graph omits the field', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (r) => r.path === '/debug_token',
+    fbOk({ data: { type: 'USER', is_valid: true, granular_scopes: 'not-an-array' } }),
+  );
+
+  const info = await debugToken('EAA-user-token', {
+    fbRequest: fb.fn,
+    accessToken: 'app-1|app-secret',
+  });
+
+  assert.deepEqual(info.granularScopes, []);
+});
+
+// ---------------------------------------------------------------------------
+// CC-AUTH-7 — the cache also invalidates on error 100 (stale Page object)
+// ---------------------------------------------------------------------------
+
+function stalePage(subcode: number): GraphApiError {
+  return new GraphApiError('Unsupported get request', {
+    code: ERROR_CODE_INVALID_PARAM,
+    subcode,
+    httpStatus: 400,
+  });
+}
+
+for (const subcode of STALE_OBJECT_SUBCODES) {
+  test(`runWithPageToken: op 100/${String(subcode)} → invalidate → re-derive once → op succeeds`, async () => {
+    const fb = createFakeFbRequest();
+    fb.enqueue(fbOk({ access_token: 'EAA-page-v1', id: '100' }));
+    fb.enqueue(fbOk({ access_token: 'EAA-page-v2', id: '100' }));
+
+    const resolver = createPageTokenResolver({
+      fbRequest: fb.fn,
+      baseToken: 'EAA-base',
+      clock: createFakeClock(),
+      redactor: createFakeRedactor(),
+    });
+
+    const seen: string[] = [];
+    let opCalls = 0;
+    const out = await resolver.runWithPageToken('100', (token) => {
+      opCalls += 1;
+      seen.push(token);
+      if (opCalls === 1) return Promise.reject(stalePage(subcode));
+      return Promise.resolve('recovered');
+    });
+
+    assert.equal(out, 'recovered');
+    assert.equal(opCalls, 2);
+    assert.deepEqual(seen, ['EAA-page-v1', 'EAA-page-v2']); // re-derived once
+  });
+}
+
+test('runWithPageToken: a bare error 100 does NOT invalidate the cache', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((r) => r.path === '/100', fbOk({ access_token: 'EAA-page', id: '100' }));
+
+  const resolver = createPageTokenResolver({
+    fbRequest: fb.fn,
+    baseToken: 'EAA-base',
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+  });
+
+  // Error 100 with no subcode is "you sent a bad parameter", not "the Page
+  // moved" — dropping the token and replaying the op would be pure waste.
+  const badParam = new GraphApiError('Invalid parameter', {
+    code: ERROR_CODE_INVALID_PARAM,
+    httpStatus: 400,
+  });
+  let opCalls = 0;
+  await assert.rejects(
+    resolver.runWithPageToken('100', () => {
+      opCalls += 1;
+      return Promise.reject(badParam);
+    }),
+    (e: unknown) => e === badParam, // same instance, unwrapped
+  );
+
+  assert.equal(opCalls, 1);
+  assert.equal(fb.calls.length, 1); // one derivation, no re-derivation
+});
+
+test('runWithPageToken: a second 100/33 after re-derivation reports the moved Page', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ access_token: 'EAA-page-v1', id: '100' }));
+  fb.enqueue(fbOk({ access_token: 'EAA-page-v2', id: '100' }));
+
+  const resolver = createPageTokenResolver({
+    fbRequest: fb.fn,
+    baseToken: 'EAA-base',
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+  });
+
+  let opCalls = 0;
+  await assert.rejects(
+    resolver.runWithPageToken('100', () => {
+      opCalls += 1;
+      return Promise.reject(stalePage(33));
+    }),
+    (e: unknown) => {
+      assert.ok(e instanceof GraphApiError);
+      assert.equal(e.code, ERROR_CODE_INVALID_PARAM);
+      assert.equal(e.subcode, 33);
+      assert.match(e.message, /still does not resolve after one re-derivation/);
+      assert.match(e.message, /facebook_list_pages/);
+      return true;
+    },
+  );
+
+  assert.equal(opCalls, 2);
+});
+
+test('runWithPageToken: an override token on 100/21 reports the merged Page, no re-derive', async () => {
+  const fb = createFakeFbRequest();
+
+  const resolver = createPageTokenResolver({
+    fbRequest: fb.fn,
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+    overrides: { '100': 'EAA-configured-page-token' },
+  });
+
+  let opCalls = 0;
+  await assert.rejects(
+    resolver.runWithPageToken('100', () => {
+      opCalls += 1;
+      return Promise.reject(stalePage(21));
+    }),
+    (e: unknown) => {
+      assert.ok(e instanceof GraphApiError);
+      assert.equal(e.code, ERROR_CODE_INVALID_PARAM);
+      assert.match(e.message, /merged, renamed or unpublished/);
+      return true;
+    },
+  );
+
+  assert.equal(opCalls, 1); // an override has no re-derivation source
+  assert.equal(fb.calls.length, 0);
 });

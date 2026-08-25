@@ -52,7 +52,7 @@ telemetry — teardown is entirely local:
 1. **Env / config file** — the XDG config env file holding `FB_ACCESS_TOKEN`,
    `FB_APP_SECRET`, and related values (written `0600`). Delete it. Also clear
    these from any shell profile, `.env`, or client config where you set them.
-2. **Write journal** — `journal.jsonl` (and any rotated `journal.1.jsonl`) under
+2. **Write journal** — `journal.ndjson` (and any rotated `journal.1.ndjson`) under
    the XDG **state** directory. It holds redacted structured metadata only, but
    delete it as part of a clean teardown.
 3. **Any other XDG state** the server created under its state/cache directories.
@@ -60,10 +60,12 @@ telemetry — teardown is entirely local:
    directory belongs to you; the server created nothing there, but confirm no
    copies of media you no longer want remain.
 
-> The exact XDG paths follow the platform's `XDG_CONFIG_HOME` / `XDG_STATE_HOME`
-> conventions (with the OS defaults when unset). If unsure, locate them from the
-> doctor output or by searching your config/state directories for the app's
-> folder before deleting.
+> The doctor does not print these paths, so use the platform conventions
+> directly. Config: `$XDG_CONFIG_HOME/facebook-mcp/` (default
+> `~/.config/facebook-mcp/`) on POSIX, `%APPDATA%\facebook-mcp\` on Windows.
+> State: `$XDG_STATE_HOME/facebook-mcp/` (default
+> `~/.local/state/facebook-mcp/`) on POSIX, `%LOCALAPPDATA%\facebook-mcp\` on
+> Windows.
 
 **Verify by:** the env file, journal(s), and state directory are gone; a search of
 your config/state locations for the app's folder returns nothing.

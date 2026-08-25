@@ -1,9 +1,10 @@
 // Recording fake global `fetch` for the scope of a callback (task F03).
 //
 // `withFetch` installs a fake `fetch` that (a) records every outgoing request —
-// method, URL, headers, and a structured capture of the body across all shapes
-// `fbRequest` emits (JSON string, URLSearchParams, multipart FormData, and raw
-// binary / ArrayBuffer / Uint8Array rupload chunks) — and (b) answers each call
+// method, URL, headers, redirect policy, and a structured capture of the body
+// across all shapes `fbRequest` emits (JSON string, URLSearchParams, multipart
+// FormData, and raw binary / ArrayBuffer / Uint8Array rupload chunks) — and
+// (b) answers each call
 // with a programmed `Response` selected from a FIFO queue, then matcher rules,
 // then an optional fallback. On exit it restores the previous global `fetch`
 // (the C13 network fence when that is installed), even if the callback throws.
@@ -18,6 +19,7 @@
 // need directly from the global `fetch` and `Response` types.
 type FetchInput = Parameters<typeof fetch>[0];
 type FetchBody = RequestInit['body'] | undefined;
+type FetchRedirect = RequestInit['redirect'];
 type ResponseBody = ConstructorParameters<typeof Response>[0];
 
 /** A single captured file part of a multipart FormData body. */
@@ -54,6 +56,14 @@ export interface RecordedRequest {
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: CapturedBody;
+  /**
+   * The redirect policy the caller asked for; `undefined` means it asked for
+   * nothing and would get the platform default (`'follow'`). Recorded because
+   * `redirect: 'manual'` is the control that stops a 3xx from carrying the token
+   * off an allowlisted host (CC-NET-7) — a fake cannot follow redirects, so
+   * without this the setting is invisible to every test that programs a 3xx.
+   */
+  readonly redirect?: FetchRedirect;
 }
 
 /**
@@ -257,6 +267,7 @@ export async function withFetch<T>(fn: (mock: FetchMock) => T | Promise<T>): Pro
       url: requestUrl(input),
       headers: mergeHeaders(input, init),
       body: await captureBody(await resolveBody(input, init)),
+      redirect: init?.redirect ?? (input instanceof Request ? input.redirect : undefined),
     };
     requests.push(record);
     return buildResponse(selectSpec(record));

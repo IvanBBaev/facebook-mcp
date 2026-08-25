@@ -13,9 +13,18 @@
 //
 //   * Streamable HTTP: binds a loopback address ONLY (refuses a non-loopback
 //     host), fails closed when `FB_HTTP_TOKEN` is unset (refuses to start with a
-//     clear error — CC-CFG-6), requires a bearer token and a same-origin `Origin`
-//     header on every request (DNS-rebinding defense — Security #4), and shuts
-//     down the listener plus in-flight connections cleanly (CC-MCP-5).
+//     clear error — CC-CFG-6), requires a bearer token on every request, rejects
+//     any request whose `Origin` is not this exact loopback port (DNS-rebinding
+//     defense — Security #4), and shuts down the listener plus in-flight
+//     connections cleanly (CC-MCP-5).
+//
+//     A request with NO `Origin` header is allowed through to the bearer check.
+//     That is deliberate and is what the rebinding defense actually rests on: a
+//     browser always sends `Origin` on the cross-origin requests rebinding can
+//     mount, so a rebound page is rejected by the check above — while ordinary
+//     local agent clients (curl, an SDK HTTP client) send no `Origin` at all, and
+//     demanding one would only bar the legitimate callers. The bearer token,
+//     which a rebound page cannot read, is the credential.
 //
 // Layer: `mcp` (may import core/api, never tools).
 
@@ -149,20 +158,27 @@ async function startStdio(
   };
   const close = (): Promise<void> => (closePromise ??= doClose());
 
+  try {
+    await server.connect(transport);
+  } catch (err) {
+    restoreConsole?.();
+    throw err;
+  }
+
+  // Both hooks are wired *after* connect, never before. `doClose` tears the
+  // transport down, and `connect` then starts it: a shutdown racing startup
+  // would re-attach the stdin `data` listener after the teardown removed it,
+  // leaving a live transport whose `close()` is memoized to an already-resolved
+  // promise — a running server that reports itself closed and can never be
+  // stopped. `wireExternalSignal` re-reads `aborted` at wire time, so a signal
+  // that fired during connect still shuts the transport down here.
+  //
   // The SDK's stdio transport listens for stdin `data`/`error` but NOT for EOF,
   // so wire `end`/`close` ourselves to trigger a clean shutdown (CC-MCP-5).
   stdin.on('end', onEof);
   stdin.on('close', onEof);
   wireExternalSignal(deps.signal, close);
 
-  try {
-    await server.connect(transport);
-  } catch (err) {
-    stdin.off('end', onEof);
-    stdin.off('close', onEof);
-    restoreConsole?.();
-    throw err;
-  }
   deps.logger.info('stdio transport connected', { transport: 'stdio' });
 
   return { kind: 'stdio', signal: controller.signal, closed, close };
@@ -208,6 +224,8 @@ async function startHttp(
     res: ServerResponse,
   ): Promise<void> => {
     try {
+      // Present-and-wrong is rejected; absent is passed to the bearer check —
+      // see the "no `Origin` header" paragraph in this file's header for why.
       const origin = req.headers.origin;
       if (
         typeof origin === 'string' &&
@@ -263,7 +281,6 @@ async function startHttp(
     resolveClosed();
   };
   const close = (): Promise<void> => (closePromise ??= doClose());
-  wireExternalSignal(deps.signal, close);
 
   try {
     await listen(httpServer, requestedPort, host);
@@ -279,6 +296,14 @@ async function startHttp(
   }
   boundPort = (httpServer.address() as AddressInfo).port;
   deps.logger.info('http transport listening', { host, port: boundPort });
+
+  // Wired only once the listener is actually up. `doClose` calls
+  // `httpServer.close()`, and closing a server whose `listen()` is still in
+  // flight means neither `'listening'` nor `'error'` ever fires — the promise in
+  // `listen()` never settles and startup hangs forever, so a SIGTERM arriving
+  // during boot would wedge the process instead of ending it. Wiring here also
+  // re-reads `aborted`, so a signal that fired during the bind is not missed.
+  wireExternalSignal(deps.signal, close);
 
   return {
     kind: 'http',

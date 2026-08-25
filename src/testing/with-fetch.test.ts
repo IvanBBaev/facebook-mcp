@@ -23,6 +23,25 @@ test('records method, url, and lowercased headers of an outgoing request', async
   });
 });
 
+test('records the redirect policy, and reports asking for nothing as undefined', async () => {
+  await withFetch(async (mock) => {
+    mock.enqueue({ json: {} }).enqueue({ json: {} }).enqueue({ json: {} });
+
+    await fetch('https://graph.facebook.com/a', { redirect: 'manual' });
+    assert.equal(mock.lastRequest()?.redirect, 'manual');
+
+    // A caller that never sets it gets the platform default (`follow`). The record
+    // says `undefined` rather than inventing `'follow'`, so an assertion for
+    // `'manual'` fails loudly instead of matching a request that asked for nothing.
+    await fetch('https://graph.facebook.com/b');
+    assert.equal(mock.lastRequest()?.redirect, undefined);
+
+    // A `Request` object carries the policy too, and `init` is not the only route.
+    await fetch(new Request('https://graph.facebook.com/c', { redirect: 'error' }));
+    assert.equal(mock.lastRequest()?.redirect, 'error');
+  });
+});
+
 test('captures a JSON string body', async () => {
   await withFetch(async (mock) => {
     mock.enqueue({ json: {} });

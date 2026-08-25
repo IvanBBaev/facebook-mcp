@@ -6,12 +6,13 @@
     <title>facebook-mcp — Facebook Pages MCP Server for the Meta Graph API</title>
     <meta
       name="description"
-      content="An open-source, local-first MCP server that lets your AI assistant drive a Facebook Page through the Meta Graph API — publishing, insights, and comment/message moderation, with least-privilege tokens and safe plan-and-apply writes. TypeScript, MIT, Node 22+."
+      content="An open-source, local-first MCP server that lets your AI assistant drive a Facebook Page through the Meta Graph API — publishing, insights, moderation and Messenger replies, with least-privilege tokens and tiered plan-and-apply writes. TypeScript, MIT, Node 22+."
     />
     <meta name="author" content="Ivan Baev" />
-    <meta name="theme-color" content="#1877F2" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f6f8fb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)" />
     <link rel="canonical" href="https://ivanbbaev.github.io/facebook-mcp/" />
-    <meta name="color-scheme" content="dark light" />
 
     <!-- Favicon: inline data-URI SVG, no network request -->
     <link
@@ -22,22 +23,17 @@
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="facebook-mcp" />
-    <meta
-      property="og:title"
-      content="facebook-mcp — Facebook Pages MCP Server"
-    />
+    <meta property="og:title" content="facebook-mcp — Facebook Pages MCP Server" />
     <meta
       property="og:description"
-      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, and moderation with safe, gated writes."
+      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, moderation and Messenger replies with tiered, gated writes."
     />
     <meta property="og:url" content="https://ivanbbaev.github.io/facebook-mcp/" />
-    <!-- og:image points to the bundled SVG banner. A rasterised PNG export
-         (assets/og-banner.png) would improve compatibility with scrapers that
-         reject SVG previews — a nice-to-have, not required. -->
     <meta
       property="og:image"
-      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.svg"
+      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.png"
     />
+    <meta property="og:image:type" content="image/png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta
@@ -50,14 +46,15 @@
     <meta name="twitter:title" content="facebook-mcp — Facebook Pages MCP Server" />
     <meta
       name="twitter:description"
-      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, and moderation with safe, gated writes."
+      content="Drive your Facebook Page from your AI assistant. A local-first MCP server for the Meta Graph API: publishing, insights, moderation and Messenger replies with tiered, gated writes."
     />
     <meta
       name="twitter:image"
-      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.svg"
+      content="https://ivanbbaev.github.io/facebook-mcp/assets/og-banner.png"
     />
 
-    <!-- Structured data: SoftwareApplication + FAQ -->
+    <!-- Structured data: SoftwareApplication + FAQ. Every answer below mirrors
+         copy that is visible on the page. -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -69,7 +66,7 @@
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "MCP Server",
             "operatingSystem": "Cross-platform (Node.js 22+)",
-            "description": "A local-first Model Context Protocol (MCP) server for the Meta Graph API, focused on Facebook Pages: publishing, reading & insights, and comment/message moderation, operated locally by a Page admin using their own Meta developer app.",
+            "description": "A local-first Model Context Protocol (MCP) server for the Meta Graph API, focused on Facebook Pages: publishing, reading & insights, comment moderation and Messenger replies, operated locally by a Page admin using their own Meta developer app.",
             "url": "https://ivanbbaev.github.io/facebook-mcp/",
             "codeRepository": "https://github.com/IvanBBaev/facebook-mcp",
             "license": "https://opensource.org/licenses/MIT",
@@ -102,7 +99,7 @@
                 "name": "Which credentials does it need?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "A Meta developer app plus one access token: either a never-expiring System User token from Business Manager, or a long-lived Page token. The app secret is used to compute appsecret_proof. Because you administer your own Page, no Meta App Review is required."
+                  "text": "A Meta developer app plus one access token: a never-expiring System User token from Business Manager (recommended), a long-lived user token, or a long-lived Page token. FB_APP_SECRET is optional — when set, every call carries an appsecret_proof so a stolen bare token is unusable. Because you administer your own Page, no Meta App Review is required."
                 }
               },
               {
@@ -110,7 +107,7 @@
                 "name": "Is it safe to let an AI assistant write to my Page?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Writes are gated by a tiered plan-and-apply model: every write tool first returns a dry-run preview and performs zero network mutations. Irreversible actions (delete) and spend actions (ads) always require an explicit per-call confirmation and are never bypassed by an environment flag. The recommended starting posture is read-only."
+                  "text": "Writes are split into tiers. Reversible writes are governed by FB_WRITE_MODE: the compiled-in default is plan, which returns a preview and performs zero network mutations, and each package may ship its own default — posts, messages and ads default to plan, moderation defaults to apply because hiding a comment is one click to undo. An explicit FB_WRITE_MODE always wins, in both directions. Irreversible actions — delete a post, delete a comment, send a private reply, change an ads object — ignore FB_WRITE_MODE entirely and require a per-call apply flag, the plan_id of a preview you just ran, and an out-of-band human confirmation the model cannot supply itself. The recommended starting posture is read-only."
                 }
               },
               {
@@ -118,7 +115,7 @@
                 "name": "What actually works today?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "The foundation — HTTP client, auth, write gating, transports and the tool registry — is implemented and tested, and the read-only core package ships four tools: facebook_whoami, facebook_list_pages, facebook_get_page and facebook_usage. Publishing, reading, insights, moderation, messaging and ads are designed and scheduled across the v0.2.0 to v0.5.0 milestones."
+                  "text": "All seven tool packages are implemented: 37 tools across core, reader, posts, insights, moderation, messages and ads. Six packages are on by default; ads is opt-in via FB_TOOL_PACKAGES. The project is still pre-1.0 and not yet published to npm, and the automated test suite runs entirely against fakes behind a network fence — no behaviour has been verified against the live Graph API yet. A manual smoke harness exists for that, gated behind FB_SMOKE=1 and never run in CI."
                 }
               },
               {
@@ -126,7 +123,15 @@
                 "name": "When will it be published to npm?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Not yet. facebook-mcp is pre-1.0 and in active development; the design is complete and documented while implementation is in progress. An npm package will ship with the first tagged release. Until then you run it from source."
+                  "text": "Not yet. facebook-mcp is pre-1.0 and in active development; the tool surface is implemented but the package has not been published. The repository already carries the release rail — an MCPB bundle builder, a Claude plugin manifest, an MCP registry server.json and an OIDC-based publish workflow — but there is no tag, no npm package and no registry listing so far. Until then you run it from source."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which MCP clients does it work with?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Any client that speaks the Model Context Protocol over stdio — for example Claude Desktop, Claude Code, VS Code and Cursor. Optional client capabilities degrade honestly: without elicitation.form support the server falls back to the FB_CONFIRM_TOKEN route for high-consequence writes instead of silently allowing them. An optional loopback-only Streamable HTTP transport is available for advanced setups."
                 }
               },
               {
@@ -136,14 +141,6 @@
                   "@type": "Answer",
                   "text": "facebook-mcp is MIT-licensed and free, with no paid tier. It is maintained by one person in their own time, so donations are welcome through GitHub Sponsors (github.com/sponsors/IvanBBaev), Ko-fi (ko-fi.com/ivanbbaev) or Donatree (donatr.ee/ivanbbaev). Donating buys no priority support and no SLA; starring the repository or filing a good bug report helps just as much."
                 }
-              },
-              {
-                "@type": "Question",
-                "name": "Which MCP clients does it work with?",
-                "acceptedAnswer": {
-                  "@type": "Answer",
-                  "text": "Any client that speaks the Model Context Protocol over stdio — for example Claude Desktop, Claude Code, VS Code, and Cursor. An optional loopback-only Streamable HTTP transport is available for advanced setups."
-                }
               }
             ]
           }
@@ -151,1038 +148,2604 @@
       }
     </script>
 
-    <link rel="stylesheet" href="assets/styles.css" />
-  </head>
-  <body>
-    <a class="skip-link" href="#main">Skip to content</a>
-    <div class="bg-glow" aria-hidden="true"></div>
-    <div class="bg-grid" aria-hidden="true"></div>
+    <script>
+      // Theme bootstrap — runs before first paint so a stored choice never flashes.
+      try {
+        var t = localStorage.getItem('fbmcp-theme');
+        if (t === 'light' || t === 'dark')
+          document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    </script>
 
-    <!-- ============================ Top bar ============================ -->
+    <style>
+      /* facebook-mcp — documentation site.
+         One file, zero build step, no external requests. Light palette on bare
+         :root; dark tokens are redefined twice — once for the system preference
+         and once for the explicit toggle — so neither direction can win by
+         accident. Code surfaces stay dark in both themes on purpose. */
+
+      /* ---------- tokens: light ---------- */
+      :root {
+        --bg: #f6f8fb;
+        --bg-blur: rgba(246, 248, 251, 0.85);
+        --raised: #ffffff;
+        --sunken: #eef2f7;
+        --line: rgba(12, 20, 32, 0.13);
+        --line-strong: rgba(12, 20, 32, 0.32);
+        --fill: rgba(12, 20, 32, 0.045);
+
+        --heading: #0a1220;
+        --text: #25303f;
+        --text-2: #445365;
+        --muted: #5d6b7d;
+
+        --link: #0b57c4;
+        --accent: #0f5fc9;
+        --accent-soft: rgba(15, 95, 201, 0.09);
+        --accent-line: rgba(15, 95, 201, 0.28);
+        --cta-bg: #0f5fc9;
+        --cta-bg-hover: #0b4aa4;
+        --cta-ink: #ffffff;
+
+        --read: #0a6274;
+        --write: #855000;
+        --danger: #a52222;
+        --ok: #0b6b46;
+        --warn-bg: rgba(176, 108, 0, 0.1);
+        --warn-line: rgba(176, 108, 0, 0.4);
+        --warn-ink: #74490a;
+
+        --shadow-sm:
+          0 1px 2px rgba(10, 18, 32, 0.05), 0 4px 12px -6px rgba(10, 18, 32, 0.12);
+        --shadow-lg: 0 30px 70px -40px rgba(10, 18, 32, 0.45);
+
+        /* code surfaces — identical in both themes */
+        --code-bg: #0b1017;
+        --code-raised: #131b25;
+        --code-text: #dce5f1;
+        --code-dim: #8695a6;
+        --code-line: rgba(255, 255, 255, 0.1);
+        --code-accent: #6fb0ff;
+        --code-ok: #4ade80;
+        --code-warn: #fbbf24;
+
+        /* scale */
+        --r-sm: 6px;
+        --r: 10px;
+        --r-lg: 16px;
+        --pill: 999px;
+        --topbar-h: 57px;
+        --measure: 68ch;
+
+        --font:
+          system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          'Noto Sans', sans-serif;
+        --mono:
+          ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+          'Liberation Mono', monospace;
+      }
+
+      /* ---------- tokens: dark ---------- */
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme='light']) {
+          --bg: #0b0f14;
+          --bg-blur: rgba(11, 15, 20, 0.82);
+          --raised: #141a22;
+          --sunken: #080b10;
+          --line: rgba(255, 255, 255, 0.11);
+          --line-strong: rgba(255, 255, 255, 0.3);
+          --fill: rgba(255, 255, 255, 0.05);
+
+          --heading: #f4f8fd;
+          --text: #e7edf4;
+          --text-2: #cfdae8;
+          --muted: #9aa6b4;
+
+          --link: #6fb0ff;
+          --accent: #1877f2;
+          --accent-soft: rgba(24, 119, 242, 0.14);
+          --accent-line: rgba(24, 119, 242, 0.36);
+          --cta-bg: #59a5ff;
+          --cta-bg-hover: #7cb9ff;
+          --cta-ink: #06101d;
+
+          --read: #38bdf8;
+          --write: #f5a623;
+          --danger: #ff8080;
+          --ok: #34d399;
+          --warn-bg: rgba(245, 166, 35, 0.1);
+          --warn-line: rgba(245, 166, 35, 0.32);
+          --warn-ink: #f0b45c;
+
+          --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px -8px rgba(0, 0, 0, 0.6);
+          --shadow-lg: 0 30px 80px -40px rgba(0, 0, 0, 0.85);
+        }
+      }
+      :root[data-theme='dark'] {
+        --bg: #0b0f14;
+        --bg-blur: rgba(11, 15, 20, 0.82);
+        --raised: #141a22;
+        --sunken: #080b10;
+        --line: rgba(255, 255, 255, 0.11);
+        --line-strong: rgba(255, 255, 255, 0.3);
+        --fill: rgba(255, 255, 255, 0.05);
+
+        --heading: #f4f8fd;
+        --text: #e7edf4;
+        --text-2: #cfdae8;
+        --muted: #9aa6b4;
+
+        --link: #6fb0ff;
+        --accent: #1877f2;
+        --accent-soft: rgba(24, 119, 242, 0.14);
+        --accent-line: rgba(24, 119, 242, 0.36);
+        --cta-bg: #59a5ff;
+        --cta-bg-hover: #7cb9ff;
+        --cta-ink: #06101d;
+
+        --read: #38bdf8;
+        --write: #f5a623;
+        --danger: #ff8080;
+        --ok: #34d399;
+        --warn-bg: rgba(245, 166, 35, 0.1);
+        --warn-line: rgba(245, 166, 35, 0.32);
+        --warn-ink: #f0b45c;
+
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 14px -8px rgba(0, 0, 0, 0.6);
+        --shadow-lg: 0 30px 80px -40px rgba(0, 0, 0, 0.85);
+      }
+
+      /* ---------- base ---------- */
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+        scroll-behavior: smooth;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-font-smoothing: antialiased;
+        overflow-wrap: break-word;
+      }
+      h1,
+      h2,
+      h3,
+      h4 {
+        color: var(--heading);
+        line-height: 1.2;
+        margin: 0;
+        letter-spacing: -0.015em;
+        font-weight: 700;
+      }
+      p {
+        margin: 0;
+      }
+      a {
+        color: var(--link);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 2px;
+      }
+      a:hover {
+        text-decoration-thickness: 2px;
+      }
+      code,
+      kbd,
+      pre,
+      samp {
+        font-family: var(--mono);
+      }
+      :where(p, li, td) > code {
+        background: var(--fill);
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        padding: 0.1em 0.38em;
+        font-size: 0.88em;
+        white-space: nowrap;
+      }
+      /* An env-var name or a Windows path has no break opportunity of its own,
+         so on a phone nowrap would push the whole page sideways. Below the
+         narrowest layout breakpoint, let them break rather than overflow. */
+      @media (max-width: 620px) {
+        :where(p, li, td) > code {
+          white-space: normal;
+          overflow-wrap: anywhere;
+        }
+      }
+      img,
+      svg {
+        max-width: 100%;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid var(--line);
+        margin: 0;
+      }
+      :focus-visible {
+        outline: 2px solid var(--heading);
+        outline-offset: 2px;
+        box-shadow: 0 0 0 5px var(--accent-soft);
+        border-radius: var(--r-sm);
+      }
+
+      .wrap {
+        width: 100%;
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      .measure {
+        max-width: var(--measure);
+      }
+      .skip {
+        position: absolute;
+        left: -9999px;
+        top: 8px;
+        z-index: 100;
+        background: var(--raised);
+        color: var(--heading);
+        border: 1px solid var(--line-strong);
+        border-radius: var(--r);
+        padding: 10px 16px;
+        font-weight: 600;
+      }
+      .skip:focus {
+        left: 12px;
+      }
+
+      /* ---------- topbar ---------- */
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        background: var(--bg);
+        border-bottom: 1px solid var(--line);
+      }
+      @supports (backdrop-filter: blur(4px)) {
+        .topbar {
+          background: var(--bg-blur);
+          backdrop-filter: blur(12px) saturate(1.5);
+        }
+      }
+      .topbar .wrap {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        min-height: var(--topbar-h);
+        flex-wrap: wrap;
+        padding-block: 8px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 700;
+        color: var(--heading);
+        text-decoration: none;
+        letter-spacing: -0.02em;
+        margin-right: auto;
+      }
+      .brand .mark {
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        background: #1877f2;
+        display: grid;
+        place-items: center;
+        flex: none;
+      }
+      .brand .mark svg {
+        width: 15px;
+        height: 15px;
+        fill: #fff;
+      }
+      .brand .ver {
+        font: 600 11px/1 var(--mono);
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: var(--pill);
+        padding: 4px 7px;
+      }
+      .nav {
+        display: flex;
+        gap: 2px;
+        overflow-x: auto;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+        max-width: 100%;
+      }
+      .nav::-webkit-scrollbar {
+        display: none;
+      }
+      .nav a {
+        color: var(--text-2);
+        text-decoration: none;
+        font-size: 14px;
+        font-weight: 500;
+        padding: 7px 11px;
+        border-radius: var(--r-sm);
+        white-space: nowrap;
+      }
+      .nav a:hover {
+        color: var(--heading);
+        background: var(--fill);
+      }
+      .nav a[aria-current='true'] {
+        color: var(--accent);
+        background: var(--accent-soft);
+        font-weight: 600;
+      }
+      .topbar-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .icon-btn {
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        border-radius: var(--r-sm);
+        border: 1px solid var(--line);
+        background: var(--raised);
+        color: var(--text-2);
+        cursor: pointer;
+        padding: 0;
+      }
+      .icon-btn:hover {
+        color: var(--heading);
+        border-color: var(--line-strong);
+      }
+      .icon-btn svg {
+        width: 17px;
+        height: 17px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .icon-btn svg.solid {
+        fill: currentColor;
+        stroke: none;
+      }
+      .i-sun {
+        display: none;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme='light']) .i-moon {
+          display: none;
+        }
+        :root:not([data-theme='light']) .i-sun {
+          display: block;
+        }
+      }
+      :root[data-theme='dark'] .i-moon {
+        display: none;
+      }
+      :root[data-theme='dark'] .i-sun {
+        display: block;
+      }
+      @media (max-width: 860px) {
+        .nav {
+          order: 3;
+          flex-basis: 100%;
+          border-top: 1px solid var(--line);
+          padding-top: 6px;
+          margin-top: 2px;
+        }
+      }
+
+      /* ---------- sections ---------- */
+      main section {
+        padding: 72px 0;
+        scroll-margin-top: calc(var(--topbar-h) + 16px);
+      }
+      main section + section {
+        border-top: 1px solid var(--line);
+      }
+      .eyebrow {
+        font: 600 12px/1 var(--mono);
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 14px;
+        display: block;
+      }
+      h2 {
+        font-size: 26px;
+        margin-bottom: 12px;
+      }
+      h3 {
+        font-size: 18px;
+        margin-bottom: 8px;
+      }
+      .sub {
+        color: var(--text-2);
+        max-width: var(--measure);
+      }
+      .stack > * + * {
+        margin-top: 16px;
+      }
+      .stack-lg > * + * {
+        margin-top: 32px;
+      }
+
+      /* ---------- hero ---------- */
+      .hero {
+        padding: 64px 0 72px !important;
+      }
+      .hero h1 {
+        font-size: clamp(38px, 7vw, 60px);
+        letter-spacing: -0.035em;
+        font-family: var(--mono);
+        font-weight: 700;
+      }
+      .hero .lead {
+        font-size: clamp(17px, 2.2vw, 21px);
+        color: var(--text-2);
+        max-width: 58ch;
+        margin-top: 16px;
+      }
+      .badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 24px;
+      }
+      .badge {
+        font: 600 12px/1 var(--mono);
+        color: var(--text-2);
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: var(--pill);
+        padding: 6px 11px;
+      }
+      .badge.hi {
+        color: var(--accent);
+        border-color: var(--accent-line);
+        background: var(--accent-soft);
+      }
+      .badge.warn {
+        color: var(--warn-ink);
+        border-color: var(--warn-line);
+        background: var(--warn-bg);
+      }
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 28px;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 44px;
+        padding: 0 20px;
+        border-radius: var(--r);
+        font-size: 15px;
+        font-weight: 600;
+        text-decoration: none;
+        border: 1px solid transparent;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .btn svg {
+        width: 16px;
+        height: 16px;
+        flex: none;
+      }
+      .btn-primary {
+        background: var(--cta-bg);
+        color: var(--cta-ink);
+      }
+      .btn-primary:hover {
+        background: var(--cta-bg-hover);
+      }
+      .btn-ghost {
+        background: var(--raised);
+        color: var(--heading);
+        border-color: var(--line-strong);
+      }
+      .btn-ghost:hover {
+        background: var(--fill);
+      }
+
+      /* ---------- terminal ---------- */
+      .term {
+        margin-top: 40px;
+        background: var(--code-bg);
+        border: 1px solid var(--code-line);
+        border-radius: var(--r-lg);
+        overflow: hidden;
+        box-shadow: var(--shadow-lg);
+      }
+      .term-bar {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--code-line);
+        background: var(--code-raised);
+      }
+      .term-bar i {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.16);
+      }
+      .term-bar span {
+        margin-left: 6px;
+        font: 500 12px/1 var(--mono);
+        color: var(--code-dim);
+      }
+      .term-body {
+        padding: 18px;
+        overflow-x: auto;
+        font: 13.5px/1.75 var(--mono);
+        color: var(--code-text);
+        tab-size: 2;
+      }
+      /* Alignment is preserved per line, not on the container — so source-level
+         indentation between the lines never leaks into the transcript. */
+      .term-body .l {
+        display: block;
+        white-space: pre;
+        min-height: 1.75em;
+      }
+      .term-body .u {
+        color: var(--code-accent);
+      }
+      .term-body .t {
+        color: #fff;
+      }
+      .term-body .d {
+        color: var(--code-dim);
+      }
+      .term-body .w {
+        color: var(--code-warn);
+      }
+      .term-body .o {
+        color: var(--code-ok);
+      }
+      .term-body.run .l {
+        opacity: 0;
+        animation: linein 0.32s ease forwards;
+        animation-delay: calc(var(--i) * 0.3s);
+      }
+      @keyframes linein {
+        from {
+          opacity: 0;
+          transform: translateY(3px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      .caret {
+        display: inline-block;
+        width: 8px;
+        height: 15px;
+        vertical-align: -3px;
+        background: var(--code-accent);
+        animation: blink 1.15s step-end infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .term-body.run .l {
+          opacity: 1;
+          animation: none;
+        }
+        .caret {
+          animation: none;
+        }
+      }
+
+      /* ---------- stats ---------- */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 1px;
+        margin-top: 40px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        overflow: hidden;
+      }
+      .stats div {
+        background: var(--raised);
+        padding: 18px 20px;
+      }
+      .stats b {
+        display: block;
+        font: 700 26px/1.1 var(--mono);
+        color: var(--heading);
+        letter-spacing: -0.02em;
+      }
+      .stats span {
+        display: block;
+        margin-top: 6px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      /* ---------- blocks ---------- */
+      .card {
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        padding: 22px;
+        box-shadow: var(--shadow-sm);
+      }
+      .grid2 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+      }
+      .note {
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent);
+        background: var(--accent-soft);
+        border-radius: var(--r);
+        padding: 14px 16px;
+        color: var(--text-2);
+        font-size: 15px;
+        max-width: var(--measure);
+      }
+      .note.warn {
+        border-left-color: var(--warn-line);
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+      }
+      .note strong {
+        color: inherit;
+      }
+
+      /* ---------- code ---------- */
+      .code {
+        background: var(--code-bg);
+        border: 1px solid var(--code-line);
+        border-radius: var(--r);
+        overflow: hidden;
+      }
+      .code-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 8px 8px 14px;
+        border-bottom: 1px solid var(--code-line);
+        background: var(--code-raised);
+        font: 12px/1.4 var(--mono);
+        color: var(--code-dim);
+        min-height: 38px;
+      }
+      .code-head span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .code pre {
+        margin: 0;
+        padding: 16px;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--code-text);
+      }
+      .code pre .c {
+        color: var(--code-dim);
+      }
+      .code pre .p {
+        color: var(--code-accent);
+      }
+      .copy {
+        flex: none;
+        border: 1px solid var(--code-line);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--code-text);
+        border-radius: var(--r-sm);
+        font: 600 12px/1 var(--font);
+        padding: 7px 11px;
+        cursor: pointer;
+      }
+      .copy:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+      .copy[data-done='1'] {
+        color: var(--code-ok);
+      }
+
+      /* ---------- tabs ---------- */
+      .tabs {
+        display: flex;
+        gap: 4px;
+        padding: 4px;
+        background: var(--fill);
+        border: 1px solid var(--line);
+        border-radius: var(--pill);
+        width: max-content;
+        max-width: 100%;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .tabs::-webkit-scrollbar {
+        display: none;
+      }
+      .tab {
+        border: 0;
+        background: transparent;
+        color: var(--text-2);
+        font: 600 13px/1 var(--font);
+        padding: 9px 14px;
+        border-radius: var(--pill);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .tab:hover {
+        color: var(--heading);
+      }
+      .tab[aria-selected='true'] {
+        background: var(--raised);
+        color: var(--heading);
+        box-shadow: var(--shadow-sm);
+      }
+      [role='tabpanel'][hidden] {
+        display: none;
+      }
+      [role='tabpanel'] {
+        margin-top: 14px;
+      }
+
+      /* ---------- tables ---------- */
+      .tw {
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        background: var(--raised);
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        min-width: 560px;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      th {
+        text-align: left;
+        font: 600 11px/1.4 var(--font);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--fill);
+        white-space: nowrap;
+      }
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+        color: var(--text-2);
+      }
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      td:first-child {
+        color: var(--heading);
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      td code,
+      th code {
+        white-space: nowrap;
+      }
+
+      /* ---------- pills ---------- */
+      .tag {
+        display: inline-block;
+        font: 600 11px/1 var(--mono);
+        border-radius: var(--pill);
+        padding: 4px 8px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .tag.read {
+        color: var(--read);
+        border-color: color-mix(in srgb, var(--read) 40%, transparent);
+      }
+      .tag.write {
+        color: var(--write);
+        border-color: color-mix(in srgb, var(--write) 40%, transparent);
+      }
+      .tag.irr {
+        color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+      }
+      .tag.on {
+        color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+      }
+
+      /* ---------- tier list ---------- */
+      .tiers {
+        display: grid;
+        gap: 1px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        overflow: hidden;
+      }
+      .tier {
+        background: var(--raised);
+        padding: 18px 20px;
+        display: grid;
+        grid-template-columns: 130px 1fr;
+        gap: 6px 20px;
+        align-items: start;
+      }
+      .tier > div:first-child {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .tier h3 {
+        font: 700 14px/1.2 var(--mono);
+        color: var(--heading);
+      }
+      .tier p {
+        color: var(--text-2);
+        font-size: 15px;
+        max-width: 62ch;
+      }
+      @media (max-width: 620px) {
+        .tier {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ---------- layers ---------- */
+      .layers {
+        display: grid;
+        gap: 8px;
+      }
+      .layer {
+        display: grid;
+        grid-template-columns: 92px 1fr;
+        gap: 16px;
+        align-items: center;
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent-line);
+        border-radius: var(--r);
+        padding: 14px 16px;
+        font-size: 14px;
+        color: var(--text-2);
+      }
+      .layer b {
+        font: 700 13px/1 var(--mono);
+        color: var(--accent);
+      }
+      @media (max-width: 560px) {
+        .layer {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+      }
+      .hosts {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .host {
+        font: 500 12.5px/1 var(--mono);
+        color: var(--text-2);
+        background: var(--sunken);
+        border: 1px solid var(--line);
+        border-radius: var(--pill);
+        padding: 8px 12px;
+      }
+      .checks {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 10px;
+        max-width: var(--measure);
+      }
+      .checks li {
+        display: grid;
+        grid-template-columns: 18px 1fr;
+        gap: 10px;
+        color: var(--text-2);
+        font-size: 15px;
+      }
+      .checks li::before {
+        content: '';
+        width: 16px;
+        height: 16px;
+        margin-top: 5px;
+        border-radius: 50%;
+        background: var(--accent-soft);
+        border: 1px solid var(--accent-line);
+      }
+
+      /* ---------- steps ---------- */
+      .steps {
+        counter-reset: s;
+        display: grid;
+        gap: 28px;
+      }
+      .step {
+        display: grid;
+        grid-template-columns: 32px 1fr;
+        gap: 16px;
+        align-items: start;
+      }
+      .step::before {
+        counter-increment: s;
+        content: counter(s);
+        width: 32px;
+        height: 32px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--accent-soft);
+        border: 1px solid var(--accent-line);
+        color: var(--accent);
+        font: 700 14px/1 var(--mono);
+      }
+      /* The 1fr track takes its automatic minimum from the content, and a code
+         block's longest line is not breakable — without this the whole page
+         grows wider than the viewport instead of letting the <pre> scroll. */
+      .step > div {
+        min-width: 0;
+      }
+      .step > div > * + * {
+        margin-top: 12px;
+      }
+
+      /* ---------- details ---------- */
+      details {
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        margin-bottom: 10px;
+        scroll-margin-top: calc(var(--topbar-h) + 16px);
+      }
+      details summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 16px 18px;
+        cursor: pointer;
+        font-weight: 600;
+        color: var(--heading);
+        list-style: none;
+      }
+      details summary::-webkit-details-marker {
+        display: none;
+      }
+      details summary::after {
+        content: '+';
+        font: 400 20px/1 var(--mono);
+        color: var(--muted);
+        flex: none;
+      }
+      details[open] summary::after {
+        content: '\2212';
+      }
+      details[open] summary {
+        border-bottom: 1px solid var(--line);
+      }
+      .details-body {
+        padding: 16px 18px;
+        color: var(--text-2);
+        max-width: var(--measure);
+        font-size: 15px;
+      }
+      .details-body > * + * {
+        margin-top: 12px;
+      }
+
+      /* ---------- support ---------- */
+      .fund {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+      }
+      .fund a {
+        display: block;
+        text-decoration: none;
+        background: var(--raised);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        padding: 16px 18px;
+        box-shadow: var(--shadow-sm);
+      }
+      .fund a:hover {
+        border-color: var(--accent-line);
+      }
+      .fund b {
+        display: block;
+        color: var(--heading);
+        font-size: 15px;
+      }
+      .fund span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      /* ---------- footer ---------- */
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 40px 0 56px;
+        color: var(--muted);
+        font-size: 13.5px;
+      }
+      footer .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 18px;
+        margin-bottom: 18px;
+      }
+      footer p {
+        max-width: 78ch;
+      }
+      footer p + p {
+        margin-top: 10px;
+      }
+
+      /* ---------- to top ---------- */
+      .totop {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: var(--raised);
+        border: 1px solid var(--line-strong);
+        color: var(--heading);
+        box-shadow: var(--shadow-sm);
+        cursor: pointer;
+        opacity: 0;
+        visibility: hidden;
+        transition:
+          opacity 0.2s ease,
+          visibility 0.2s ease;
+        z-index: 40;
+      }
+      .totop.show {
+        opacity: 1;
+        visibility: visible;
+      }
+      .totop svg {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      @media print {
+        .topbar,
+        .totop,
+        .copy,
+        .cta {
+          display: none !important;
+        }
+        body {
+          background: #fff;
+          color: #000;
+        }
+        details[open] .details-body,
+        details .details-body {
+          display: block;
+        }
+        [role='tabpanel'][hidden] {
+          display: block !important;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
     <header class="topbar">
-      <button
-        id="menuBtn"
-        class="icon-btn"
-        aria-label="Open navigation"
-        aria-expanded="false"
-        aria-controls="sidebar"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="3" y1="6" x2="21" y2="6" />
-          <line x1="3" y1="12" x2="21" y2="12" />
-          <line x1="3" y1="18" x2="21" y2="18" />
-        </svg>
-      </button>
-      <a class="brand" href="#top">
-        <span class="logo" aria-hidden="true">f</span>
-        <span>facebook-mcp <small>&nbsp;/ Pages MCP server</small></span>
-      </a>
-      <span class="spacer"></span>
-      <nav class="toplinks" aria-label="Primary">
-        <a href="#quickstart">Quick start</a>
-        <a href="#capabilities">Capabilities</a>
-        <a href="#architecture">Architecture</a>
-        <a href="#security">Security</a>
-        <a href="#faq">FAQ</a>
-        <a href="#support">Support</a>
-      </nav>
-      <span class="ver-pill" title="Development status">pre-1.0 · not on npm</span>
-      <a
-        class="icon-btn sponsor-btn"
-        href="https://github.com/sponsors/IvanBBaev"
-        aria-label="Sponsor facebook-mcp on GitHub Sponsors"
-        title="Sponsor this project"
-        rel="noopener"
-      >
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-          <path d="M8 14.25.345 6.6a3.98 3.98 0 0 1 .12-5.5A3.98 3.98 0 0 1 6.03 1.1L8 3.06 9.97 1.1a3.98 3.98 0 0 1 5.565.001 3.98 3.98 0 0 1 .12 5.5Z" />
-        </svg>
-        <span class="sponsor-label">Sponsor</span>
-      </a>
-      <a
-        class="icon-btn"
-        href="https://github.com/IvanBBaev/facebook-mcp"
-        aria-label="View facebook-mcp on GitHub"
-        rel="noopener"
-      >
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.41-5.26 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z" />
-        </svg>
-      </a>
+      <div class="wrap">
+        <a class="brand" href="#top">
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 64 64">
+              <path
+                d="M39.5 20h-4.3c-1.4 0-2.2.9-2.2 2.4V26h6.4l-.9 6.5h-5.5V52h-6.8V32.5H15V26h5.2v-4.6c0-5.2 3.2-8.4 8.6-8.4 2.6 0 4.8.2 5.4.3z"
+              />
+            </svg>
+          </span>
+          facebook-mcp
+          <span class="ver">pre-1.0</span>
+        </a>
+
+        <nav class="nav" aria-label="Sections">
+          <a href="#install">Install</a>
+          <a href="#capabilities">Capabilities</a>
+          <a href="#safety">Safety</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#config">Config</a>
+          <a href="#faq">FAQ</a>
+          <a href="#support">Support</a>
+        </nav>
+
+        <div class="topbar-actions">
+          <button
+            class="icon-btn"
+            id="theme"
+            type="button"
+            aria-label="Switch colour theme"
+          >
+            <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+            </svg>
+            <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path
+                d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+              />
+            </svg>
+          </button>
+          <a
+            class="icon-btn"
+            href="https://github.com/IvanBBaev/facebook-mcp"
+            aria-label="Repository on GitHub"
+          >
+            <svg class="solid" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.3 1.9 1.3 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.9 18.3 5.2 18.3 5.2c.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"
+              />
+            </svg>
+          </a>
+        </div>
+      </div>
     </header>
 
-    <div class="backdrop" id="backdrop" aria-hidden="true"></div>
+    <main id="main">
+      <span id="top"></span>
 
-    <!-- ============================ Layout ============================ -->
-    <div class="layout" id="top">
-      <!-- --------------------- Sidebar --------------------- -->
-      <aside class="sidebar" id="sidebar" aria-label="Section navigation">
-        <h4>Getting started</h4>
-        <nav>
-          <a href="#overview">Overview</a>
-          <a href="#quick-demo">Quick demo</a>
-          <a href="#what-is-mcp">Why MCP?</a>
-          <a href="#capabilities">Capabilities</a>
-        </nav>
-        <h4>Set up</h4>
-        <nav>
-          <a href="#quickstart">Quick start</a>
-          <a href="#credentials">Credentials</a>
-        </nav>
-        <h4>Under the hood</h4>
-        <nav>
-          <a href="#architecture">Architecture</a>
-          <a href="#security">Security</a>
-          <a href="#faq">FAQ</a>
-          <a href="#support">Support the project</a>
-        </nav>
-      </aside>
+      <!-- ============ HERO ============ -->
+      <section class="hero" id="overview" aria-labelledby="h-overview">
+        <div class="wrap">
+          <span class="eyebrow">Model Context Protocol server</span>
+          <h1 id="h-overview">facebook-mcp</h1>
+          <p class="lead">
+            Drive your Facebook Page from your AI assistant — publish and schedule,
+            read insights, moderate comments and answer Messenger threads over the
+            Meta Graph API. It runs on your machine, with your token, behind a
+            three-host network fence.
+          </p>
 
-      <!-- --------------------- Content --------------------- -->
-      <main class="content" id="main">
-        <!-- ============ Hero / Overview ============ -->
-        <section class="hero" id="overview">
-          <div class="hero-grid">
-            <div class="hero-copy">
-              <span class="eyebrow">Model Context Protocol · Facebook Pages</span>
-              <h1>
-                Drive your Facebook Page from your
-                <span class="accent">AI assistant.</span>
-              </h1>
-              <p class="lead">
-                <strong>facebook-mcp</strong> is a local-first MCP server for the
-                Meta Graph API. Publish posts, read live insights, and moderate
-                comments and messages — from any MCP client, with
-                least-privilege tokens and writes you have to approve.
-              </p>
-              <div class="hero-cta">
-                <a class="btn primary" href="#quickstart">Get started &rarr;</a>
-                <a
-                  class="btn"
-                  href="https://github.com/IvanBBaev/facebook-mcp"
-                  rel="noopener"
-                >
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.18 1.84 1.18 3.1 0 4.43-2.69 5.41-5.26 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5Z" />
-                  </svg>
-                  View on GitHub
-                </a>
-              </div>
-              <div class="badges">
-                <span class="badge ok">MIT licensed</span>
-                <span class="badge">TypeScript · ESM</span>
-                <span class="badge">Node.js 22+</span>
-                <span class="badge">MCP SDK 1.29</span>
-                <span class="badge">Graph API v25.0</span>
-                <span class="badge">No telemetry</span>
-              </div>
+          <div class="badges">
+            <span class="badge hi">TypeScript</span>
+            <span class="badge">MIT</span>
+            <span class="badge">Node 22+</span>
+            <span class="badge">Graph API v23.0</span>
+            <span class="badge">37 tools · 7 packages</span>
+            <span class="badge warn">pre-1.0 · not on npm yet</span>
+          </div>
+
+          <div class="cta">
+            <a class="btn btn-primary" href="#install">
+              Get started
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6" />
+              </svg>
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/IvanBBaev/facebook-mcp">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path
+                  d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.3 1.9 1.3 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.9 18.3 5.2 18.3 5.2c.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"
+                />
+              </svg>
+              View source
+            </a>
+          </div>
+
+          <div class="term">
+            <div class="term-bar" aria-hidden="true">
+              <i></i><i></i><i></i>
+              <span>assistant · facebook-mcp (stdio)</span>
             </div>
-
-            <!-- Hero terminal -->
-            <div class="hero-visual">
-              <div class="terminal-wrap">
-                <div class="terminal">
-                  <div class="term-bar">
-                    <span class="term-dot" style="background:#ff5f57"></span>
-                    <span class="term-dot" style="background:#febc2e"></span>
-                    <span class="term-dot" style="background:#28c840"></span>
-                    <span class="term-label">assistant · facebook-mcp</span>
-                    <span class="term-live">live</span>
-                  </div>
-                  <div class="term-body" id="term-body">
-                    <span class="term-scan" aria-hidden="true"></span>
-                    <div class="term-line tl1">
-                      <span class="tprompt">you &rsaquo;</span> Publish today's
-                      launch post and pin it.
-                    </div>
-                    <div class="term-line tl2 term-call">
-                      <span class="tcall">&#9656; facebook_create_post</span>
-                      <span class="tdim">(plan)</span>
-                    </div>
-                    <div class="term-line tl3 tdim2">
-                      &nbsp;&nbsp;preview: "We just shipped…" · link · no media
-                    </div>
-                    <div class="term-line tl4 tdim2">
-                      &nbsp;&nbsp;&#9888; nothing was published — awaiting apply
-                    </div>
-                    <div class="term-line tl5">
-                      <span class="tprompt">you &rsaquo;</span> Looks good — apply.
-                    </div>
-                    <div class="term-line tl6 term-call">
-                      <span class="tcall">&#9656; facebook_create_post</span>
-                      <span class="tdim">(apply) &rarr; post 102…847</span>
-                    </div>
-                    <div class="term-line tl7 term-call">
-                      <span class="tcall">&#9656; facebook_get_insights</span>
-                      <span class="tdim">(read)</span>
-                    </div>
-                    <div class="term-line tl8">
-                      <div class="term-row">
-                        <span>post_impressions</span><span class="prio p3">1,204</span>
-                      </div>
-                      <div class="term-row last">
-                        <span>post_reactions_by_type</span><span class="prio p3">86</span>
-                      </div>
-                    </div>
-                    <div class="term-line tl8 term-cursor">
-                      <span class="cur">&#9608;</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
+            <div
+              class="term-body"
+              id="term"
+              role="img"
+              tabindex="0"
+              aria-label="Transcript: the assistant plans a Page post, reports that nothing was published while awaiting apply, applies it after the operator agrees, then reads the post insights."
+            >
+<span class="l" style="--i:0"><span class="u">you ›</span> <span class="t">Publish today's launch post.</span></span>
+<span class="l" style="--i:1"></span>
+<span class="l" style="--i:2"><span class="o">▸</span> facebook_create_post <span class="d">— plan</span></span>
+<span class="l" style="--i:3"><span class="d">  message  </span>"We just shipped facebook-mcp 🚀 …"</span>
+<span class="l" style="--i:4"><span class="d">  link     </span>github.com/IvanBBaev/facebook-mcp</span>
+<span class="l" style="--i:5"><span class="d">  plan_id  </span>pl_9f31c0</span>
+<span class="l" style="--i:6"><span class="w">  ⚠ nothing was published — awaiting apply</span></span>
+<span class="l" style="--i:7"></span>
+<span class="l" style="--i:8"><span class="u">you ›</span> <span class="t">Looks good — apply.</span></span>
+<span class="l" style="--i:9"></span>
+<span class="l" style="--i:10"><span class="o">▸</span> facebook_create_post <span class="d">— apply</span>   <span class="o">ok</span>  <span class="d">post</span> 102…847</span>
+<span class="l" style="--i:11"><span class="o">▸</span> facebook_post_insights <span class="d">— read</span></span>
+<span class="l" style="--i:12"><span class="d">  post_media_view              </span>1,204</span>
+<span class="l" style="--i:13"><span class="d">  post_reactions_by_type_total </span>   86</span>
+<span class="l" style="--i:14"><span class="caret"></span></span>
             </div>
           </div>
 
-          <div class="callout warn" style="margin-top: 34px">
-            <span class="c-ico" aria-hidden="true">&#128679;</span>
-            <p>
-              <strong>Pre-1.0, in active development.</strong> The design is
-              complete and documented; implementation is in progress. Interfaces
-              and scope may change until the first tagged release, and the
-              package is <strong>not yet published to npm</strong> — for now you
-              run it from source (see
-              <a href="#quickstart">Quick start</a>).
+          <div class="stats">
+            <div><b>37</b><span>tools in 7 packages</span></div>
+            <div><b>22 / 14</b><span>read tools / write tools</span></div>
+            <div><b>3</b><span>hosts the process may reach</span></div>
+            <div><b>0</b><span>telemetry calls, by design</span></div>
+          </div>
+
+          <p class="note warn" style="margin-top: 32px">
+            <strong>Status, honestly.</strong> All seven packages are implemented and
+            covered by 1,182 hermetic tests (98.9% statement coverage), but every one of
+            those tests runs against fakes behind a network fence. Nothing has been
+            verified against the live Graph API yet, there is no tagged release and there
+            is no npm package. Treat this as a pre-1.0 project you run from source.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ INSTALL ============ -->
+      <section id="install" aria-labelledby="h-install">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Install</span>
+            <h2 id="h-install">Running in four steps</h2>
+            <p class="sub">
+              There is no npm package yet, so you build from source and point your MCP
+              client at the compiled entry point. Node 22 or newer.
             </p>
           </div>
 
-          <div class="stat-row" role="list" aria-label="Project facts">
-            <div class="stat" role="listitem">
-              <b>4/35</b><span>tools live today</span>
-            </div>
-            <div class="stat" role="listitem">
-              <b>7</b><span>planned tool packages</span>
-            </div>
-            <div class="stat" role="listitem">
-              <b>4</b><span>layers · core&larr;api&larr;mcp&larr;tools</span>
-            </div>
-            <div class="stat" role="listitem">
-              <b>3</b><span>allow-listed Meta hosts</span>
-            </div>
-            <div class="stat" role="listitem">
-              <b>0</b><span>telemetry calls</span>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ Quick demo ============ -->
-        <section id="quick-demo">
-          <span class="eyebrow">See it in action</span>
-          <h2>Three things it does, in one place</h2>
-          <p class="lead">
-            Your assistant calls a small, curated set of tools. Each one wraps a
-            real, verified Graph API capability — not every raw edge. The three
-            below are <strong>designed and scheduled, not yet shipped</strong> —
-            they land in
-            <a href="https://github.com/IvanBBaev/facebook-mcp/milestones">v0.2.0 and v0.3.0</a>.
-          </p>
-
-          <div class="tabs" role="tablist" aria-label="Example capabilities">
-            <button class="tab active" role="tab" aria-selected="true" aria-controls="panel-publish" id="tab-publish">
-              <span class="tab-index">01</span> Publish a post
-            </button>
-            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-insights" id="tab-insights">
-              <span class="tab-index">02</span> Read insights
-            </button>
-            <button class="tab" role="tab" aria-selected="false" aria-controls="panel-moderate" id="tab-moderate">
-              <span class="tab-index">03</span> Moderate a comment
-            </button>
-          </div>
-
-          <div class="tab-panel active" id="panel-publish" role="tabpanel" aria-labelledby="tab-publish">
-            <div class="tab-left">
-              <h3>Publish a post</h3>
-              <p>
-                Text, link, photo, video or Reels — with scheduling, edits and
-                deletes. The write is previewed first; nothing hits your Page
-                until you say <code>apply</code>.
-              </p>
-              <span class="tool-pill"><code>facebook_create_post</code> <span class="pill wr">write</span></span>
-            </div>
-            <div class="code-box">
-              <span class="cb-comment"># assistant &rarr; tool call (dry-run preview)</span>
-              <pre>{
-  "message": "We just shipped v1 🎉",
-  "link": "https://example.com/launch",
-  "published": true
-}
-
-&rarr; PREVIEW · resolves Page, checks perms
-&rarr; "The post was NOT published."
-&rarr; call again with { "apply": true }</pre>
-            </div>
-          </div>
-
-          <div class="tab-panel" id="panel-insights" role="tabpanel" aria-labelledby="tab-insights">
-            <div class="tab-left">
-              <h3>Read insights</h3>
-              <p>
-                Page and post reads with cursor pagination and
-                <em>live-verified</em> metric names — no guessing at deprecated
-                fields. Reads never mutate anything.
-              </p>
-              <span class="tool-pill"><code>facebook_get_insights</code> <span class="pill ro">read</span></span>
-            </div>
-            <div class="code-box">
-              <span class="cb-comment"># assistant &rarr; tool call</span>
-              <pre>{
-  "object": "post",
-  "metrics": ["post_impressions",
-              "post_reactions_by_type"]
-}
-
-&rarr; post_impressions            1,204
-&rarr; post_reactions_by_type        86
-&rarr; paging cursors stripped of tokens</pre>
-            </div>
-          </div>
-
-          <div class="tab-panel" id="panel-moderate" role="tabpanel" aria-labelledby="tab-moderate">
-            <div class="tab-left">
-              <h3>Moderate a comment</h3>
-              <p>
-                Hide, unhide or delete comments; read and reply to Page messages.
-                Moderation is reversible where the platform allows, so it can
-                default to a lighter confirmation posture.
-              </p>
-              <span class="tool-pill"><code>facebook_hide_comment</code> <span class="pill wr">write</span></span>
-            </div>
-            <div class="code-box">
-              <span class="cb-comment"># assistant &rarr; tool call</span>
-              <pre>{
-  "comment_id": "102…847_9911",
-  "hidden": true
-}
-
-&rarr; PREVIEW · before-state: visible
-&rarr; apply &rarr; comment hidden
-&rarr; recorded to local write journal
-    (metadata only, secrets redacted)</pre>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ Why MCP ============ -->
-        <section id="what-is-mcp">
-          <span class="eyebrow">Background</span>
-          <h2>What is the Model Context Protocol?</h2>
-          <p>
-            The
-            <a href="https://modelcontextprotocol.io" rel="noopener">Model Context Protocol</a>
-            (MCP) is an open standard that lets AI assistants call external tools
-            through a uniform interface. An <strong>MCP server</strong> exposes a
-            set of typed tools; an <strong>MCP client</strong> (your assistant)
-            discovers them and calls them on your behalf.
-          </p>
-          <p>
-            <strong>facebook-mcp</strong> is one such server. It runs on your own
-            machine, talks only to Meta's Graph API, and turns Page operations —
-            publishing, insights, moderation — into tools your assistant can use.
-            Because it runs locally with your token, there is no third-party
-            service in the middle: your credentials never leave your machine, and
-            the server never phones home.
-          </p>
-          <div class="cards">
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128268;</div>
-              <h3>Standard interface</h3>
-              <p>
-                Works with any MCP client over stdio — Claude Desktop, Claude
-                Code, VS Code, Cursor and others.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#127968;</div>
-              <h3>Runs where you do</h3>
-              <p>
-                A local process using your own Meta developer app and token. No
-                hosted middleman, no account linking.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#129513;</div>
-              <h3>Curated tools</h3>
-              <p>
-                A deliberately small surface — each tool wraps a verified
-                capability rather than mirroring every Graph edge.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ Capabilities ============ -->
-        <section id="capabilities">
-          <span class="eyebrow">What it does</span>
-          <h2>Capabilities</h2>
-          <p class="lead">
-            Grouped into packages you can enable or restrict. The default profile
-            is publishing, reading, insights, moderation and messages — with ads
-            deliberately left off. The <strong>Ships in</strong> column is the
-            honest part: only <code>core</code> is live today, the rest is
-            designed and scheduled.
-          </p>
-
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Area</th>
-                  <th scope="col">What it covers</th>
-                  <th scope="col">Default</th>
-                  <th scope="col">Ships in</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><strong>Core &amp; diagnostics</strong></td>
-                  <td>Identity, Page listing, rate-limit usage, <code>doctor</code> pre-flight</td>
-                  <td><span class="pill ro">on</span></td>
-                  <td><span class="pill live">live</span></td>
-                </tr>
-                <tr>
-                  <td><strong>Reading</strong></td>
-                  <td>Page &amp; post reads, Reels, reactions, cursor pagination</td>
-                  <td><span class="pill ro">on</span></td>
-                  <td>
-                    <span class="pill soon"
-                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/2"
-                        >v0.2.0</a
-                      ></span
-                    >
-                  </td>
-                </tr>
-                <tr>
-                  <td><strong>Publishing</strong></td>
-                  <td>Text, link, photo, video &amp; Reels posts; scheduling; edit &amp; delete</td>
-                  <td><span class="pill wr">on</span></td>
-                  <td>
-                    <span class="pill soon"
-                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/2"
-                        >v0.2.0</a
-                      ></span
-                    >
-                  </td>
-                </tr>
-                <tr>
-                  <td><strong>Insights &amp; moderation</strong></td>
-                  <td>Live-verified metrics; comment hide / unhide / delete; blocking</td>
-                  <td><span class="pill wr">on</span></td>
-                  <td>
-                    <span class="pill soon"
-                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/3"
-                        >v0.3.0</a
-                      ></span
-                    >
-                  </td>
-                </tr>
-                <tr>
-                  <td><strong>Messaging</strong></td>
-                  <td>Conversation reads and replies inside the 24-hour window</td>
-                  <td><span class="pill wr">on</span></td>
-                  <td>
-                    <span class="pill soon"
-                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/4"
-                        >v0.4.0</a
-                      ></span
-                    >
-                  </td>
-                </tr>
-                <tr>
-                  <td><strong>Ads</strong></td>
-                  <td>Campaign / ad-set / ad reads plus status &amp; budget control</td>
-                  <td><span class="pill soon">opt-in</span></td>
-                  <td>
-                    <span class="pill soon"
-                      ><a href="https://github.com/IvanBBaev/facebook-mcp/milestone/5"
-                        >v0.5.0</a
-                      ></span
-                    >
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="cards" style="margin-top: 22px">
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#129517;</div>
-              <h3>Core &amp; diagnostics <span class="pill live">live</span></h3>
-              <p>
-                Classify your token, list the Pages you administer, read Graph
-                rate-limit usage and run <code>doctor</code> before you connect.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128227;</div>
-              <h3>Publishing <span class="pill soon">v0.2.0</span></h3>
-              <p>
-                Compose and schedule posts across every media type, then edit or
-                delete them — each write previewed before it runs.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128202;</div>
-              <h3>Reading &amp; insights <span class="pill soon">v0.2–0.3</span></h3>
-              <p>
-                Pull Page and post data and live-verified insight metrics with
-                cursor pagination that never persists tokens.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128737;</div>
-              <h3>Moderation &amp; messages <span class="pill soon">v0.3–0.4</span></h3>
-              <p>
-                Hide, unhide or delete comments and read and reply to Page
-                conversations, keeping your community tidy.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128200;</div>
-              <h3>Ads — opt-in <span class="pill soon">v0.5.0</span></h3>
-              <p>
-                Read campaigns and control status and budget. Off by default
-                (Meta ships an official ads MCP); enable it deliberately.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128274;</div>
-              <h3>Local-first, no telemetry</h3>
-              <p>
-                Only three Meta hosts are ever reached. Nothing about your usage
-                is collected or sent anywhere.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#9995;</div>
-              <h3>Safe, gated writes</h3>
-              <p>
-                Tiered plan-and-apply gating. Irreversible and spend actions
-                always need an explicit, per-call confirmation.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <!-- ============ Quick start ============ -->
-        <section id="quickstart">
-          <span class="eyebrow">Set up</span>
-          <h2>Quick start</h2>
-          <p class="lead">
-            There is no npm package yet, so you run it from source. Three steps to
-            a working server, then point your MCP client at it.
-          </p>
-
-          <div class="qs-grid">
-            <div class="qs-steps">
-              <div class="qs-step">
-                <div class="qs-step-head">
-                  <span class="qs-num">1</span>
-                  <span class="qs-step-title">Clone &amp; build</span>
-                </div>
-                <div class="qs-cmd" data-copy="git clone https://github.com/IvanBBaev/facebook-mcp
+          <div class="steps">
+            <div class="step">
+              <div>
+                <h3>Build it</h3>
+                <div class="code">
+                  <div class="code-head">
+                    <span>shell</span>
+                    <button class="copy" type="button" data-copy="c-build">Copy</button>
+                  </div>
+                  <pre id="c-build">git clone https://github.com/IvanBBaev/facebook-mcp.git
 cd facebook-mcp
-npm install
-npm run build">
-                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
-                  <p class="qs-cmd-text"><code>git clone https://github.com/IvanBBaev/facebook-mcp
-cd facebook-mcp
-npm install
-npm run build</code></p>
+npm ci
+npm run build</pre>
                 </div>
               </div>
+            </div>
 
-              <div class="qs-step">
-                <div class="qs-step-head">
-                  <span class="qs-num">2</span>
-                  <span class="qs-step-title">Provide credentials</span>
-                </div>
-                <div class="qs-cmd" data-copy="export FB_ACCESS_TOKEN=EAA…
-export FB_PAGE_ID=1234567890
-export FB_APP_SECRET=…   # for appsecret_proof">
-                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
-                  <p class="qs-cmd-text"><code>export FB_ACCESS_TOKEN=EAA…
-export FB_PAGE_ID=1234567890
-export FB_APP_SECRET=…   # appsecret_proof</code></p>
+            <div class="step">
+              <div>
+                <h3>Add a token</h3>
+                <p class="sub">
+                  <code>setup-token</code> validates the token, resolves the Page and
+                  writes a <code>0600</code> env file for you. Pass the token through
+                  <code>FB_SETUP_TOKEN</code> rather than on the command line — an
+                  argument would be visible in <code>ps</code> and in your shell history.
+                  The value is never echoed back.
+                </p>
+                <div class="code">
+                  <div class="code-head">
+                    <span>shell</span>
+                    <button class="copy" type="button" data-copy="c-token">Copy</button>
+                  </div>
+                  <pre id="c-token"><span class="c"># --page pins the Page; add --dry-run first to rehearse without writing</span>
+FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
+  node build/index.js setup-token --page=1234567890</pre>
                 </div>
               </div>
+            </div>
 
-              <div class="qs-step">
-                <div class="qs-step-head">
-                  <span class="qs-num">3</span>
-                  <span class="qs-step-title">Run it</span>
+            <div class="step">
+              <div>
+                <h3>Check it before you wire it up</h3>
+                <p class="sub">
+                  <code>doctor</code> inspects the token — type, expiry, granted scopes —
+                  and prints a usable / partial / blocked matrix per package, so a missing
+                  permission surfaces here instead of inside a tool call.
+                </p>
+                <div class="code">
+                  <div class="code-head">
+                    <span>shell</span>
+                    <button class="copy" type="button" data-copy="c-doctor">Copy</button>
+                  </div>
+                  <pre id="c-doctor">node build/index.js doctor
+node build/index.js --version   <span class="c"># server + Node version, no credential needed</span></pre>
                 </div>
-                <div class="qs-cmd" data-copy="node build/index.js">
-                  <button class="qs-cmd-copy" type="button" aria-label="Copy command">copy</button>
-                  <p class="qs-cmd-text"><code>node build/index.js</code></p>
-                </div>
-                <p class="qs-note">
-                  Speaks MCP over stdio. Usually you won't run it by hand — your
-                  MCP client launches it using the config on the right.
+                <p class="sub">
+                  <code>doctor</code>, <code>setup-token</code> and
+                  <code>--version</code> are the only arguments that exit on their own —
+                  anything else starts the stdio server and waits on JSON-RPC.
                 </p>
               </div>
             </div>
 
-            <!-- Client config panel -->
-            <div class="qs-config">
-              <div class="qs-config-head">
-                <div class="qs-tabs" role="tablist" aria-label="Client">
-                  <button class="qs-tab active" role="tab" aria-selected="true" data-cfg="claude">Claude Desktop</button>
-                  <button class="qs-tab" role="tab" aria-selected="false" data-cfg="vscode">VS Code</button>
-                  <button class="qs-tab" role="tab" aria-selected="false" data-cfg="cursor">Cursor</button>
+            <div class="step">
+              <div>
+                <h3>Point your client at it</h3>
+                <p class="sub">
+                  Use the absolute path to <code>build/index.js</code>. Start read-only —
+                  <code>FB_PACKAGES_READONLY</code> drops every write tool while keeping
+                  the reads — and open the gate once you trust what you see.
+                </p>
+
+                <div class="tabs" role="tablist" aria-label="MCP client">
+                  <button
+                    class="tab"
+                    role="tab"
+                    id="t-claude"
+                    aria-controls="p-claude"
+                    aria-selected="true"
+                  >
+                    Claude Desktop
+                  </button>
+                  <button
+                    class="tab"
+                    role="tab"
+                    id="t-vscode"
+                    aria-controls="p-vscode"
+                    aria-selected="false"
+                    tabindex="-1"
+                  >
+                    VS Code
+                  </button>
+                  <button
+                    class="tab"
+                    role="tab"
+                    id="t-cursor"
+                    aria-controls="p-cursor"
+                    aria-selected="false"
+                    tabindex="-1"
+                  >
+                    Cursor
+                  </button>
                 </div>
-                <button class="qs-config-copy" type="button">copy</button>
-              </div>
-              <div class="qs-config-body">
-                <div class="qs-config-path" id="cfg-path">
-                  ~/Library/Application Support/Claude/claude_desktop_config.json
-                </div>
-                <pre class="qs-config-pre" id="cfg-body"><code>{
-  "mcpServers": {
-    "facebook": {
-      "command": "node",
-      "args": ["/abs/path/facebook-mcp/build/index.js"],
-      "env": {
-        "FB_ACCESS_TOKEN": "EAA…",
-        "FB_PAGE_ID": "1234567890",
-        "FB_APP_SECRET": "…"
+
+                <div role="tabpanel" id="p-claude" aria-labelledby="t-claude" tabindex="0">
+                  <div class="code">
+                    <div class="code-head">
+                      <span
+                        >~/Library/Application Support/Claude/claude_desktop_config.json</span
+                      >
+                      <button class="copy" type="button" data-copy="c-claude">
+                        Copy
+                      </button>
+                    </div>
+                    <pre id="c-claude">{
+  <span class="p">"mcpServers"</span>: {
+    <span class="p">"facebook"</span>: {
+      <span class="p">"command"</span>: "node",
+      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"env"</span>: {
+        <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
+        <span class="p">"FB_PAGE_ID"</span>: "1234567890",
+        <span class="p">"FB_WRITE_MODE"</span>: "plan"
       }
     }
   }
-}</code></pre>
+}</pre>
+                  </div>
+                  <p class="sub" style="margin-top: 10px; font-size: 14px">
+                    On Windows the file lives at
+                    <code>%APPDATA%\Claude\claude_desktop_config.json</code>.
+                  </p>
+                </div>
+
+                <div
+                  role="tabpanel"
+                  id="p-vscode"
+                  aria-labelledby="t-vscode"
+                  tabindex="0"
+                  hidden
+                >
+                  <div class="code">
+                    <div class="code-head">
+                      <span>.vscode/mcp.json</span>
+                      <button class="copy" type="button" data-copy="c-vscode">Copy</button>
+                    </div>
+                    <pre id="c-vscode">{
+  <span class="p">"servers"</span>: {
+    <span class="p">"facebook"</span>: {
+      <span class="p">"type"</span>: "stdio",
+      <span class="p">"command"</span>: "node",
+      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"env"</span>: {
+        <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
+        <span class="p">"FB_PAGE_ID"</span>: "1234567890"
+      }
+    }
+  }
+}</pre>
+                  </div>
+                </div>
+
+                <div
+                  role="tabpanel"
+                  id="p-cursor"
+                  aria-labelledby="t-cursor"
+                  tabindex="0"
+                  hidden
+                >
+                  <div class="code">
+                    <div class="code-head">
+                      <span>~/.cursor/mcp.json</span>
+                      <button class="copy" type="button" data-copy="c-cursor">Copy</button>
+                    </div>
+                    <pre id="c-cursor">{
+  <span class="p">"mcpServers"</span>: {
+    <span class="p">"facebook"</span>: {
+      <span class="p">"command"</span>: "node",
+      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"env"</span>: {
+        <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
+        <span class="p">"FB_PAGE_ID"</span>: "1234567890"
+      }
+    }
+  }
+}</pre>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
+        </div>
+      </section>
 
-          <div class="callout" style="margin-top: 24px">
-            <span class="c-ico" aria-hidden="true">&#128230;</span>
-            <p>
-              <strong>After the first release</strong> — once facebook-mcp is
-              published to npm — the same config becomes a one-liner, no clone or
-              build required:
+      <!-- ============ CAPABILITIES ============ -->
+      <section id="capabilities" aria-labelledby="h-capabilities">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Capabilities</span>
+            <h2 id="h-capabilities">Seven packages, 37 tools</h2>
+            <p class="sub">
+              Packages are the unit of exposure: <code>FB_TOOL_PACKAGES</code> enables or
+              disables whole packages, <code>FB_PACKAGES_DENY</code> removes one
+              regardless, and <code>FB_PACKAGES_READONLY</code> keeps a package's reads
+              while dropping its writes. <code>core</code> is always on.
             </p>
           </div>
-          <div class="codeblock">
-            <span class="lang">json</span>
-            <pre><code>{
-  "mcpServers": {
-    "facebook": {
-      "command": "npx",
-      "args": ["-y", "@ivanbbaev/facebook-mcp"],
-      "env": {
-        "FB_ACCESS_TOKEN": "EAA…",
-        "FB_PAGE_ID": "1234567890"
-      }
-    }
-  }
-}</code></pre>
-          </div>
-          <p class="qs-note">
-            Not available yet — shown here as the intended shape once the package
-            ships. Track progress on
-            <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">GitHub</a>.
-          </p>
-        </section>
 
-        <!-- ============ Credentials ============ -->
-        <section id="credentials">
-          <span class="eyebrow">Set up</span>
-          <h2>Credentials</h2>
-          <p class="lead">
-            You bring your own Meta developer app and a token for a Page you
-            administer. facebook-mcp uses the least privilege that works — and no
-            App Review, because you operate your own assets.
-          </p>
-
-          <h3>Two token routes</h3>
-          <div class="cards">
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#127970;</div>
-              <h3>System User token</h3>
-              <p>
-                A never-expiring token issued from Business Manager. Best for a
-                stable, long-running setup where a Business owns the Page.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128273;</div>
-              <h3>Long-lived Page token</h3>
-              <p>
-                A first-class fallback — no Business Manager required. Ideal when
-                you simply administer a Page yourself.
-              </p>
-            </div>
-          </div>
-
-          <h3>Environment variables</h3>
-          <div class="table-wrap">
+          <div
+            class="tw"
+            role="group"
+            tabindex="0"
+            aria-label="Tool packages, scrollable table"
+          >
             <table>
               <thead>
                 <tr>
-                  <th scope="col">Variable</th>
-                  <th scope="col">Purpose</th>
+                  <th scope="col">Package</th>
+                  <th scope="col">Default</th>
+                  <th scope="col">Tools</th>
+                  <th scope="col">Write mode</th>
+                  <th scope="col">What it covers</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td><code>FB_ACCESS_TOKEN</code></td>
-                  <td>Your System User or long-lived Page token. Sent as a Bearer header — never in a query string.</td>
+                  <td><code>core</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td><span class="tag read">4 read</span></td>
+                  <td>—</td>
+                  <td>
+                    Identity, Page discovery and rate-limit diagnostics. Read-only, always
+                    registered.
+                  </td>
                 </tr>
                 <tr>
-                  <td><code>FB_PAGE_ID</code></td>
-                  <td>The default Page the tools operate on.</td>
+                  <td><code>reader</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td><span class="tag read">4 read</span></td>
+                  <td>—</td>
+                  <td>
+                    A Page's own content: posts across four edges, single posts, Reels and
+                    reaction totals.
+                  </td>
                 </tr>
                 <tr>
-                  <td><code>FB_APP_SECRET</code></td>
-                  <td>Used to compute <code>appsecret_proof</code> (HMAC-SHA256) on every call.</td>
+                  <td><code>posts</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td>
+                    <span class="tag read">2 read</span>
+                    <span class="tag write">6 write</span>
+                  </td>
+                  <td><code>plan</code></td>
+                  <td>
+                    Publish, schedule, edit and delete Page posts, photos, videos and
+                    Reels; poll the upload state of a large video or Reel.
+                  </td>
                 </tr>
                 <tr>
-                  <td><code>FB_API_VERSION</code></td>
-                  <td>Graph API version pin (defaults to a tested version).</td>
+                  <td><code>insights</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td><span class="tag read">3 read</span></td>
+                  <td>—</td>
+                  <td>
+                    Page, post and Reel insights in a compact flat shape, with guidance for
+                    the metrics Meta renamed or removed. Reels read their own Graph edge, so
+                    they get their own tool.
+                  </td>
                 </tr>
                 <tr>
-                  <td><code>FB_TOOL_PACKAGES</code></td>
-                  <td>Which tool packages to expose. Unset ⇒ the default profile (ads excluded).</td>
+                  <td><code>moderation</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td>
+                    <span class="tag read">2 read</span>
+                    <span class="tag write">6 write</span>
+                  </td>
+                  <td><code>apply</code></td>
+                  <td>
+                    Read and moderate comments — list, reply, hide, delete, private reply —
+                    and maintain the blocked-users list.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>messages</code></td>
+                  <td><span class="tag on">on</span></td>
+                  <td>
+                    <span class="tag read">2 read</span>
+                    <span class="tag write">1 write</span>
+                  </td>
+                  <td><code>plan</code></td>
+                  <td>
+                    Messenger for a Page: poll the inbox, read a thread with untrusted
+                    content wrapped, send one reply inside the 24-hour window.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>ads</code></td>
+                  <td><span class="tag">opt-in</span></td>
+                  <td>
+                    <span class="tag read">6 read</span>
+                    <span class="tag write">1 write</span>
+                  </td>
+                  <td><code>plan</code></td>
+                  <td>
+                    Marketing API: campaign / ad-set / ad listings with delivery truth,
+                    insights with async report runs, plan-gated status and budget control.
+                  </td>
                 </tr>
               </tbody>
             </table>
           </div>
 
-          <div class="callout">
-            <span class="c-ico" aria-hidden="true">&#128273;</span>
-            <p>
-              Config is <strong>env-first</strong>: values passed by the client
-              beat the env file. On-disk config lives under an XDG path and is
-              written atomically with <code>0600</code> permissions. Your token
-              is never logged and is stripped from any Graph response before it
-              leaves the process.
-            </p>
-          </div>
-          <p>
-            No Meta <strong>App Review</strong> is required for an admin operating
-            their own Page. Start read-only, confirm the topology, then enable
-            writes when you are ready.
-          </p>
-        </section>
-
-        <!-- ============ Architecture ============ -->
-        <section id="architecture">
-          <span class="eyebrow">Under the hood</span>
-          <h2>Architecture</h2>
-          <p class="lead">
-            A thin, lint-enforced stack. Each layer may only import the one below
-            it, so tools can never reach around policy straight to the network.
-          </p>
-
-          <figure class="diagram">
-            <svg viewBox="0 0 720 250" role="img" aria-label="Layering: tools depend on mcp, which depends on api, which depends on core. Imports only ever point downward.">
-              <!-- L3 tools -->
-              <rect class="box accent" x="20" y="20" width="680" height="46" rx="9" />
-              <text class="lbl" x="40" y="41">tools</text>
-              <text class="sub" x="40" y="58">ToolSpec[] per package — data, not code · facebook_&lt;verb&gt;_&lt;noun&gt;</text>
-              <text class="tag" x="640" y="47">L3</text>
-              <!-- L2 mcp -->
-              <rect class="box" x="20" y="78" width="680" height="46" rx="9" />
-              <text class="lbl" x="40" y="99">mcp</text>
-              <text class="sub" x="40" y="116">registry &amp; packages · result shaper · write-mode + journal · transport</text>
-              <text class="tag" x="640" y="105">L2</text>
-              <!-- L1 api -->
-              <rect class="box" x="20" y="136" width="680" height="46" rx="9" />
-              <text class="lbl" x="40" y="157">api</text>
-              <text class="sub" x="40" y="174">Graph domain functions · posts · insights · comments · messaging · ads</text>
-              <text class="tag" x="640" y="163">L1</text>
-              <!-- L0 core -->
-              <rect class="box" x="20" y="194" width="680" height="46" rx="9" />
-              <text class="lbl" x="40" y="215">core</text>
-              <text class="sub" x="40" y="232">config &amp; auth · HTTP client + upload protocols · host allowlist · redaction</text>
-              <text class="tag" x="640" y="221">L0</text>
-              <!-- downward arrow -->
-              <path class="edge" d="M362 66 L362 78" />
-              <path class="ah" d="M362 78 l-4 -6 l8 0 z" />
-              <path class="edge" d="M362 124 L362 136" />
-              <path class="ah" d="M362 136 l-4 -6 l8 0 z" />
-              <path class="edge" d="M362 182 L362 194" />
-              <path class="ah" d="M362 194 l-4 -6 l8 0 z" />
-            </svg>
-            <figcaption>
-              <code>core &larr; api &larr; mcp &larr; tools</code> — enforced with
-              ESLint <code>no-restricted-imports</code>. Tools never import
-              <code>core/http</code> directly.
-            </figcaption>
-          </figure>
-
-          <h3>The three-host fence</h3>
-          <p>
-            There is exactly one vendor, so the HTTP client hard-codes a fixed
-            host allowlist — there are no user-configurable hosts. Every request,
-            including chunked media uploads, goes through one choke-point that
-            can only reach these three:
-          </p>
-          <div class="host-fence">
-            <span class="host-chip"><span class="dot" aria-hidden="true"></span>graph.facebook.com</span>
-            <span class="host-chip"><span class="dot" aria-hidden="true"></span>graph-video.facebook.com</span>
-            <span class="host-chip"><span class="dot" aria-hidden="true"></span>rupload.facebook.com</span>
-          </div>
-          <p>
-            One <code>fbRequest()</code> entry point covers all three wire
-            protocols — JSON / query-string reads and simple writes, multipart
-            <code>FormData</code> for direct binary uploads, and raw-binary
-            <code>rupload</code> for chunked resumable video and Reels — so no
-            media path can bypass auth, redaction or the host fence.
-          </p>
-        </section>
-
-        <!-- ============ Security ============ -->
-        <section id="security">
-          <span class="eyebrow">Under the hood</span>
-          <h2>Security &amp; safety</h2>
-          <p class="lead">
-            Publishing to a real audience is the most consequential thing this
-            server does, so safe-by-default is non-negotiable.
-          </p>
-
-          <div class="cards">
+          <div class="grid2">
             <div class="card">
-              <div class="ico" aria-hidden="true">&#128225;</div>
-              <h3>Local-first, no telemetry</h3>
-              <p>
-                The server reaches only the three allow-listed Meta hosts.
-                Nothing about your usage is collected, and nothing phones home.
+              <h3>What it deliberately does not do</h3>
+              <p class="sub" style="font-size: 15px">
+                Instagram and Threads, Stories, Events, Live video, Page profile
+                management, organic post targeting and boosting a post are all out of
+                scope for now. The <code>business_management</code> permission is never
+                requested.
               </p>
             </div>
             <div class="card">
-              <div class="ico" aria-hidden="true">&#128272;</div>
-              <h3>Least-privilege tokens</h3>
-              <p>
-                A System User or long-lived Page token, sent as a Bearer header —
-                never in a query string, so it can't leak into
-                <code>paging.next</code> URLs.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#9995;</div>
-              <h3>Plan-and-apply writes</h3>
-              <p>
-                Every write previews first and mutates nothing. Delete and spend
-                tiers always need a per-call <code>apply</code> — never bypassed
-                by an env flag.
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#129529;</div>
-              <h3>Single-choke-point redaction</h3>
-              <p>
-                One function scrubs raw secret <em>values</em> — tokens, app
-                secret, <code>appsecret_proof</code> — across logs, errors,
-                results and the journal.
+              <h3>Insights that still exist</h3>
+              <p class="sub" style="font-size: 15px">
+                Meta has removed or renamed metrics in three waves — September 2024,
+                November 2025 and June 2026. Metrics are passed through rather than
+                whitelisted, and the tools surface the rename guidance instead of silently
+                returning nothing.
               </p>
             </div>
           </div>
 
-          <h3>Defense in depth</h3>
-          <ul>
-            <li>
-              <strong>appsecret_proof</strong> (HMAC-SHA256) is attached to every
-              Graph call.
-            </li>
-            <li>
-              <strong>Response scrubbing</strong> recursively strips every
-              <code>paging</code> object and token-bearing URL before a payload
-              leaves the process.
-            </li>
-            <li>
-              <strong>SSRF containment</strong> — the fixed host allowlist means
-              no request can be steered to an arbitrary host; local file uploads
-              are off unless you explicitly set <code>FB_MEDIA_DIR</code>
-              (realpath-confined, no cross-host redirects).
-            </li>
-            <li>
-              <strong>HTTP transport fails closed</strong> — it refuses to start
-              without <code>FB_HTTP_TOKEN</code>, binds <code>127.0.0.1</code>
-              only, validates the <code>Origin</code> header, and constant-time
-              checks the bearer on every request.
-            </li>
-            <li>
-              <strong>Ambiguous writes are never auto-retried</strong> — Graph has
-              no idempotency keys, so a publish/send/delete whose outcome is
-              unknown is surfaced for you to verify, never blindly replayed.
-            </li>
-          </ul>
-
-          <div class="callout security">
-            <span class="c-ico" aria-hidden="true">&#9888;</span>
-            <p>
-              Because an assistant can ingest untrusted content (comments,
-              messages) and also hold a write-capable token, the recommended
-              posture for unattended runs is <strong>read-only</strong>.
-              Irreversible and spend actions always require out-of-band
-              confirmation that an environment flag can never satisfy.
-            </p>
-          </div>
-        </section>
-
-        <!-- ============ FAQ ============ -->
-        <section id="faq">
-          <span class="eyebrow">Questions</span>
-          <h2>FAQ</h2>
-
-          <h3>Is this affiliated with Meta?</h3>
-          <p>
-            No. This is an independent, community-built project and is not
-            affiliated with, endorsed by, or sponsored by Meta Platforms, Inc.
-            "Facebook" and "Meta" are used only nominatively, to indicate what the
-            server is compatible with.
+          <p class="sub">
+            The full 37-tool table, with the exact Graph permission each tool needs, lives
+            in the
+            <a href="https://github.com/IvanBBaev/facebook-mcp#tools">README</a>.
           </p>
-
-          <h3>Which credentials does it need?</h3>
-          <p>
-            A Meta developer app plus one access token — either a never-expiring
-            System User token from Business Manager, or a long-lived Page token.
-            The app secret is used to compute <code>appsecret_proof</code>.
-            Because you administer your own Page, <strong>no App Review</strong>
-            is required.
-          </p>
-
-          <h3>Is it safe to let it write to my Page?</h3>
-          <p>
-            Writes are gated. Every write tool first returns a dry-run preview and
-            performs zero network mutations; you approve with an explicit
-            <code>apply</code>. Irreversible actions (delete) and spend actions
-            (ads) always require a per-call confirmation and are
-            <strong>never</strong> bypassed by an environment flag. Starting
-            read-only is recommended.
-          </p>
-
-          <h3>What actually works today?</h3>
-          <p>
-            The foundation — HTTP client, auth, write gating, transports, tool
-            registry — is implemented and tested, and the read-only
-            <code>core</code> package ships four tools:
-            <code>facebook_whoami</code>, <code>facebook_list_pages</code>,
-            <code>facebook_get_page</code> and <code>facebook_usage</code>.
-            Everything else on this page is designed and scheduled; see the
-            <a href="https://github.com/users/IvanBBaev/projects/3" rel="noopener">roadmap board</a>
-            for what lands when.
-          </p>
-
-          <h3>When will it be published to npm?</h3>
-          <p>
-            Not yet. facebook-mcp is pre-1.0 and in active development — the design
-            is complete and documented while implementation is in progress. An npm
-            package will ship with the first tagged release; until then you run it
-            from source. Progress is tracked in the
-            <a href="https://github.com/IvanBBaev/facebook-mcp/milestones" rel="noopener">milestones</a>.
-          </p>
-
-          <h3>Which MCP clients does it work with?</h3>
-          <p>
-            Any client that speaks MCP over stdio — for example Claude Desktop,
-            Claude Code, VS Code and Cursor. An optional loopback-only Streamable
-            HTTP transport is available for advanced setups.
-          </p>
-        </section>
-
-        <!-- ============ Support the project ============ -->
-        <section id="support">
-          <span class="eyebrow">Keep it going</span>
-          <h2>Support the project</h2>
-          <p class="lead">
-            facebook-mcp is MIT-licensed, free, collects nothing and is built by
-            one maintainer in their own time. There is no paid tier and never
-            will be — if it saves you an afternoon, a tip is what funds the next
-            milestone.
-          </p>
-
-          <div class="cards">
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#128153;</div>
-              <h3>GitHub Sponsors</h3>
-              <p>
-                One-off or recurring, no platform fee, and it shows up on the
-                repository. The best option if you already have a GitHub account.
-              </p>
-              <p>
-                <a class="btn sponsor" href="https://github.com/sponsors/IvanBBaev" rel="noopener"
-                  >Sponsor on GitHub</a
-                >
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#9749;</div>
-              <h3>Ko-fi</h3>
-              <p>
-                A quick one-off tip, card or PayPal, no account needed. The
-                fallback for anyone who does not use GitHub.
-              </p>
-              <p>
-                <a class="btn kofi" href="https://ko-fi.com/ivanbbaev" rel="noopener"
-                  >Buy me a coffee</a
-                >
-              </p>
-            </div>
-            <div class="card">
-              <div class="ico" aria-hidden="true">&#127793;</div>
-              <h3>Donatree</h3>
-              <p>
-                A single page collecting every donation method in one place —
-                useful if you prefer a local payment option.
-              </p>
-              <p>
-                <a class="btn tree" href="https://donatr.ee/ivanbbaev/" rel="noopener"
-                  >Open Donatree</a
-                >
-              </p>
-            </div>
-          </div>
-
-          <div class="callout" style="margin-top: 26px">
-            <span class="c-ico" aria-hidden="true">&#128172;</span>
-            <p>
-              <strong>Not in a position to donate?</strong> That is completely
-              fine — starring the
-              <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">repository</a>,
-              filing a good bug report, or telling another Page admin about it
-              helps just as much. Support questions go through
-              <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/SUPPORT.md" rel="noopener"
-                >SUPPORT.md</a
-              >; donating buys no priority and no SLA.
-            </p>
-          </div>
-        </section>
-      </main>
-    </div>
-
-    <!-- ============================ Footer ============================ -->
-    <footer>
-      <div class="foot-inner">
-        <div>
-          <strong>facebook-mcp</strong> · MIT © 2026 Ivan Baev
         </div>
-        <nav aria-label="Footer">
-          <a href="https://github.com/IvanBBaev/facebook-mcp" rel="noopener">GitHub</a>
-          &nbsp;·&nbsp;
-          <a href="https://github.com/IvanBBaev/facebook-mcp#readme" rel="noopener">README</a>
-          &nbsp;·&nbsp;
-          <a href="https://github.com/users/IvanBBaev/projects/3" rel="noopener">Roadmap</a>
-          &nbsp;·&nbsp;
-          <a href="https://modelcontextprotocol.io" rel="noopener">About MCP</a>
-        </nav>
-        <nav aria-label="Support the maintainer">
-          <a href="https://github.com/sponsors/IvanBBaev" rel="noopener">Sponsor</a>
-          &nbsp;·&nbsp;
-          <a href="https://ko-fi.com/ivanbbaev" rel="noopener">Ko-fi</a>
-          &nbsp;·&nbsp;
-          <a href="https://donatr.ee/ivanbbaev/" rel="noopener">Donatree</a>
-        </nav>
+      </section>
+
+      <!-- ============ SAFETY ============ -->
+      <section id="safety" aria-labelledby="h-safety">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Safety</span>
+            <h2 id="h-safety">A write model you can reason about</h2>
+            <p class="sub">
+              Every tool declares a tier. The tier — not the tool, and not the model's
+              confidence — decides what has to happen before the Graph API is touched.
+            </p>
+          </div>
+
+          <div class="tiers">
+            <div class="tier">
+              <div>
+                <h3>read</h3>
+                <span class="tag read">22 tools</span>
+              </div>
+              <p>Never mutates anything. Safe to expose first, and to leave on.</p>
+            </div>
+            <div class="tier">
+              <div>
+                <h3>reversible</h3>
+                <span class="tag write">10 tools</span>
+              </div>
+              <p>
+                Governed by the effective write mode. Under <code>plan</code> the tool
+                returns a preview with a <code>plan_id</code> and performs zero network
+                mutations; under <code>apply</code> it executes. Creating a post, editing
+                one, replying to or hiding a comment, blocking a user, sending a Messenger
+                reply.
+              </p>
+            </div>
+            <div class="tier">
+              <div>
+                <h3>irreversible</h3>
+                <span class="tag irr">4 tools</span>
+              </div>
+              <p>
+                Ignores <code>FB_WRITE_MODE</code> completely — no environment variable
+                unlocks it. Requires a per-call <code>apply</code> flag,
+                <em>plus</em> the <code>plan_id</code> of a preview you just ran,
+                <em>plus</em> an out-of-band human confirmation. Deleting a post, deleting
+                a comment, sending a private reply, changing an ads object.
+              </p>
+            </div>
+            <div class="tier">
+              <div>
+                <h3>spend</h3>
+                <span class="tag">0 tools</span>
+              </div>
+              <p>
+                The money-moving tier. It is defined and enforced, but no shipped tool
+                carries it today — ads control is <code>irreversible</code> instead, and
+                <code>FB_ADS_BUDGET_CEILING</code> caps what a budget change may set.
+              </p>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="card">
+              <h3>Which default applies</h3>
+              <ol class="sub" style="font-size: 15px; padding-left: 20px; margin: 0">
+                <li>
+                  An explicit <code>FB_WRITE_MODE</code> wins outright, in both directions.
+                  Even an invalid value counts as explicit, so a typo can never loosen the
+                  gate.
+                </li>
+                <li>
+                  Otherwise the package default applies. <code>posts</code>,
+                  <code>messages</code> and <code>ads</code> ship <code>plan</code>;
+                  <code>moderation</code> ships <code>apply</code>, because hiding a
+                  comment is one click to undo and a moderation queue that previews twice
+                  is a moderation queue nobody uses.
+                </li>
+                <li>Otherwise the compiled-in default, <code>plan</code>.</li>
+              </ol>
+              <p class="sub" style="font-size: 15px; margin-top: 12px">
+                A package default can never reach past <code>reversible</code>.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Confirmation happens out of band</h3>
+              <p class="sub" style="font-size: 15px">
+                For the irreversible tier the server asks a human directly, through MCP
+                elicitation — but only when the client actually advertises
+                <code>elicitation.form</code>; an empty <code>elicitation: {}</code> is not
+                enough. When the client cannot prompt, the call falls through to the
+                operator token: <code>FB_CONFIRM_TOKEN</code>, passed back as the tool's
+                <code>confirm_token</code> argument.
+              </p>
+              <p class="sub" style="font-size: 15px; margin-top: 12px">
+                There is no silent allow. A refusal names which route failed — no
+                confirmation channel, wrong token, or stale plan — so you can tell a
+                misconfiguration from a denial.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <h3>Defence in depth</h3>
+            <ul class="checks" style="margin-top: 12px">
+              <li>
+                <span
+                  ><strong>Three hosts, and no others.</strong> The HTTP layer refuses any
+                  request outside the allowlist, including redirects that leave it.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>No telemetry, no phone-home.</strong> The only outbound traffic
+                  is the Graph call you asked for.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>Secrets never surface.</strong> Tokens are redacted from logs,
+                  errors and tool results; with <code>FB_APP_SECRET</code> set every call
+                  carries an <code>appsecret_proof</code>, so a stolen bare token is
+                  unusable.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>Untrusted content is fenced.</strong> Comments and messages come
+                  back wrapped and marked as data, so a comment that says "ignore your
+                  instructions" reads as text, not as an instruction.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>Local files are off by default.</strong> Uploads are URL-only
+                  until <code>FB_MEDIA_DIR</code> is set, and then only inside that
+                  directory — resolved through <code>realpath</code>, so a symlink cannot
+                  walk out.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>Every write is journalled.</strong> Structured metadata only, no
+                  tokens and no PII, <code>0600</code>, rotated by size — and a journal
+                  failure never blocks the write.</span
+                >
+              </li>
+              <li>
+                <span
+                  ><strong>The HTTP transport fails closed.</strong> It binds loopback only
+                  and refuses to start without <code>FB_HTTP_TOKEN</code>.</span
+                >
+              </li>
+            </ul>
+          </div>
+
+          <div class="hosts">
+            <span class="host">graph.facebook.com</span>
+            <span class="host">graph-video.facebook.com</span>
+            <span class="host">www.facebook.com</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ARCHITECTURE ============ -->
+      <section id="architecture" aria-labelledby="h-architecture">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Architecture</span>
+            <h2 id="h-architecture">Four layers, one direction</h2>
+            <p class="sub">
+              Imports point leftward only, and the rule is enforced by lint rather than by
+              convention — so the Graph client cannot learn about MCP, and the tool layer
+              cannot reach past the API layer to make its own HTTP call.
+            </p>
+          </div>
+
+          <div class="layers">
+            <div class="layer">
+              <b>tools</b>
+              <span
+                >Zod input schemas, tool registration, result shaping, package
+                composition.</span
+              >
+            </div>
+            <div class="layer">
+              <b>mcp</b>
+              <span
+                >Server bootstrap, transports, the write-mode gate, confirmation,
+                <code>doctor</code>, <code>setup-token</code>.</span
+              >
+            </div>
+            <div class="layer">
+              <b>api</b>
+              <span
+                >One module per Graph surface: posts, media, insights, comments, messaging,
+                ads.</span
+              >
+            </div>
+            <div class="layer">
+              <b>core</b>
+              <span
+                >Settings, the host-fenced HTTP client, retries and rate-limit parsing,
+                errors, redaction, the journal.</span
+              >
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="card">
+              <h3>Errors that say what to do</h3>
+              <p class="sub" style="font-size: 15px">
+                Graph error codes are mapped to an action rather than passed through raw:
+                what happened, whether it is retryable, and what you should change. Rate
+                limits are read from the response headers and backed off before the
+                platform starts refusing.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Multi-Page from one process</h3>
+              <p class="sub" style="font-size: 15px">
+                Named profiles — <code>FB_PROFILE_BRAND_A_PAGE_ID</code> and an optional
+                matching token — let one server drive several Pages; a tool call picks one
+                with <code>profile</code>, and <code>FB_PAGE_ID</code> is the fallback.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ CONFIG ============ -->
+      <section id="config" aria-labelledby="h-config">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Configuration</span>
+            <h2 id="h-config">Credentials and environment</h2>
+            <p class="sub">
+              You need a Meta developer app and one access token. Because you administer
+              the Page yourself, no Meta App Review is required — the permissions you grant
+              to your own app are enough.
+            </p>
+          </div>
+
+          <div class="tw" role="group" tabindex="0" aria-label="Token options">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Token</th>
+                  <th scope="col">Precedence</th>
+                  <th scope="col">When to use it</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>FB_SYSTEM_TOKEN</code></td>
+                  <td>1st</td>
+                  <td>
+                    A System User token from Business Manager. Recommended: it does not
+                    expire on its own, and it survives your personal password changes.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>FB_ACCESS_TOKEN</code></td>
+                  <td>2nd</td>
+                  <td>A long-lived user token — fine for a single operator.</td>
+                </tr>
+                <tr>
+                  <td><code>FB_PAGE_TOKEN</code></td>
+                  <td>3rd</td>
+                  <td>A long-lived Page token — the no-Business-Manager fallback.</td>
+                </tr>
+                <tr>
+                  <td><code>FB_APP_SECRET</code></td>
+                  <td>optional</td>
+                  <td>
+                    Not required to run. When set, every request carries an
+                    <code>appsecret_proof</code>; with <code>FB_APP_ID</code> it also forms
+                    the app token used to inspect tokens in <code>doctor</code>.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div>
+            <h3>Permissions per package</h3>
+            <div
+              class="tw"
+              role="group"
+              tabindex="0"
+              aria-label="Graph permissions per package"
+              style="margin-top: 12px"
+            >
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">Package</th>
+                    <th scope="col">Required Graph permissions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>core</code></td>
+                    <td>
+                      <code>pages_show_list</code>, <code>pages_read_engagement</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>reader</code></td>
+                    <td>
+                      <code>pages_read_engagement</code>,
+                      <code>pages_read_user_content</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>posts</code></td>
+                    <td>
+                      <code>pages_manage_posts</code>, <code>pages_read_engagement</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>insights</code></td>
+                    <td><code>read_insights</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>moderation</code></td>
+                    <td>
+                      <code>pages_read_user_content</code>,
+                      <code>pages_manage_engagement</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>messages</code></td>
+                    <td>
+                      <code>pages_messaging</code>, <code>pages_manage_metadata</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>ads</code></td>
+                    <td><code>ads_read</code>, <code>ads_management</code></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <details id="env">
+            <summary>All 25 environment variables</summary>
+            <div class="details-body" style="max-width: none; padding: 0">
+              <div
+                class="tw"
+                role="group"
+                tabindex="0"
+                aria-label="Environment variables"
+                style="border: 0; border-radius: 0"
+              >
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Variable</th>
+                      <th scope="col">Default</th>
+                      <th scope="col">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><code>FB_SYSTEM_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> System User token (Business Manager).
+                        Recommended; wins over the other two.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_ACCESS_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Meta user access token, long-lived
+                        preferred.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PAGE_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Long-lived Page token — the
+                        no-Business-Manager fallback.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_APP_ID</code></td>
+                      <td>—</td>
+                      <td>
+                        Meta app ID. With <code>FB_APP_SECRET</code> it forms the app token
+                        used to inspect tokens.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_APP_SECRET</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> When set,
+                        <code>appsecret_proof</code> is attached so a stolen bare token is
+                        unusable.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PAGE_ID</code></td>
+                      <td>—</td>
+                      <td>
+                        Default Page ID for Page-scoped tools when a call omits
+                        <code>profile</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_API_VERSION</code></td>
+                      <td><code>v23.0</code></td>
+                      <td>
+                        Graph API version to pin. Off-default values are accepted, but only
+                        the default is tested.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_REQUEST_TIMEOUT_MS</code></td>
+                      <td><code>60000</code></td>
+                      <td>Per-request timeout in milliseconds (1–600000).</td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_HOST_CONCURRENCY</code></td>
+                      <td><code>4</code></td>
+                      <td>Max parallel requests per Graph host (1–64).</td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_MAX_RESULT_CHARS</code></td>
+                      <td><code>25000</code></td>
+                      <td>
+                        Character budget before a tool result is truncated
+                        (500–10&nbsp;000&nbsp;000).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_WRITE_MODE</code></td>
+                      <td><code>plan</code></td>
+                      <td>
+                        <code>plan</code> previews a write without mutating;
+                        <code>apply</code> executes. Never covers the irreversible or spend
+                        tiers.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_CONFIRM_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Out-of-band confirmation token authorizing
+                        gated write / spend actions, for clients that cannot prompt.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_MEDIA_DIR</code></td>
+                      <td>—</td>
+                      <td>
+                        Directory permitted as a source for local media uploads. Unset ⇒
+                        URL-only, local file access disabled.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_JOURNAL_PATH</code></td>
+                      <td>XDG / <code>%APPDATA%</code> state path</td>
+                      <td>
+                        Path to the append-only, rotating write journal
+                        (<code>0600</code>).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_TOOL_PACKAGES</code></td>
+                      <td><code>core</code> profile (all except <code>ads</code>)</td>
+                      <td>
+                        Comma-separated packages or profiles to enable.
+                        <code>core</code> is always forced on; <code>ads</code> is opt-in.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PACKAGES_DENY</code></td>
+                      <td>—</td>
+                      <td>
+                        Packages to exclude even if enabled by
+                        <code>FB_TOOL_PACKAGES</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PACKAGES_READONLY</code></td>
+                      <td>—</td>
+                      <td>
+                        Packages whose write tools are not registered; their read tools
+                        stay.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_TRANSPORT</code></td>
+                      <td><code>stdio</code></td>
+                      <td>
+                        <code>stdio</code> or <code>http</code> (loopback-only Streamable
+                        HTTP for local agent clients).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_HTTP_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Bearer token required by the
+                        <code>http</code> transport; it fails closed without it.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_HTTP_PORT</code></td>
+                      <td><code>3000</code></td>
+                      <td>
+                        TCP port for the <code>http</code> transport; the bind host is
+                        fixed to <code>127.0.0.1</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_AD_ACCOUNT_ID</code></td>
+                      <td>—</td>
+                      <td>Ad account ID for the opt-in <code>ads</code> package.</td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_ADS_BUDGET_CEILING</code></td>
+                      <td>—</td>
+                      <td>
+                        Hard budget ceiling for ads writes, in minor currency units.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_LOG_LEVEL</code></td>
+                      <td><code>info</code></td>
+                      <td>
+                        Stderr log verbosity: <code>debug</code>, <code>info</code>,
+                        <code>warn</code>, <code>error</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PROFILE_&lt;NAME&gt;_PAGE_ID</code></td>
+                      <td>—</td>
+                      <td>
+                        Page ID for a named profile, e.g.
+                        <code>FB_PROFILE_BRAND_A_PAGE_ID</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PROFILE_&lt;NAME&gt;_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Optional per-profile token override for
+                        the matching Page ID.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+
+          <p class="note">
+            A commented template ships as
+            <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/.env.example"
+              ><code>.env.example</code></a
+            >, and
+            <a
+              href="https://github.com/IvanBBaev/facebook-mcp/blob/main/docs/runbooks/onboarding.md"
+              >the onboarding runbook</a
+            >
+            walks through creating the app, minting the token and granting each permission.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ FAQ ============ -->
+      <section id="faq" aria-labelledby="h-faq">
+        <div class="wrap">
+          <span class="eyebrow">FAQ</span>
+          <h2 id="h-faq" style="margin-bottom: 28px">Questions worth asking first</h2>
+
+          <details id="faq-meta">
+            <summary>Is facebook-mcp affiliated with Meta?</summary>
+            <div class="details-body">
+              <p>
+                No. This is an independent, community-built project and is not affiliated
+                with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta and
+                related marks are trademarks of Meta Platforms, Inc., used here only
+                nominatively to indicate compatibility.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-credentials">
+            <summary>Which credentials does it need?</summary>
+            <div class="details-body">
+              <p>
+                A Meta developer app plus one access token: a never-expiring System User
+                token from Business Manager (recommended), a long-lived user token, or a
+                long-lived Page token. <code>FB_APP_SECRET</code> is optional — when set,
+                every call carries an <code>appsecret_proof</code> so a stolen bare token
+                is unusable. Because you administer your own Page, no Meta App Review is
+                required.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-safety">
+            <summary>Is it safe to let an AI assistant write to my Page?</summary>
+            <div class="details-body">
+              <p>
+                Writes are split into tiers. Reversible writes are governed by
+                <code>FB_WRITE_MODE</code>: the compiled-in default is <code>plan</code>,
+                which returns a preview and performs zero network mutations, and each
+                package may ship its own default — <code>posts</code>,
+                <code>messages</code> and <code>ads</code> default to <code>plan</code>,
+                <code>moderation</code> defaults to <code>apply</code> because hiding a
+                comment is one click to undo. An explicit <code>FB_WRITE_MODE</code> always
+                wins, in both directions.
+              </p>
+              <p>
+                Irreversible actions — delete a post, delete a comment, send a private
+                reply, change an ads object — ignore <code>FB_WRITE_MODE</code> entirely
+                and require a per-call <code>apply</code> flag, the
+                <code>plan_id</code> of a preview you just ran, and an out-of-band human
+                confirmation the model cannot supply itself. The recommended starting
+                posture is read-only.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-status">
+            <summary>What actually works today?</summary>
+            <div class="details-body">
+              <p>
+                All seven tool packages are implemented: 37 tools across
+                <code>core</code>, <code>reader</code>, <code>posts</code>,
+                <code>insights</code>, <code>moderation</code>, <code>messages</code> and
+                <code>ads</code>. Six are on by default; <code>ads</code> is opt-in via
+                <code>FB_TOOL_PACKAGES</code>.
+              </p>
+              <p>
+                The project is still pre-1.0 and not yet published to npm, and the
+                automated test suite runs entirely against fakes behind a network fence —
+                no behaviour has been verified against the live Graph API yet. A manual
+                smoke harness exists for exactly that, gated behind
+                <code>FB_SMOKE=1</code> and never run in CI.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-npm">
+            <summary>When will it be published to npm?</summary>
+            <div class="details-body">
+              <p>
+                Not yet. The tool surface is implemented but the package has not been
+                published. The repository already carries the release rail — an MCPB bundle
+                builder, a Claude plugin manifest, an MCP registry
+                <code>server.json</code> and an OIDC-based publish workflow — but there is
+                no tag, no npm package and no registry listing so far. Until then you run
+                it from source.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-clients">
+            <summary>Which MCP clients does it work with?</summary>
+            <div class="details-body">
+              <p>
+                Any client that speaks the Model Context Protocol over stdio — Claude
+                Desktop, Claude Code, VS Code and Cursor among them. Optional client
+                capabilities degrade honestly: without
+                <code>elicitation.form</code> support the server falls back to the
+                <code>FB_CONFIRM_TOKEN</code> route for high-consequence writes rather than
+                silently allowing them, and without progress support an upload simply
+                reports no progress. An optional loopback-only Streamable HTTP transport is
+                available for advanced setups.
+              </p>
+            </div>
+          </details>
+
+          <details id="faq-support">
+            <summary>How can I support the project?</summary>
+            <div class="details-body">
+              <p>
+                facebook-mcp is MIT-licensed and free, with no paid tier. It is maintained
+                by one person in their own time, so donations are welcome — see
+                <a href="#support">Support</a> below. Donating buys no priority support and
+                no SLA; starring the repository or filing a good bug report helps just as
+                much.
+              </p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ============ SUPPORT ============ -->
+      <section id="support" aria-labelledby="h-support">
+        <div class="wrap stack-lg">
+          <div>
+            <span class="eyebrow">Support</span>
+            <h2 id="h-support">Free, MIT, and built in spare time</h2>
+            <p class="sub">
+              There is no paid tier and no hosted version. If this saves you an afternoon,
+              a donation keeps the coffee flowing — but a star, a bug report or a fix
+              helps just as much.
+            </p>
+          </div>
+
+          <div class="fund">
+            <a href="https://github.com/sponsors/IvanBBaev">
+              <b>GitHub Sponsors →</b>
+              <span>One-off or monthly, through GitHub.</span>
+            </a>
+            <a href="https://ko-fi.com/ivanbbaev">
+              <b>Ko-fi →</b>
+              <span>Buy a coffee, no account needed.</span>
+            </a>
+            <a href="https://donatr.ee/ivanbbaev">
+              <b>Donatree →</b>
+              <span>Alternative donation link.</span>
+            </a>
+          </div>
+
+          <div class="grid2">
+            <div class="card">
+              <h3>Found a bug?</h3>
+              <p class="sub" style="font-size: 15px">
+                Open an issue with the output of
+                <code>node build/index.js --version</code> and the summary from
+                <code>doctor</code> — that pair answers most of the first round of
+                questions.
+              </p>
+              <p style="margin-top: 12px">
+                <a href="https://github.com/IvanBBaev/facebook-mcp/issues"
+                  >Open an issue →</a
+                >
+              </p>
+            </div>
+            <div class="card">
+              <h3>Found a security problem?</h3>
+              <p class="sub" style="font-size: 15px">
+                Please report it privately through GitHub's private vulnerability
+                reporting rather than in a public issue.
+              </p>
+              <p style="margin-top: 12px">
+                <a
+                  href="https://github.com/IvanBBaev/facebook-mcp/blob/main/SECURITY.md"
+                  >Security policy →</a
+                >
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap">
+        <div class="links">
+          <a href="https://github.com/IvanBBaev/facebook-mcp">GitHub</a>
+          <a href="https://github.com/IvanBBaev/facebook-mcp#readme">README</a>
+          <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/CHANGELOG.md"
+            >Changelog</a
+          >
+          <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/CONTRIBUTING.md"
+            >Contributing</a
+          >
+          <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/SECURITY.md"
+            >Security</a
+          >
+          <a href="https://github.com/IvanBBaev/facebook-mcp/tree/main/docs/runbooks"
+            >Runbooks</a
+          >
+          <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
+        </div>
+        <p>
+          © 2026 Ivan Baev · MIT licensed · Built with no dependencies on this page — one
+          file, no tracking, no external requests.
+        </p>
+        <p>
+          Not affiliated with, endorsed by or sponsored by Meta Platforms, Inc. Facebook,
+          Meta, Messenger and Instagram are trademarks of Meta Platforms, Inc., used here
+          only nominatively to indicate compatibility. You remain responsible for
+          complying with the Meta Platform Terms when you automate a Page you administer.
+        </p>
       </div>
-      <p class="disclaimer">
-        This is an independent, community-built project and is not affiliated
-        with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta
-        and related marks are trademarks of Meta Platforms, Inc., used here only
-        nominatively to indicate compatibility.
-      </p>
     </footer>
 
-    <button id="toTop" class="to-top" aria-label="Back to top" title="Back to top">&uarr;</button>
+    <button class="totop" id="totop" type="button" aria-label="Back to top">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+    </button>
 
-    <script src="assets/app.js" defer></script>
+    <script>
+      (function () {
+        'use strict';
+        var doc = document;
+        var reduced = matchMedia('(prefers-reduced-motion: reduce)');
+
+        /* ---------- theme toggle ---------- */
+        var btn = doc.getElementById('theme');
+        var dark = matchMedia('(prefers-color-scheme: dark)');
+        function current() {
+          return doc.documentElement.getAttribute('data-theme') ||
+            (dark.matches ? 'dark' : 'light');
+        }
+        function label() {
+          btn.setAttribute(
+            'aria-label',
+            current() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'
+          );
+        }
+        if (btn) {
+          label();
+          btn.addEventListener('click', function () {
+            var next = current() === 'dark' ? 'light' : 'dark';
+            doc.documentElement.setAttribute('data-theme', next);
+            try {
+              localStorage.setItem('fbmcp-theme', next);
+            } catch (e) {}
+            label();
+          });
+          dark.addEventListener('change', label);
+        }
+
+        /* ---------- tabs (roving tabindex) ---------- */
+        Array.prototype.forEach.call(
+          doc.querySelectorAll('[role="tablist"]'),
+          function (list) {
+            var tabs = Array.prototype.slice.call(
+              list.querySelectorAll('[role="tab"]')
+            );
+            function select(tab, focus) {
+              tabs.forEach(function (t) {
+                var on = t === tab;
+                t.setAttribute('aria-selected', on ? 'true' : 'false');
+                t.tabIndex = on ? 0 : -1;
+                var panel = doc.getElementById(t.getAttribute('aria-controls'));
+                if (panel) panel.hidden = !on;
+              });
+              if (focus) tab.focus();
+            }
+            tabs.forEach(function (tab, i) {
+              tab.addEventListener('click', function () {
+                select(tab, false);
+              });
+              tab.addEventListener('keydown', function (ev) {
+                var k = ev.key,
+                  n = -1;
+                if (k === 'ArrowRight') n = (i + 1) % tabs.length;
+                else if (k === 'ArrowLeft') n = (i - 1 + tabs.length) % tabs.length;
+                else if (k === 'Home') n = 0;
+                else if (k === 'End') n = tabs.length - 1;
+                if (n < 0) return;
+                ev.preventDefault();
+                select(tabs[n], true);
+              });
+            });
+          }
+        );
+
+        /* ---------- copy buttons (text comes from the DOM) ---------- */
+        Array.prototype.forEach.call(doc.querySelectorAll('.copy'), function (b) {
+          b.addEventListener('click', function () {
+            var src = doc.getElementById(b.getAttribute('data-copy'));
+            if (!src) return;
+            var text = src.innerText;
+            var done = function (ok) {
+              b.textContent = ok ? 'Copied' : 'Press ⌘C';
+              b.setAttribute('data-done', '1');
+              setTimeout(function () {
+                b.textContent = 'Copy';
+                b.removeAttribute('data-done');
+              }, 1600);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(
+                function () {
+                  done(true);
+                },
+                function () {
+                  done(false);
+                }
+              );
+            } else {
+              done(false);
+            }
+          });
+        });
+
+        /* ---------- scroll spy ---------- */
+        var links = Array.prototype.slice.call(doc.querySelectorAll('.nav a'));
+        var map = {};
+        links.forEach(function (a) {
+          map[a.getAttribute('href').slice(1)] = a;
+        });
+        var targets = Object.keys(map)
+          .map(function (id) {
+            return doc.getElementById(id);
+          })
+          .filter(Boolean);
+        if ('IntersectionObserver' in window && targets.length) {
+          var visible = {};
+          var io = new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                visible[e.target.id] = e.isIntersecting;
+              });
+              var active = null;
+              targets.forEach(function (t) {
+                if (visible[t.id] && !active) active = t.id;
+              });
+              links.forEach(function (a) {
+                if (active && a === map[active]) a.setAttribute('aria-current', 'true');
+                else a.removeAttribute('aria-current');
+              });
+            },
+            { rootMargin: '-70px 0px -65% 0px', threshold: 0 }
+          );
+          targets.forEach(function (t) {
+            io.observe(t);
+          });
+        }
+
+        /* ---------- terminal replay ---------- */
+        var term = doc.getElementById('term');
+        if (term && !reduced.matches && 'IntersectionObserver' in window) {
+          var playing = false;
+          var play = function () {
+            if (playing) return;
+            playing = true;
+            term.classList.remove('run');
+            void term.offsetWidth;
+            term.classList.add('run');
+            setTimeout(function () {
+              playing = false;
+            }, 5200);
+          };
+          new IntersectionObserver(
+            function (entries) {
+              entries.forEach(function (e) {
+                if (e.isIntersecting) play();
+              });
+            },
+            { threshold: 0.35 }
+          ).observe(term);
+        }
+
+        /* ---------- back to top ---------- */
+        var top = doc.getElementById('totop');
+        if (top) {
+          var tick = false;
+          addEventListener(
+            'scroll',
+            function () {
+              if (tick) return;
+              tick = true;
+              requestAnimationFrame(function () {
+                top.classList.toggle('show', scrollY > 700);
+                tick = false;
+              });
+            },
+            { passive: true }
+          );
+          top.addEventListener('click', function () {
+            scrollTo({ top: 0, behavior: reduced.matches ? 'auto' : 'smooth' });
+            var brand = doc.querySelector('.brand');
+            if (brand) brand.focus();
+          });
+        }
+      })();
+    </script>
   </body>
 </html>

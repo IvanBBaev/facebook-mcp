@@ -261,6 +261,42 @@ test('an empty profile page id is an aggregated error', () => {
   assert.ok(codes(report.errors).includes('empty-profile-page-id'));
 });
 
+test('the reserved "default" profile name is refused, not silently shadowed', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      FB_PROFILE_DEFAULT_PAGE_ID: '999',
+    },
+  });
+  // The registry mints key "default" for FB_PAGE_ID and an exact key match wins,
+  // so this profile could never be selected — writes meant for 999 would go to 1.
+  assert.equal(report.ok, false);
+  assert.ok(codes(report.errors).includes('reserved-profile-name'));
+  assert.deepEqual(settings.profiles, {});
+});
+
+test('two spellings of one profile name are refused, and neither survives', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      FB_PROFILE_Acme_PAGE_ID: '111',
+      FB_PROFILE_ACME_PAGE_ID: '222',
+      FB_PROFILE_OTHER_PAGE_ID: '333',
+    },
+  });
+  // Keys are case-insensitive: keeping either one would point `profile: "acme"`
+  // at a Page chosen by env enumeration order.
+  assert.equal(report.ok, false);
+  assert.ok(codes(report.errors).includes('duplicate-profile-name'));
+  assert.deepEqual(settings.profiles, { other: { pageId: '333' } });
+});
+
 test('missing default Page and no profiles warns (page-scoped tools need a profile)', () => {
   const { report } = loadSettings({
     ...POSIX,

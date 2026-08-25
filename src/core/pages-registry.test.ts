@@ -35,12 +35,16 @@ function makeSettings(overrides: Partial<Settings>): Settings {
   };
 }
 
-function deps(settings: Settings, fb: FakeFbRequest, extra?: { logger?: Logger }) {
+function deps(
+  settings: Settings,
+  fb: FakeFbRequest,
+  extra?: { logger?: Logger; redactor?: ReturnType<typeof createFakeRedactor> },
+) {
   return {
     settings,
     fbRequest: fb.fn,
     clock: createFakeClock(),
-    redactor: createFakeRedactor(),
+    redactor: extra?.redactor ?? createFakeRedactor(),
     logger: extra?.logger,
   };
 }
@@ -88,11 +92,17 @@ test('a per-profile token override is returned verbatim, never derived', async (
     profiles: { 'brand-a': { pageId: '200', tokenOverride: 'EAA-brand-a-token' } },
   });
 
-  const registry = createPagesRegistry(deps(settings, fb));
+  const redactor = createFakeRedactor();
+  const registry = createPagesRegistry(deps(settings, fb, { redactor }));
   const page = await registry.resolvePage('brand-a');
 
   assert.equal(page.token, 'EAA-brand-a-token');
   assert.equal(fb.calls.length, 0);
+  // The override bypasses the resolver, so it also bypasses the resolver's own
+  // `addSecret`. Nothing else on this path would ever register it, and the value
+  // is returned to a caller that will put it on the wire — so the registration
+  // has to happen here, and has to be asserted here.
+  assert.deepEqual(redactor.secrets, ['EAA-brand-a-token']);
 });
 
 // ---------------------------------------------------------------------------

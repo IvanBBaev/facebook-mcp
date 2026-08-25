@@ -62,9 +62,9 @@ limits the damage in the meantime.
 5. **Restart** the server so it re-reads config and re-validates on startup.
 
 **Verify by:** running the doctor / `facebook_whoami` — confirm the new token's
-`is_valid`, expected `scopes`, and `expires_at`, and that there is **no
-over-scope warning**. Then confirm the old token is dead: a `debug_token` on the
-old value should report it invalid.
+`valid`, expected `scopes`, and `expiresAt` (or `neverExpiring: true` for a
+System User token), and that there is **no over-scope warning**. Then confirm the
+old token is dead: a `debug_token` on the old value should report it invalid.
 
 ---
 

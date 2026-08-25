@@ -68,6 +68,15 @@ export interface AuthorizeInput {
   readonly apply?: boolean;
   /** The bound `plan_id`, if the caller supplied one. */
   readonly planId?: PlanId;
+  /**
+   * Forces plan-id binding on a call whose tier alone would not demand it —
+   * publishing to a live audience being the motivating case (doc 06): deleting the
+   * post afterwards is easy, so the tier stays `reversible`, but the impressions it
+   * collected in the meantime are not recallable, and one careless call should not
+   * be able to reach an audience. Does NOT raise the tier, so the out-of-band
+   * {@link Confirmer} stays reserved for `irreversible`/`spend`.
+   */
+  readonly requirePlanId?: boolean;
   /** The effective env / per-package default write mode (`FB_WRITE_MODE`). */
   readonly defaultWriteMode: WriteMode;
 }
@@ -85,26 +94,30 @@ function hasPlanId(planId: PlanId | undefined): planId is PlanId {
  *
  * `irreversible` / `spend` are gated to plan mode unless BOTH an explicit
  * `apply:true` AND a `plan_id` are present — the env default is ignored for them
- * entirely (Security #3). `safe` / `reversible` may be applied by an explicit
- * `apply:true` OR by the env/per-package default. Anything unauthorized degrades
- * safely to a dry-run preview (fail-safe: never mutate on ambiguity).
+ * entirely (Security #3). A call that sets {@link AuthorizeInput.requirePlanId}
+ * opts into that same two-step gate without raising its tier. Every other
+ * `safe` / `reversible` write may be applied by an explicit `apply:true` OR by the
+ * env/per-package default. Anything unauthorized degrades safely to a dry-run
+ * preview (fail-safe: never mutate on ambiguity).
  */
 export function authorize(input: AuthorizeInput): GateDecision {
   const explicit = input.apply === true;
+  const tierGated = HIGH_CONSEQUENCE_TIERS.has(input.tier);
 
-  if (HIGH_CONSEQUENCE_TIERS.has(input.tier)) {
+  if (tierGated || input.requirePlanId === true) {
+    const subject = tierGated ? `"${input.tier}" writes` : 'plan-bound calls';
     if (!explicit) {
       return {
         mode: 'plan',
         reason:
-          `"${input.tier}" writes require an explicit per-call apply:true; ` +
+          `${subject} require an explicit per-call apply:true; ` +
           'FB_WRITE_MODE=apply never covers them',
       };
     }
     if (!hasPlanId(input.planId)) {
       return {
         mode: 'plan',
-        reason: `"${input.tier}" writes must bind apply:true to a plan_id from a prior plan step`,
+        reason: `${subject} must bind apply:true to a plan_id from a prior plan step`,
       };
     }
     return { mode: 'apply' };
@@ -171,6 +184,22 @@ export interface WriteAction<T = unknown> {
   // --- gating inputs (from the tool's `apply` / `plan_id` args) ---
   readonly apply?: boolean;
   readonly planId?: PlanId;
+  /**
+   * Demand plan-id binding for this one call even though its tier would not.
+   * Set it per call, not per tool: `facebook_create_post` needs it when
+   * `published:true` and not when the post is a draft or scheduled. See
+   * {@link AuthorizeInput.requirePlanId} for why the tier stays as it is.
+   */
+  readonly requirePlanId?: boolean;
+  /**
+   * The operator token supplied with THIS call (the gated tools' `confirm_token`
+   * argument). Handed to the {@link Confirmer} as a separate argument, never
+   * folded into the `ConfirmationRequest` — that object is forwarded to the
+   * client by the elicitation path, and a secret must not travel with it. Also
+   * never journaled: {@link toJournalInput} takes only `params`/`metadata`, and
+   * this is neither.
+   */
+  readonly confirmToken?: string;
 
   // --- preview content (plan mode) ---
   readonly summary: string;
@@ -310,13 +339,29 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
     return { kind: 'preview', preview };
   }
 
-  function resolvePlanForApply(action: WriteAction, now: number): Plan | undefined {
+  /**
+   * Validate the bound plan and CLAIM it: the plan is removed from the store in
+   * the same synchronous turn that looked it up.
+   *
+   * Claiming here rather than after `perform()` is what makes the plan single-use
+   * under concurrency. Everything the apply path does next awaits — the
+   * divergence re-read, the out-of-band confirmation, the mutation itself — and
+   * an MCP client may have several `tools/call` requests in flight at once. With
+   * the claim at the end, two applies carrying the same `plan_id` would both find
+   * the plan present, both pass the gate and both perform: one authorization,
+   * two mutations (two posts, two messages, two budget changes). The loser of
+   * the race now gets `plan_not_found`, which is the fail-safe answer.
+   *
+   * A caller that bails out BEFORE `perform()` returns the claim — see
+   * {@link runApply}.
+   */
+  function claimPlanForApply(action: WriteAction, now: number): Plan | undefined {
     if (!hasPlanId(action.planId)) return undefined;
     const plan = plans.get(action.planId);
     if (!plan) {
       throw new WriteGateError(
         'plan_not_found',
-        'no such plan_id (expired or never created)',
+        'no such plan_id (expired, already applied, or never created)',
         action,
       );
     }
@@ -335,6 +380,19 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
         action,
       );
     }
+    // The Page is bound identity, not a parameter. `params` carries the payload
+    // only (message, link, budget…), and `profile` is a per-call argument the
+    // model chooses, so without this check a preview approved for one Page could
+    // be applied byte-identically to another: same tool, same tier, same params,
+    // different audience. That is precisely the cross-talk `plan_id` binding
+    // exists to prevent (C4).
+    if (plan.pageId !== action.pageId) {
+      throw new WriteGateError(
+        'plan_mismatch',
+        'plan_id was created for a different Page',
+        action,
+      );
+    }
     if (!deepEqual(plan.params, action.params)) {
       throw new WriteGateError(
         'plan_mismatch',
@@ -342,45 +400,65 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
         action,
       );
     }
+    plans.delete(plan.planId);
     return plan;
   }
 
   async function runApply(action: WriteAction): Promise<WriteOutcome> {
-    const plan = resolvePlanForApply(action, deps.clock.now());
+    const plan = claimPlanForApply(action, deps.clock.now());
 
-    // Divergence check: re-read the world and compare to the captured before-state.
-    if (plan?.beforeState !== undefined && action.readState) {
-      const current = await action.readState();
-      const diverged = computeDivergence(plan.beforeState, current);
-      if (diverged.length > 0) {
-        plans.delete(plan.planId); // spent — the agent must re-plan against fresh state
-        return { kind: 'result', result: { applied: false, diverged } };
+    // Pre-authorization section. The plan is already claimed, so anything that
+    // throws here must hand the claim back: a denied confirmation or a failed
+    // re-read is a condition the agent can retry against the SAME preview, and
+    // burning the plan would force a pointless re-plan. Divergence is the one
+    // exception — it returns rather than throws, and the plan stays spent
+    // because the world it was approved against no longer exists.
+    try {
+      // Divergence check: re-read the world and compare to the captured before-state.
+      if (plan?.beforeState !== undefined && action.readState) {
+        const current = await action.readState();
+        const diverged = computeDivergence(plan.beforeState, current);
+        if (diverged.length > 0) {
+          return { kind: 'result', result: { applied: false, diverged } };
+        }
       }
-    }
 
-    // Out-of-band confirmation gate for high-consequence tiers (B1 / F15 seam).
-    if (HIGH_CONSEQUENCE_TIERS.has(action.tier) && deps.confirmer) {
-      const response = await deps.confirmer.confirm({
-        tool: action.tool,
-        tier: action.tier,
-        ...(hasPlanId(action.planId) ? { planId: action.planId } : {}),
-        summary: action.summary,
-        reason: `${action.tier} write requires out-of-band confirmation`,
-      });
-      if (!response.confirmed) {
-        throw new WriteGateError(
-          'confirmation_denied',
-          `out-of-band confirmation denied (${response.method})`,
-          action,
+      // Out-of-band confirmation gate for high-consequence tiers (B1 / F15 seam).
+      if (HIGH_CONSEQUENCE_TIERS.has(action.tier) && deps.confirmer) {
+        const response = await deps.confirmer.confirm(
+          {
+            tool: action.tool,
+            tier: action.tier,
+            ...(hasPlanId(action.planId) ? { planId: action.planId } : {}),
+            summary: action.summary,
+            reason: `${action.tier} write requires out-of-band confirmation`,
+          },
+          action.confirmToken,
         );
+        if (!response.confirmed) {
+          // Carry the confirmer's note: without it a declined prompt, an unticked
+          // box, a missing `confirm_token` and a wrong one are one indistinguishable
+          // failure, and the model cannot tell which of them it can act on.
+          throw new WriteGateError(
+            'confirmation_denied',
+            `out-of-band confirmation denied (${response.method})` +
+              (response.note !== undefined ? `: ${response.note}` : ''),
+            action,
+          );
+        }
       }
+    } catch (err) {
+      if (plan) plans.set(plan.planId, plan);
+      throw err;
     }
 
-    // Authorized: perform the mutation with the journal written around it.
+    // Authorized: perform the mutation with the journal written around it. The
+    // plan is NOT returned past this line whatever happens — once `perform` has
+    // been entered the authorization is spent, including on an ambiguous
+    // outcome, where a retry could duplicate a mutation that already landed.
     try {
       const result = await action.perform();
       const journalStatus = await deps.journal.append(toJournalInput(action, 'applied'));
-      if (plan) plans.delete(plan.planId);
       return { kind: 'result', result: { applied: true, result, journalStatus } };
     } catch (err) {
       // Ambiguous outcome (socket written, response lost) is journaled as
@@ -392,7 +470,6 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
       await deps.journal.append(
         toJournalInput(action, outcome, err instanceof Error ? err.message : String(err)),
       );
-      if (plan) plans.delete(plan.planId);
       throw err;
     }
   }
@@ -402,6 +479,9 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
       tier: action.tier,
       ...(action.apply !== undefined ? { apply: action.apply } : {}),
       ...(hasPlanId(action.planId) ? { planId: action.planId } : {}),
+      ...(action.requirePlanId !== undefined
+        ? { requirePlanId: action.requirePlanId }
+        : {}),
       defaultWriteMode: deps.defaultWriteMode,
     });
     return decision.mode === 'plan' ? runPlan(action, decision) : runApply(action);

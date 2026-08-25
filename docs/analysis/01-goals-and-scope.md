@@ -42,7 +42,7 @@ the gaps.
 
 ## In scope
 
-- Facebook **Pages** (New Pages Experience) via Graph API v25.0.
+- Facebook **Pages** (New Pages Experience) via Graph API v23.0.
 - **Marketing API** for the operator's own ad account (development-tier limits) —
   **not in v1.0**; ships in the optional `ads` package at 1.1.0, off by default,
   rescoped to read + status/budget control (A12).

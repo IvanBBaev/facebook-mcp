@@ -27,6 +27,71 @@ jobs:
       - run: npm ci
       - run: npm run check
 
+  # Metadata drift gate (R01): the generated artifacts — server.json, the MCPB
+  # manifest, the Claude plugin files, .env.example and the README tables — are
+  # projections of one SSOT. Regenerating them here and diffing proves the
+  # committed copies were not hand-edited or left behind. `npm run check`
+  # already builds, and the generator reads the compiled package factories.
+  metadata:
+    name: metadata drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run metadata:check
+
+  # Supply-chain gate. A real gate: no `continue-on-error`, no `|| true`.
+  #
+  # The flags are chosen, not copied:
+  #   --omit=dev            audits only the tree that is actually installed on a
+  #                         user's machine. This package ships three runtime
+  #                         dependencies; a devDependency advisory is a
+  #                         maintainer chore for Dependabot, not a reason to fail
+  #                         a PR that never touched it.
+  #   --audit-level=high    exit non-zero on high and critical only. `moderate`
+  #                         over a transitive dev tree fires constantly for
+  #                         things that are unreachable from this code, and a
+  #                         gate that cries wolf is a gate people learn to skip.
+  #                         Over a three-package runtime tree a genuine high is
+  #                         rare and worth stopping the line for.
+  #
+  # This is a tripwire, not the primary control: the lockfile, Dependabot and
+  # CodeQL do the day-to-day work. It runs on its own job so a registry outage
+  # is legible as "audit failed", not as a mystery inside `check`.
+  audit:
+    name: audit (production deps)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+
+  # Coverage gate. Kept as its own job rather than folded into `check`, because
+  # instrumenting the suite roughly doubles its runtime and the three-Node matrix
+  # would pay that cost three times for an identical number. It runs at all so the
+  # gate cannot rot unnoticed: it previously filtered on `src/**/*.ts` while the
+  # runner executes `build/**/*.js`, reported 0%, and nothing was watching.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run coverage
+
   # Windows leg (win32 path/line-ending safety) on the .nvmrc Node.
   windows:
     name: check (Windows, Node 22)

@@ -244,7 +244,9 @@ function finish<T>(
  * Read a SINGLE edge page. `page.after` resumes from a prior page's
  * `nextCursor`; the returned `nextCursor` (present only when `paging.next`
  * exists) resumes the next one. `truncated` is `false` for a normal page and
- * `true` only when the cursor expired (partial: empty data + restart note).
+ * `true` when the walk cannot be continued although more rows exist — either the
+ * cursor expired (partial: empty data + restart note) or Graph advertised a next
+ * page without handing back an `after` to reach it (CC-PAGE-3).
  */
 export async function fetchPage<T>(
   fbRequest: FbRequestFn,
@@ -254,6 +256,15 @@ export async function fetchPage<T>(
   const limit = page.limit ?? DEFAULT_PAGE_LIMIT;
   try {
     const parsed = await requestPage<T>(fbRequest, edge, limit, page.after);
+    if (parsed.hasNext && parsed.after === undefined) {
+      // Graph promised a next page but gave no cursor to reach it. Reporting
+      // `truncated: false` with no `nextCursor` here would be indistinguishable
+      // from a terminal page, so the caller would stop and call the listing
+      // complete while rows remain. `fetchAll` already treats this exact wire
+      // shape as truncated (MISSING_CURSOR_NOTE); the two must not disagree
+      // about the same response.
+      return makePage(parsed.items, true, undefined, MISSING_CURSOR_NOTE);
+    }
     const nextCursor = parsed.hasNext ? parsed.after : undefined;
     return makePage(parsed.items, false, nextCursor, undefined);
   } catch (err) {

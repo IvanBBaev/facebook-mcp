@@ -77,10 +77,17 @@ export function createLogger(config: LoggerConfig): Logger {
     } catch {
       // A logger must never throw. Fall back to a minimal, always-serializable
       // record so an unserializable field cannot silence the log entirely.
+      //
+      // The message is re-redacted rather than taken raw from `msg`. An
+      // unserializable *field* (a cycle, a throwing `toJSON`) survives redaction
+      // untouched and only fails here, so emitting the original `msg` would route
+      // a message around the choke-point above — the one bypass in the whole
+      // logger. Caller fields are dropped wholesale: the value that cannot be
+      // re-serialized is exactly the one that broke the first attempt.
       line = JSON.stringify({
         time: clock.now(),
         level,
-        msg,
+        msg: redactor.redactString(msg),
         logError: 'record serialization failed',
       });
     }

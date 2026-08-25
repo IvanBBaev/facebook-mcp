@@ -22,6 +22,7 @@ import {
   graphErrorFromNonJson,
   matchErrorRow,
   NON_JSON_BODY_MAX,
+  PROXY_ENV_HINT,
   toGraphApiError,
   type GraphErrorEnvelope,
 } from './errors.js';
@@ -479,4 +480,32 @@ test('cursor expiry maps to a non-retryable cursor_expired action that restarts 
   assert.match(a.operatorText, /restart the listing/);
   // nextTool is optional.
   assert.equal(cursorExpiredAction().nextTool, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Corporate proxy / TLS interception (CC-NET-6)
+// ---------------------------------------------------------------------------
+
+test('CC-NET-6: connection-level faults name the proxy env vars an operator must check', () => {
+  for (const phase of ['dns', 'connect', 'timeout', 'response', 'send'] as const) {
+    const a = classifyNetworkError({ phase, isWrite: false });
+    assert.match(a.operatorText, /HTTPS_PROXY/, phase);
+    assert.match(a.operatorText, /HTTP_PROXY/, phase);
+    assert.match(a.operatorText, /ALL_PROXY/, phase);
+    assert.match(a.operatorText, /NO_PROXY/, phase);
+    assert.ok(a.operatorText.includes(PROXY_ENV_HINT), phase);
+  }
+});
+
+test('CC-NET-6: a non-JSON error body (the interception signature) carries the proxy hint', () => {
+  const html = graphErrorFromNonJson(403, '<html>Blocked by corporate proxy</html>');
+  assert.ok(html.action?.operatorText.includes(PROXY_ENV_HINT));
+
+  // The 5xx branch routes through the network-fault text, which carries it too.
+  const gateway = graphErrorFromNonJson(502, '<html>Bad Gateway</html>');
+  assert.ok(gateway.action?.operatorText.includes(PROXY_ENV_HINT));
+});
+
+test('CC-NET-6: the hint is honest that no custom CA is installed', () => {
+  assert.match(PROXY_ENV_HINT, /no custom CA/);
 });

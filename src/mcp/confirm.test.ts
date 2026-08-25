@@ -163,6 +163,144 @@ test('elicitation failure with no token -> denied, never a silent allow', async 
   assert.equal(res.method, 'denied');
 });
 
+// --- per-call operator token (D12) -----------------------------------------
+
+test('a matching per-call operator token confirms without consulting the resolver (D12)', async () => {
+  const resolver = spyResolver('resolver-token-PLACEHOLDER');
+  const gate = createConfirmer({
+    settings: { confirmToken: OPERATOR_TOKEN },
+    resolveOperatorToken: resolver.resolveOperatorToken,
+  });
+
+  const res = await gate.confirm(REQUEST, OPERATOR_TOKEN);
+
+  assert.equal(res.confirmed, true);
+  assert.equal(res.method, 'operator_token');
+  // The token that came WITH the call is the authorization for this write; the
+  // construction-time resolver is a fallback and must stay untouched.
+  assert.equal(resolver.calls, 0);
+});
+
+test('a wrong per-call token is denied and never falls back to the resolver (D12)', async () => {
+  const resolver = spyResolver(OPERATOR_TOKEN);
+  const gate = createConfirmer({
+    settings: { confirmToken: OPERATOR_TOKEN },
+    resolveOperatorToken: resolver.resolveOperatorToken,
+  });
+
+  const res = await gate.confirm(REQUEST, 'wrong-token-PLACEHOLDER');
+
+  assert.equal(res.confirmed, false);
+  assert.equal(res.method, 'denied');
+  assert.equal(res.note, 'the supplied confirm_token did not match');
+  // `??` short-circuits on ANY defined value, and that is the security property:
+  // a caller-supplied wrong token is a refusal, not an invitation to go looking
+  // for another credential that might say yes.
+  assert.equal(resolver.calls, 0);
+});
+
+test('with no per-call token the resolver is still the fallback route (D12)', async () => {
+  const resolver = spyResolver(OPERATOR_TOKEN);
+  const gate = createConfirmer({
+    settings: { confirmToken: OPERATOR_TOKEN },
+    resolveOperatorToken: resolver.resolveOperatorToken,
+  });
+
+  const res = await gate.confirm(REQUEST, undefined);
+
+  assert.equal(res.confirmed, true);
+  assert.equal(res.method, 'operator_token');
+  assert.equal(resolver.calls, 1);
+});
+
+test('elicitation failure + matching per-call token -> "operator_token", never "elicitation" (D12)', async () => {
+  const gate = createConfirmer({
+    elicit: () => Promise.reject(new Error('client closed the elicitation channel')),
+    settings: { confirmToken: OPERATOR_TOKEN },
+  });
+
+  const res = await gate.confirm(REQUEST, OPERATOR_TOKEN);
+
+  assert.equal(res.confirmed, true);
+  // The elicitation channel was advertised but never produced a decision, so the
+  // gate must report the channel it actually used.
+  assert.equal(res.method, 'operator_token');
+});
+
+test('elicitation failure + per-call token but no configured token -> denied (D12)', async () => {
+  const gate = createConfirmer({
+    elicit: () => Promise.reject(new Error('no client')),
+    settings: {},
+  });
+
+  const res = await gate.confirm(REQUEST, OPERATOR_TOKEN);
+
+  // Nothing to compare against: a caller-supplied token can never authorize
+  // itself, so the gate fails closed.
+  assert.equal(res.confirmed, false);
+  assert.equal(res.method, 'denied');
+  // The note names BOTH halves: the prompt was advertised and then failed (with
+  // the thrown reason), and the fallback route had nothing to compare against.
+  assert.equal(
+    res.note,
+    'elicitation failed (no client); no operator token is configured (set FB_CONFIRM_TOKEN)',
+  );
+});
+
+test('the operator token matches whole or not at all — no prefix, no case folding', async () => {
+  const gate = createConfirmer({ settings: { confirmToken: OPERATOR_TOKEN } });
+
+  // Every near-miss the digest comparison has to refuse. The existing wrong-token
+  // fixture is a different LENGTH, which a sloppy prefix or `startsWith` check
+  // would also reject — these are the shapes that would slip past one.
+  const nearMisses = [
+    OPERATOR_TOKEN.slice(0, -1), // a strict prefix
+    `${OPERATOR_TOKEN}x`, // the real token plus a suffix
+    OPERATOR_TOKEN.toUpperCase(), // same length, same letters, wrong bytes
+    `${OPERATOR_TOKEN.slice(0, -1)}X`, // same length, one byte off, at the end
+    ` ${OPERATOR_TOKEN}`, // untrimmed — the gate compares verbatim
+  ];
+  for (const supplied of nearMisses) {
+    const res = await gate.confirm(REQUEST, supplied);
+    assert.equal(res.confirmed, false, `must reject ${JSON.stringify(supplied)}`);
+    assert.equal(res.note, 'the supplied confirm_token did not match');
+  }
+
+  // …and the exact value still passes, so the above is not proving a dead gate.
+  assert.equal((await gate.confirm(REQUEST, OPERATOR_TOKEN)).confirmed, true);
+});
+
+test('a denial distinguishes a missing confirm_token from a wrong one (D12)', async () => {
+  const gate = createConfirmer({ settings: { confirmToken: OPERATOR_TOKEN } });
+
+  const missing = await gate.confirm(REQUEST);
+  assert.equal(missing.confirmed, false);
+  // Actionable: the operator token EXISTS, so the caller's fix is to pass it —
+  // a note reading "did not match" would send them to rotate a working token.
+  assert.equal(missing.note, 'no confirm_token was supplied with this call');
+
+  const wrong = await gate.confirm(REQUEST, 'wrong-token-PLACEHOLDER');
+  assert.equal(wrong.confirmed, false);
+  assert.equal(wrong.note, 'the supplied confirm_token did not match');
+});
+
+test('a failed elicitation is not reported as a client that never had it (D12)', async () => {
+  const gate = createConfirmer({
+    elicit: () => Promise.reject(new Error('request timed out\n  after 60s')),
+    settings: { confirmToken: OPERATOR_TOKEN },
+  });
+
+  const res = await gate.confirm(REQUEST);
+
+  assert.equal(res.confirmed, false);
+  assert.equal(res.method, 'denied');
+  // Whitespace is flattened so the note stays one line inside a tool error.
+  assert.equal(
+    res.note,
+    'elicitation failed (request timed out after 60s); no confirm_token was supplied with this call',
+  );
+});
+
 test('the gate has no write-mode input, so it cannot be bypassed by FB_WRITE_MODE', async () => {
   // The seam's only inputs are elicit + settings.confirmToken + a token
   // resolver. There is no writeMode/env knob on ConfirmerDeps, so a spend-tier

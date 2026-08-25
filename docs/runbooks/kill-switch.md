@@ -63,10 +63,8 @@ you still want insights/reads but no mutations.
    - setting `FB_TOOL_PACKAGES` to a reader-only set (e.g. `core,reader,insights`),
      or
    - applying the read-only preset / deny override
-     (`FB_PACKAGES_READONLY` / `FB_PACKAGES_DENY`).
-   > TBD: confirm the exact preset variable name at release — the corpus references
-   > both a `readonly` preset and `FB_PACKAGES_READONLY`/`FB_PACKAGES_DENY`. The
-   > mechanism (drop the write packages) is stable regardless of the final name.
+     (`FB_PACKAGES_READONLY` / `FB_PACKAGES_DENY`). Both are read at startup and
+     drop the write half of the selected packages.
 2. **Restart** the server so it re-reads the package selection.
 
 **Verify by:** the doctor / tools-manifest shows the write tools (`*_create_*`,
@@ -82,10 +80,8 @@ exactly the configured set.
 If you want to keep a broad `FB_TOOL_PACKAGES` but subtract the dangerous parts,
 use the deny override to remove specific write packages:
 
-1. Set the deny override (`FB_PACKAGES_DENY`) to the write packages you want gone
-   (e.g. `posts,moderation,messages,ads`).
-   > TBD: confirm the exact deny variable name at release (`FB_PACKAGES_DENY` per
-   > the architecture doc). Mechanism is stable: denied packages are not loaded.
+1. Set the deny override `FB_PACKAGES_DENY` to the write packages you want gone
+   (e.g. `posts,moderation,messages,ads`). Denied packages are not loaded.
 2. **Restart.**
 
 **Verify by:** same as Option 2 — the denied write tools are absent from the

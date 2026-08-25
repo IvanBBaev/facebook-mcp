@@ -5,7 +5,7 @@
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
 | R1 | **Metric/endpoint deprecation churn** — Meta removed 100+ insights metrics in 3 waves; more will follow (June-2026 wave just landed) | High | Medium | Pass metrics through instead of whitelisting; surface API errors; version pinned but configurable; changelog check ritual each version bump |
-| R2 | **API version expiry** (~2-year lifetime; v25.0 dies ~2028) | Certain | Low | `FB_API_VERSION` config; CI job hitting the changelog is overkill — a README upgrade note suffices |
+| R2 | **API version expiry** (~2-year lifetime; the pinned v23.0 ages out first) | Certain | Low | `FB_API_VERSION` config; CI job hitting the changelog is overkill — a README upgrade note suffices |
 | R3 | **Rate limiting / app restriction** — aggressive polling or bulk ops could throttle (80001) or flag the app | Medium | High | Proactive header parsing + backoff at 90%; documented polling intervals (≥30–60 s); Reels 30/24h budget enforced client-side |
 | R4 | **Token invalidation** — "never-expiring" tokens die on system-user deletion, app disowning, scope revocation, security events | Low | Medium | `debug_token` at startup + clear doctor diagnostics; documented re-issue procedure |
 | R5 | **Policy drift** (messaging tags hard-fail 2026-04; ASC/AAC merge Sept 2026) | High (ads), Medium (rest) | Medium | Ads package isolated; messaging limited to RESPONSE-type sends; re-verify list below |
@@ -58,7 +58,7 @@ user gate.
    **Resolved (Sec #7 / C4 / G-RUN-1 / CC-LIFE-1):** simplify — structured
    metadata only, routed through the value-based redactor, `0600` under the XDG
    state dir, non-blocking (a journal failure never blocks the write), with
-   ~5 MB size-based rotation (`journal.jsonl` → `journal.1.jsonl`, one
+   ~5 MB size-based rotation (`journal.ndjson` → `journal.1.ndjson`, one
    generation). No tokens or PII.
 6. **Reels/video from URL vs local file priority** — both designed; which ships
    in Phase 2 vs 3 may shift after integration testing.
@@ -113,10 +113,13 @@ phase tag. A phase gate is not passable while one of its items is unverified.
 
 **✎ tool-surface gaps folded in from [10-v1-release-definition.md](10-v1-release-definition.md) §2:**
 
-- **[Phase 2] Reels insights edge** (G-TOOL-2) — confirm metrics live on
-  `/{video-id}/video_insights`; then either add `facebook_reel_insights` or
-  route by ID type inside `facebook_post_insights` (decide on the verified
-  shape).
+- **[SHIPPED] Reels insights edge** (G-TOOL-2) — resolved as a **separate tool**:
+  `facebook_reel_insights` reads `/{video-id}/video_insights`. ID-sniffing inside
+  `facebook_post_insights` was rejected — the ID spaces are disjoint (bare video ID
+  vs `{page-id}_{post-id}` composite), so is the metric vocabulary, and a tool that
+  silently reads a different edge than its name promises is the failure mode this
+  server avoids everywhere else. The edge itself is still **unverified against real
+  Graph** (like every other tool — see U1/U4); fixtures only.
 - **[Phase 2] Reels lifecycle** (G-TOOL-3) — confirm whether `delete_post` can
   delete a Reel by video ID and where **scheduled** Reels appear
   (`/scheduled_posts` vs `/video_reels`); `delete_post` / `list_scheduled_posts`

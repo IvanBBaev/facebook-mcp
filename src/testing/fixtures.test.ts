@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   loadFixture,
   lintFixtureDir,
@@ -7,6 +11,7 @@ import {
   findSecrets,
   assertNoSecrets,
   FixtureSecretError,
+  FIXTURES_DIR,
   type SecretRule,
 } from './fixtures.js';
 
@@ -19,6 +24,52 @@ test('loadFixture reads and parses a committed fixture', async () => {
 test('lintFixtureDir finds no secrets in the committed fixtures', async () => {
   const findings = await lintFixtureDir();
   assert.deepEqual(findings, []);
+
+  // An empty result is only worth something if there was something to scan. A
+  // default directory pointed at the wrong place, or a walk that skipped every
+  // entry, produces this exact same `[]` — so pin that the fixtures are there.
+  const names = (await readdir(FIXTURES_DIR)).filter((n) => n.endsWith('.json'));
+  assert.ok(names.includes('graph-me.json'), `fixtures present: ${names.join(', ')}`);
+  assert.ok(
+    names.length >= 2,
+    `expected several committed fixtures, saw ${String(names.length)}`,
+  );
+});
+
+test('lintFixtureDir reads file CONTENT and reports which file leaked', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-fixture-lint-'));
+  try {
+    // The clean-fixtures test above cannot distinguish "scanned and clean" from
+    // "never opened a file". Point the same walk at a directory that IS dirty:
+    // only a lint that opens and parses each file can produce these findings.
+    await writeFile(
+      path.join(dir, 'dirty.json'),
+      JSON.stringify({ page: { access_token: 'EAABwzLixnjYBO1234567890abcdef' } }),
+    );
+    await writeFile(path.join(dir, 'clean.json'), JSON.stringify({ id: '123' }));
+    // Not JSON: skipped by extension, so a secret here is NOT a finding. Pinning
+    // that keeps the extension filter honest about what it does and does not cover.
+    await writeFile(path.join(dir, 'notes.txt'), 'access_token=EAABwzLixnjYBO1234');
+
+    const url = pathToFileURL(`${dir}${path.sep}`);
+    const findings = await lintFixtureDir(url);
+
+    assert.deepEqual(
+      [...new Set(findings.map((f) => f.file))],
+      ['dirty.json'],
+      'the finding names the offending file, and the clean one stays silent',
+    );
+    assert.ok(findings.some((f) => f.path === '$.page.access_token'));
+    assert.ok(!findings.some((f) => f.sample.includes('1234567890abcdef')));
+
+    await assert.rejects(assertFixturesClean(url), (err: unknown) => {
+      assert.ok(err instanceof FixtureSecretError);
+      assert.equal(err.findings.length, findings.length);
+      return true;
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('assertFixturesClean resolves for the committed fixtures', async () => {

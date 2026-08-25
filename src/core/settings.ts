@@ -10,6 +10,7 @@
 // substituted for invalid values) plus the report; a caller that wants
 // fail-closed calls {@link assertStartupOk}.
 
+import { DEFAULT_PROFILE_KEY } from './types.js';
 import type {
   HostAllowlist,
   LogLevel,
@@ -217,6 +218,11 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     ['plan', 'apply'],
     DEFAULT_WRITE_MODE,
   );
+  // A value that was *present* counts as explicit even when it was rejected as
+  // invalid: the operator did intend to govern write gating globally, and the
+  // fallback they land on is the safe one (`plan`). Letting a package default
+  // override it in that case would answer a typo by loosening the gate.
+  const writeModeExplicit = str('FB_WRITE_MODE') !== undefined;
   const mediaDir = str('FB_MEDIA_DIR');
 
   // --- Result shaping ---
@@ -282,6 +288,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     requestTimeoutMs,
     hostConcurrency,
     writeMode,
+    writeModeExplicit,
     mediaDir,
     maxResultChars,
     transport,
@@ -309,12 +316,27 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
   return { settings, report };
 }
 
-/** Parse every `FB_PROFILE_<NAME>_PAGE_ID` (+ optional `_TOKEN`) into profiles. */
+/**
+ * Parse every `FB_PROFILE_<NAME>_PAGE_ID` (+ optional `_TOKEN`) into profiles.
+ *
+ * Profile keys are case-INSENSITIVE (they are lowercased here), so two spellings
+ * of one name are the same profile — and silently keeping the last one would
+ * point a Page-scoped WRITE at whichever Page the environment happened to
+ * enumerate last. Both hazards are refused loudly instead:
+ *   * `FB_PROFILE_DEFAULT_PAGE_ID` collides with the reserved key the registry
+ *     mints for `FB_PAGE_ID` ({@link DEFAULT_PROFILE_KEY}), where an exact-key
+ *     match would resolve to the FB_PAGE_ID Page and this profile would never be
+ *     reachable;
+ *   * `FB_PROFILE_Acme_…` next to `FB_PROFILE_ACME_…` is one key, two Pages.
+ * A rejected profile is dropped, so a startup that reports errors never resolves
+ * an ambiguous key to a guess (CC-AUTH-6).
+ */
 function parseProfiles(
   env: NodeJS.ProcessEnv,
   err: Report,
 ): Record<string, PageProfileConfig> {
   const out: Record<string, PageProfileConfig> = {};
+  const claimedBy = new Map<string, string>();
   for (const key of Object.keys(env)) {
     const match = PROFILE_PAGE_RE.exec(key);
     if (match === null) continue;
@@ -328,13 +350,37 @@ function parseProfiles(
       );
       continue;
     }
+    const name = rawName.toLowerCase();
+    if (name === DEFAULT_PROFILE_KEY) {
+      err(
+        'reserved-profile-name',
+        `${key} uses the reserved profile name "${DEFAULT_PROFILE_KEY}", which always ` +
+          'refers to the FB_PAGE_ID Page. Rename the profile; a Page configured under ' +
+          'this name would never be selectable.',
+        key,
+      );
+      continue;
+    }
+    const claimed = claimedBy.get(name);
+    if (claimed !== undefined) {
+      err(
+        'duplicate-profile-name',
+        `${key} and ${claimed} both define the profile "${name}" (profile names are ` +
+          'case-insensitive). Both are ignored — rename one, so a page-scoped call ' +
+          'cannot silently act as the wrong Page.',
+        key,
+      );
+      delete out[name];
+      continue;
+    }
     const pageId = env[key]?.trim();
     if (pageId === undefined || pageId.length === 0) {
       err('empty-profile-page-id', `${key} is set but empty; provide a Page ID.`, key);
       continue;
     }
+    claimedBy.set(name, key);
     const tokenOverride = env[`FB_PROFILE_${rawName}_TOKEN`]?.trim();
-    out[rawName.toLowerCase()] = {
+    out[name] = {
       pageId,
       ...(tokenOverride !== undefined && tokenOverride.length > 0
         ? { tokenOverride }

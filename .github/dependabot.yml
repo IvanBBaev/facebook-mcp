@@ -15,3 +15,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # codeql-action/init and codeql-action/analyze are one product. Ungrouped,
+      # Dependabot opens a PR per entry point, so each PR moves only half the
+      # pair and CodeQL fails with "Loaded a configuration file for version X,
+      # but running version Y". This group must therefore cover every
+      # update-type, majors included — the pair may never split.
+      codeql-action:
+        patterns: ['github/codeql-action*']
+      minor-and-patch:
+        update-types: ['minor', 'patch']

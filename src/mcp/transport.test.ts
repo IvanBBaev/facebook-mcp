@@ -4,11 +4,15 @@
 //   * CC-CFG-1 / C12  — stdout purity: a spawned child booting the real stdio
 //     transport writes ONLY JSON-RPC frames to stdout; stray console.log/.info
 //     are redirected to stderr (see `transport.spawn-fixture.ts`).
+//   * CC-CFG-1 / C12  — a failed stdio connect restores the console guard.
 //   * CC-CFG-6        — HTTP transport refuses to start without FB_HTTP_TOKEN.
 //   * Security #4     — HTTP rejects a non-loopback bind host; enforces bearer
-//     token (401) and same-origin Origin (403), accepts a valid loopback origin.
+//     token (401) and same-origin Origin (403), accepts a valid loopback origin;
+//     rejects malformed, non-http and port-mismatched origins.
 //   * CC-MCP-5        — clean shutdown propagates the AbortSignal and resolves
-//     `closed` (stdio: on stdin EOF; HTTP: on close()).
+//     `closed` (stdio: on stdin EOF; HTTP: on close(); either: on an external
+//     abort signal), completes even when the transport's own close fails, and
+//     surfaces a bind failure instead of reporting a live listener.
 //
 // No outbound `fetch` is used (the network fence forbids it): the HTTP tests
 // drive the loopback server with the node:http client; the stdio tests use
@@ -17,13 +21,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { request as httpRequest } from 'node:http';
-import type { IncomingMessage } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import type { IncomingHttpHeaders, IncomingMessage } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { PassThrough } from 'node:stream';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 
 import {
@@ -32,9 +38,11 @@ import {
   DEFAULT_HOST_CONCURRENCY,
   DEFAULT_MAX_RESULT_CHARS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  HTTP_LOOPBACK_HOST,
 } from '../core/index.js';
 import type { LogFields, Logger, Settings } from '../core/index.js';
 import { startTransport } from './transport.js';
+import type { ConnectableServer } from './transport.js';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -86,6 +94,80 @@ function newServer(): McpServer {
     content: [{ type: 'text' as const, text: 'ok' }],
   }));
   return server;
+}
+
+interface FakeServerOptions {
+  /** Make `connect()` reject, as a server that refuses the transport would. */
+  readonly connectError?: Error;
+  /**
+   * Value thrown by the transport's `onclose` hook. The SDK's `Server` installs
+   * such a hook on connect (it unwinds pending requests), so a failure there is
+   * how `transport.close()` realistically rejects.
+   */
+  readonly closeError?: unknown;
+}
+
+/**
+ * Minimal {@link ConnectableServer} stand-in — the injection seam the transport
+ * is built around. Used where a real `McpServer` cannot produce the failure
+ * under test.
+ */
+function fakeServer(options: FakeServerOptions = {}): ConnectableServer {
+  return {
+    connect: (transport: Transport): Promise<void> => {
+      if (options.connectError !== undefined) {
+        return Promise.reject(options.connectError);
+      }
+      if (options.closeError !== undefined) {
+        transport.onclose = (): void => {
+          throw options.closeError;
+        };
+      }
+      return Promise.resolve();
+    },
+    close: (): Promise<void> => Promise.resolve(),
+  };
+}
+
+/**
+ * Typed alias for the stdout-bound console methods. Reading them through a
+ * record (rather than `console.log`) keeps the no-console lint rule — which
+ * guards the stdio protocol channel — meaningful in this file.
+ */
+type ConsoleWriter = (...args: unknown[]) => void;
+const consoleSink = console as unknown as Record<'log' | 'info' | 'debug', ConsoleWriter>;
+
+/** Hold a loopback port so the transport's bind attempt fails with EADDRINUSE. */
+async function withBusyPort(fn: (port: number) => Promise<void>): Promise<void> {
+  const blocker = createServer(() => {});
+  await new Promise<void>((resolve) => {
+    blocker.listen(0, HTTP_LOOPBACK_HOST, resolve);
+  });
+  try {
+    await fn((blocker.address() as AddressInfo).port);
+  } finally {
+    await new Promise<void>((resolve) => {
+      blocker.close(() => {
+        resolve();
+      });
+    });
+  }
+}
+
+/** True when a plain server can bind `port` again — i.e. the listener was released. */
+function portIsFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer(() => {});
+    probe.once('error', () => {
+      resolve(false);
+    });
+    probe.once('listening', () => {
+      probe.close(() => {
+        resolve(true);
+      });
+    });
+    probe.listen(port, HTTP_LOOPBACK_HOST);
+  });
 }
 
 interface JsonRpcMessage {
@@ -160,6 +242,7 @@ function nextMessageWithId(
 
 interface HttpResult {
   readonly status: number;
+  readonly headers: IncomingHttpHeaders;
   readonly body: string;
 }
 
@@ -188,6 +271,7 @@ function httpPost(
         res.on('end', () => {
           resolve({
             status: res.statusCode ?? 0,
+            headers: res.headers,
             body: Buffer.concat(chunks).toString('utf8'),
           });
         });
@@ -294,6 +378,242 @@ test('HTTP transport enforces bearer token + Origin and serves initialize (Secur
   await handle.close();
 });
 
+test('HTTP transport defaults to the loopback host, an ephemeral port and SSE replies', async () => {
+  const { logger } = captureLogger();
+  // No httpHost / httpPort / httpJsonResponse => every default is exercised.
+  const handle = await startTransport(
+    newServer(),
+    makeSettings({ transport: 'http', httpToken: 'test-token' }),
+    { logger },
+  );
+  try {
+    const address = handle.address;
+    assert(address, 'http handle must expose a bound address');
+    assert.equal(address.host, HTTP_LOOPBACK_HOST);
+    assert.ok(address.port > 0, 'port 0 must be resolved to the bound ephemeral port');
+
+    const res = await httpPost(address.port, JSON.stringify(initializeRequest(1)), {
+      authorization: 'Bearer test-token',
+      origin: `http://127.0.0.1:${String(address.port)}`,
+    });
+    assert.equal(res.status, 200);
+    // Default framing is SSE (it can also carry progress notifications).
+    assert.match(String(res.headers['content-type']), /text\/event-stream/);
+    const dataLine = res.body.split('\n').find((l) => l.startsWith('data: '));
+    assert(dataLine, `expected an SSE data frame, got: ${res.body}`);
+    const parsed = asMessage(parseJson(dataLine.slice('data: '.length)));
+    assert(parsed, 'expected a JSON-RPC message inside the SSE data frame');
+    assert.equal(parsed.id, 1);
+    assert(parsed.result, 'expected an initialize result');
+  } finally {
+    await handle.close();
+  }
+  await handle.closed;
+});
+
+test('HTTP transport rejects malformed, non-http and mismatched Origins (Security #4)', async () => {
+  const { logger, lines } = captureLogger();
+  const handle = await startTransport(
+    newServer(),
+    makeSettings({
+      transport: 'http',
+      httpToken: 'test-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    }),
+    { logger, httpJsonResponse: true },
+  );
+  try {
+    const address = handle.address;
+    assert(address, 'http handle must expose a bound address');
+    const port = String(address.port);
+    const initBody = JSON.stringify(initializeRequest(1));
+    const auth = { authorization: 'Bearer test-token' };
+
+    const rejectedOrigins = [
+      'not-a-valid-url', // unparsable Origin
+      `https://127.0.0.1:${port}`, // right host and port, wrong scheme
+      'http://localhost', // implicit port 80 != the bound port
+      'http://127.0.0.1:1', // explicit port mismatch
+    ];
+    for (const origin of rejectedOrigins) {
+      const res = await httpPost(address.port, initBody, { ...auth, origin });
+      assert.equal(res.status, 403, `expected origin "${origin}" to be rejected`);
+    }
+    assert.equal(
+      lines.filter((l) => l.msg.includes('disallowed Origin')).length,
+      rejectedOrigins.length,
+      'every rejected Origin must be reported on the logger',
+    );
+
+    // A loopback *hostname* on the bound port is what a browser actually sends.
+    const ok = await httpPost(address.port, initBody, {
+      ...auth,
+      origin: `http://localhost:${port}`,
+    });
+    assert.equal(ok.status, 200);
+  } finally {
+    await handle.close();
+  }
+});
+
+test('a request with no Origin is served, but only with the bearer token', async () => {
+  const { logger, lines } = captureLogger();
+  const handle = await startTransport(
+    newServer(),
+    makeSettings({
+      transport: 'http',
+      httpToken: 'test-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    }),
+    { logger, httpJsonResponse: true },
+  );
+  try {
+    const address = handle.address;
+    assert(address, 'http handle must expose a bound address');
+    const initBody = JSON.stringify(initializeRequest(1));
+
+    // No `Origin` at all is what curl and every non-browser MCP client sends;
+    // demanding the header would lock out exactly the intended callers, while
+    // the rebinding attack it defends against always carries one.
+    const ok = await httpPost(address.port, initBody, {
+      authorization: 'Bearer test-token',
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(
+      lines.filter((l) => l.msg.includes('disallowed Origin')).length,
+      0,
+      'an absent Origin is not a rejected Origin',
+    );
+
+    // Omitting the header is not a way around the credential.
+    const noAuth = await httpPost(address.port, initBody, {});
+    assert.equal(noAuth.status, 401);
+  } finally {
+    await handle.close();
+  }
+});
+
+test('HTTP transport rejects a missing or non-Bearer Authorization header (Security #4)', async () => {
+  const { logger } = captureLogger();
+  const handle = await startTransport(
+    newServer(),
+    makeSettings({
+      transport: 'http',
+      httpToken: 'test-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    }),
+    { logger, httpJsonResponse: true },
+  );
+  try {
+    const address = handle.address;
+    assert(address, 'http handle must expose a bound address');
+    const initBody = JSON.stringify(initializeRequest(1));
+
+    const noHeader = await httpPost(address.port, initBody, {});
+    assert.equal(noHeader.status, 401);
+    assert.equal(noHeader.headers['www-authenticate'], 'Bearer');
+
+    const wrongScheme = await httpPost(address.port, initBody, {
+      authorization: 'Basic dGVzdC10b2tlbg==',
+    });
+    assert.equal(wrongScheme.status, 401);
+
+    // Same length as the real token, different bytes: the constant-time
+    // comparison must still reject it.
+    const sameLength = await httpPost(address.port, initBody, {
+      authorization: 'Bearer TEST-TOKEN',
+    });
+    assert.equal(sameLength.status, 401);
+  } finally {
+    await handle.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HTTP: bind failure and close failure (CC-MCP-5)
+// ---------------------------------------------------------------------------
+
+test('HTTP transport surfaces a bind failure and reports no listener (CC-MCP-5)', async () => {
+  const { logger, lines } = captureLogger();
+  await withBusyPort(async (port) => {
+    await assert.rejects(
+      startTransport(
+        newServer(),
+        makeSettings({
+          transport: 'http',
+          httpToken: 'test-token',
+          httpHost: '127.0.0.1',
+          httpPort: port,
+        }),
+        { logger },
+      ),
+      /EADDRINUSE/,
+    );
+  });
+  assert.equal(
+    lines.some((l) => l.msg === 'http transport listening'),
+    false,
+    'a failed bind must never be reported as a live listener',
+  );
+});
+
+test('a cleanup failure after a bind failure does not mask the bind error (CC-MCP-5)', async () => {
+  const { logger, lines } = captureLogger();
+  await withBusyPort(async (port) => {
+    await assert.rejects(
+      startTransport(
+        fakeServer({ closeError: new Error('cleanup boom') }),
+        makeSettings({
+          transport: 'http',
+          httpToken: 'test-token',
+          httpHost: '127.0.0.1',
+          httpPort: port,
+        }),
+        { logger },
+      ),
+      /EADDRINUSE/,
+    );
+  });
+  const cleanup = lines.find((l) => l.level === 'debug');
+  assert(cleanup, 'the cleanup failure must be reported on the logger');
+  assert.match(cleanup.msg, /close after bind failure/);
+  assert.deepEqual(cleanup.fields, { error: 'cleanup boom' });
+});
+
+test('HTTP shutdown releases the listener even when the transport close fails (CC-MCP-5)', async () => {
+  const { logger, lines } = captureLogger();
+  // A non-Error rejection value also checks that the diagnostic stays readable.
+  const handle = await startTransport(
+    fakeServer({ closeError: 'close boom' }),
+    makeSettings({
+      transport: 'http',
+      httpToken: 'test-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    }),
+    { logger },
+  );
+  const address = handle.address;
+  assert(address, 'http handle must expose a bound address');
+
+  await handle.close();
+  await handle.closed;
+  assert.equal(handle.signal.aborted, true);
+  assert.equal(
+    await portIsFree(address.port),
+    true,
+    'the listener must be released despite the transport close failure',
+  );
+
+  const failure = lines.find((l) => l.level === 'error');
+  assert(failure, 'the close failure must be reported on the logger');
+  assert.match(failure.msg, /http transport close failed/);
+  assert.deepEqual(failure.fields, { error: 'close boom' });
+});
+
 // ---------------------------------------------------------------------------
 // stdio: in-process round-trip + EOF shutdown (CC-MCP-5)
 // ---------------------------------------------------------------------------
@@ -324,6 +644,159 @@ test('stdio transport round-trips a request and shuts down cleanly on stdin EOF 
   await handle.closed;
   assert.equal(handle.signal.aborted, true);
 });
+
+test('stdio shutdown completes and reports a failing transport close (CC-MCP-5)', async () => {
+  const { logger, lines } = captureLogger();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const handle = await startTransport(
+    fakeServer({ closeError: new Error('close boom') }),
+    makeSettings({ transport: 'stdio' }),
+    { logger, stdin, stdout },
+  );
+
+  // close() must resolve rather than propagate the transport's failure ...
+  await handle.close();
+  await handle.closed;
+  assert.equal(handle.signal.aborted, true);
+  // ... and the EOF hooks must still be unwired.
+  assert.equal(stdin.listenerCount('end'), 0);
+  assert.equal(stdin.listenerCount('close'), 0);
+
+  const failure = lines.find((l) => l.level === 'error');
+  assert(failure, 'the close failure must be reported on the logger');
+  assert.match(failure.msg, /stdio transport close failed/);
+  assert.deepEqual(failure.fields, { error: 'close boom' });
+});
+
+test('a failed stdio connect restores the console guard and unwires stdin (CC-CFG-1)', async () => {
+  const { logger } = captureLogger();
+  const stdin = new PassThrough();
+  const original = {
+    log: consoleSink.log,
+    info: consoleSink.info,
+    debug: consoleSink.debug,
+  };
+
+  // No injected stdout => the real stdout is the protocol channel, so the
+  // console guard is installed. A failed connect must not leave it behind.
+  await assert.rejects(
+    startTransport(
+      fakeServer({ connectError: new Error('connect refused') }),
+      makeSettings({ transport: 'stdio' }),
+      { logger, stdin },
+    ),
+    /connect refused/,
+  );
+
+  assert.equal(consoleSink.log, original.log);
+  assert.equal(consoleSink.info, original.info);
+  assert.equal(consoleSink.debug, original.debug);
+  assert.equal(stdin.listenerCount('end'), 0);
+  assert.equal(stdin.listenerCount('close'), 0);
+});
+
+// ---------------------------------------------------------------------------
+// External shutdown signal (I1 wires SIGINT/SIGTERM here) — CC-MCP-5
+// ---------------------------------------------------------------------------
+
+test('an external abort signal shuts the stdio transport down (CC-MCP-5)', async () => {
+  const { logger } = captureLogger();
+  const controller = new AbortController();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const handle = await startTransport(newServer(), makeSettings({ transport: 'stdio' }), {
+    logger,
+    signal: controller.signal,
+    stdin,
+    stdout,
+  });
+  assert.equal(handle.signal.aborted, false);
+
+  controller.abort();
+  await handle.closed;
+  assert.equal(handle.signal.aborted, true);
+  assert.equal(stdin.listenerCount('end'), 0);
+  assert.equal(stdin.listenerCount('close'), 0);
+});
+
+test('an external signal aborted before start yields an already shut-down handle', async () => {
+  const { logger } = captureLogger();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const handle = await startTransport(
+    fakeServer(),
+    makeSettings({ transport: 'stdio' }),
+    {
+      logger,
+      signal: AbortSignal.abort(),
+      stdin,
+      stdout,
+    },
+  );
+
+  await handle.closed;
+  assert.equal(handle.signal.aborted, true);
+  // Idempotent: the handle is already closed.
+  await handle.close();
+});
+
+// Both of the following are regressions for the same defect: the shutdown hook
+// used to be wired *before* startup finished, so an abort arriving during boot
+// ran the teardown against a transport that startup then brought up. A real
+// SIGTERM during boot is exactly when this happens.
+
+test('a signal aborted before start leaves no live stdio transport behind', async () => {
+  const { logger } = captureLogger();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+
+  // A real McpServer, because the leak is in what `connect()` does: it attaches
+  // the stdin `data` listener a fake never installs.
+  const handle = await startTransport(newServer(), makeSettings({ transport: 'stdio' }), {
+    logger,
+    signal: AbortSignal.abort(),
+    stdin,
+    stdout,
+  });
+  await handle.closed;
+
+  assert.equal(handle.signal.aborted, true);
+  // The whole point: a handle reporting `closed` must not still be reading
+  // stdin. It used to, and `close()` was memoized to the resolved promise, so
+  // nothing could stop it afterwards.
+  assert.equal(stdin.listenerCount('data'), 0, 'stdin must not still be read');
+  assert.equal(stdin.listenerCount('end'), 0);
+  assert.equal(stdin.listenerCount('close'), 0);
+});
+
+test(
+  'a signal aborted before start does not wedge the HTTP bind',
+  // A short timeout is the assertion: the regression was an unsettled promise,
+  // so a failure here means `startTransport` never returned at all.
+  { timeout: 10000 },
+  async () => {
+    const { logger } = captureLogger();
+    const settings = makeSettings({
+      transport: 'http',
+      httpToken: 'test-http-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    });
+
+    const handle = await startTransport(newServer(), settings, {
+      logger,
+      signal: AbortSignal.abort(),
+    });
+    await handle.closed;
+
+    assert.equal(handle.signal.aborted, true);
+    assert.equal(handle.kind, 'http');
+    const port = handle.address?.port;
+    assert.ok(port !== undefined && port > 0, 'the listener bound before shutting down');
+    assert.equal(await portIsFree(port), true, 'the listener must be released');
+  },
+);
 
 // ---------------------------------------------------------------------------
 // stdio: stdout purity under a real spawned process (CC-CFG-1 / C12)

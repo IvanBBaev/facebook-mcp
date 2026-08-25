@@ -7,9 +7,10 @@ only be confirmed against a live Page/portfolio are marked ✎ with their phase.
 
 ## Versioning
 
-- **Pin Graph API v25.0** (released 2026-02-18) as a config constant
-  (`FB_API_VERSION`, default `v25.0`). Versions live ~2 years; releases every 3–5
-  months. Marketing API shares the same version track and URLs.
+- **Pin Graph API v23.0** as a config constant (`FB_API_VERSION`, default
+  `v23.0` — the shipped value in `src/core/settings.ts`). Versions live ~2 years;
+  releases every 3–5 months. Marketing API shares the same version track and
+  URLs.
 - Base hosts: `graph.facebook.com` (everything), `graph-video.facebook.com`
   (video file upload), `rupload.facebook.com` (Reels binary upload). These three
   hosts define the SSRF allowlist.

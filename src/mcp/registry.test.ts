@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 
 import { defineTool } from './define.js';
-import { createRegistry, RegistryError } from './registry.js';
+import { createRegistry, effectiveWriteMode, RegistryError } from './registry.js';
 import type {
   PackageName,
   PackageSpec,
@@ -288,4 +288,143 @@ test('a duplicate tool name across resolved packages throws RegistryError', () =
       return true;
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Per-package write mode (task D9): `effectiveWriteMode` + `writeModeFor`
+// ---------------------------------------------------------------------------
+
+// Packages that exercise the three shapes of `PackageSpec.writeModeDefault`:
+// declared `plan`, declared `apply`, and absent. `pkg` is reused so the ONLY
+// difference from the fixtures above is the new field.
+function writeModePackages(): PackageSpec[] {
+  return [
+    pkg('core', [readTool('core_whoami')]),
+    // `reader` declares nothing ⇒ it follows `settings.writeMode` verbatim.
+    pkg('reader', [readTool('reader_get')]),
+    // `posts` is plan-first by declaration (README "Default write mode" column).
+    {
+      ...pkg('posts', [readTool('posts_get'), writeTool('posts_create')]),
+      writeModeDefault: 'plan',
+    },
+    // `moderation` declares `apply` to avoid confirmation stacking on hide/delete.
+    {
+      ...pkg('moderation', [readTool('mod_list'), writeTool('mod_hide')]),
+      writeModeDefault: 'apply',
+    },
+  ];
+}
+
+const WRITE_MODE_SELECTION = ['reader', 'posts', 'moderation'];
+
+test('effectiveWriteMode: an unset FB_WRITE_MODE lets the package default govern', () => {
+  // `globalExplicit` false means the operator said nothing, so `globalMode` is
+  // only the compiled-in fallback and the package's own declaration wins.
+  assert.equal(effectiveWriteMode('plan', 'apply'), 'apply');
+  assert.equal(effectiveWriteMode('plan', 'plan'), 'plan');
+  assert.equal(effectiveWriteMode('apply', 'plan'), 'plan');
+  assert.equal(effectiveWriteMode('apply', 'apply'), 'apply');
+  // No declaration ⇒ the compiled-in default passes through untouched.
+  assert.equal(effectiveWriteMode('plan', undefined), 'plan');
+  assert.equal(effectiveWriteMode('apply', undefined), 'apply');
+});
+
+test('effectiveWriteMode: an explicit FB_WRITE_MODE outranks every package default', () => {
+  // THE KILL-SWITCH CASE: an operator who typed `FB_WRITE_MODE=plan` has spoken
+  // about every package, so a package shipping `'apply'` cannot re-enable
+  // unattended writes. `packageDefault ?? globalMode` would fail right here.
+  assert.equal(effectiveWriteMode('plan', 'apply', true), 'plan');
+  assert.equal(effectiveWriteMode('plan', 'plan', true), 'plan');
+  assert.equal(effectiveWriteMode('plan', undefined, true), 'plan');
+  // Symmetrically, an explicit `apply` is a deliberate opt-in and is not undone
+  // by a plan-first package. It is bounded: the `irreversible` and `spend` tiers
+  // ignore the write mode entirely, so only `reversible` writes are reached.
+  assert.equal(effectiveWriteMode('apply', 'plan', true), 'apply');
+  assert.equal(effectiveWriteMode('apply', 'apply', true), 'apply');
+  assert.equal(effectiveWriteMode('apply', undefined, true), 'apply');
+});
+
+test('writeModeFor honours a package default while FB_WRITE_MODE is unset', () => {
+  const reg = createRegistry(
+    writeModePackages(),
+    makeSettings({ writeMode: 'plan', toolPackages: WRITE_MODE_SELECTION }),
+  );
+  // `moderation` ships `apply` so hide/unhide does not stack a plan preview on
+  // every comment (A6 / UX #6); the stamp is per package, not per write tier, so
+  // its read tool resolves the same way.
+  assert.equal(reg.writeModeFor('mod_hide'), 'apply');
+  assert.equal(reg.writeModeFor('mod_list'), 'apply');
+  // `posts` declares plan-first, and `reader` declares nothing ⇒ compiled default.
+  assert.equal(reg.writeModeFor('posts_create'), 'plan');
+  assert.equal(reg.writeModeFor('reader_get'), 'plan');
+});
+
+test('writeModeFor: an explicit FB_WRITE_MODE=plan is a kill switch over every package', () => {
+  const reg = createRegistry(
+    writeModePackages(),
+    makeSettings({
+      writeMode: 'plan',
+      writeModeExplicit: true,
+      toolPackages: WRITE_MODE_SELECTION,
+    }),
+  );
+  assert.equal(reg.writeModeFor('mod_hide'), 'plan');
+  assert.equal(reg.writeModeFor('mod_list'), 'plan');
+  assert.equal(reg.writeModeFor('posts_create'), 'plan');
+  assert.equal(reg.writeModeFor('reader_get'), 'plan');
+});
+
+test('writeModeFor: an explicit FB_WRITE_MODE=apply overrides a plan-first package', () => {
+  const reg = createRegistry(
+    writeModePackages(),
+    makeSettings({
+      writeMode: 'apply',
+      writeModeExplicit: true,
+      toolPackages: WRITE_MODE_SELECTION,
+    }),
+  );
+  assert.equal(reg.writeModeFor('posts_create'), 'apply');
+  assert.equal(reg.writeModeFor('reader_get'), 'apply');
+  assert.equal(reg.writeModeFor('mod_hide'), 'apply');
+});
+
+test('writeModeFor falls back to settings.writeMode for an unknown tool name', () => {
+  const planReg = createRegistry(
+    writeModePackages(),
+    makeSettings({ writeMode: 'plan', toolPackages: WRITE_MODE_SELECTION }),
+  );
+  assert.equal(planReg.has('does_not_exist'), false);
+  assert.equal(planReg.writeModeFor('does_not_exist'), 'plan');
+
+  const applyReg = createRegistry(
+    writeModePackages(),
+    makeSettings({ writeMode: 'apply', toolPackages: WRITE_MODE_SELECTION }),
+  );
+  // Falls back to the GLOBAL mode — never to a package default it cannot know.
+  assert.equal(applyReg.writeModeFor('does_not_exist'), 'apply');
+});
+
+test('get returns the stamped spec for a known name and undefined for an unknown one', () => {
+  const injected = writeModePackages();
+  const reg = createRegistry(
+    injected,
+    makeSettings({ writeMode: 'apply', toolPackages: WRITE_MODE_SELECTION }),
+  );
+
+  const spec = reg.get('mod_hide');
+  assert.ok(spec);
+  assert.equal(spec.name, 'mod_hide');
+  assert.equal(spec.package, 'moderation'); // stamped by the owning package
+  assert.equal(reg.has('mod_hide'), true);
+
+  // The stamp is applied to a COPY: the injected spec is left untouched.
+  const injectedSpec = injected
+    .flatMap((p) => p.tools)
+    .find((t) => t.name === 'mod_hide');
+  assert.ok(injectedSpec);
+  assert.notEqual(spec, injectedSpec);
+  assert.equal(injectedSpec.package, undefined);
+
+  assert.equal(reg.get('mod_unhide'), undefined);
+  assert.equal(reg.has('mod_unhide'), false);
 });

@@ -21,6 +21,7 @@
 // wins; a raw Page ID that maps to several profiles with conflicting tokens is
 // rejected with the candidate keys.
 
+import { DEFAULT_PROFILE_KEY } from './types.js';
 import type {
   Clock,
   FbRequestFn,
@@ -32,9 +33,6 @@ import type {
   Settings,
 } from './types.js';
 import { createPageTokenResolver, type PageTokenResolver } from './auth.js';
-
-/** Synthetic key for the default Page (`FB_PAGE_ID`) when referenced explicitly. */
-const DEFAULT_PROFILE_KEY = 'default';
 
 /** One resolvable Page: a profile or the default, plus how its token is obtained. */
 interface ProfileEntry {
