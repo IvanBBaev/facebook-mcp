@@ -15,7 +15,7 @@
   },
   "type": "module",
   "bin": {
-    "facebook-mcp": "./bin/facebook-mcp.mjs"
+    "facebook-mcp": "bin/facebook-mcp.mjs"
   },
   "main": "./build/index.js",
   "files": [

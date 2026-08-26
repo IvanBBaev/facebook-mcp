@@ -194,6 +194,19 @@ jobs:
                 'published version - it must be present on the FIRST publish.',
             );
           }
+          // npm >= 11 rejects a bin target written with a leading `./` during
+          // publish: it drops the entry, warns, and publishes a package with no
+          // command. `npm pack` accepts the same field without complaint, so
+          // nothing before this point catches it - and the symptom downstream is
+          // `npx <pkg>` failing for every user, long after the release looked green.
+          for (const [name, target] of Object.entries(pkg.bin ?? {})) {
+            if (typeof target === 'string' && target.startsWith('./')) {
+              problems.push(
+                `package.json bin["${name}"] is "${target}". npm would strip this entry at ` +
+                  `publish time and ship a package with no executable. Drop the leading "./".`,
+              );
+            }
+          }
 
           const server = read('server.json');
           if (server.name !== pkg.mcpName) {
@@ -345,6 +358,11 @@ jobs:
           set -euo pipefail
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             echo "::warning::Publishing with the NPM_TOKEN bootstrap credential, not OIDC. Configure the trusted publisher and delete this secret (docs/runbooks/release.md)."
+            # Which npm account the token belongs to. A token that is valid but
+            # owned by an account that does not own the package scope fails with a
+            # 404 on PUT - indistinguishable, from the error alone, from a token
+            # whose permissions are too narrow. The username is public data.
+            echo "npm identity for this token: $(npm whoami 2>&1 || echo '<whoami failed>')"
           else
             echo "No NPM_TOKEN set - publishing via Trusted Publishing (OIDC)."
           fi

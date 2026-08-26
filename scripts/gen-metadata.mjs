@@ -181,9 +181,14 @@ function generatePackageJson(currentText) {
   pkg.keywords = [...identity.keywords];
   pkg.trademark = identity.trademark;
 
-  // The binary name comes from the SSOT; its target path does not.
-  const binTarget = Object.values(pkg.bin ?? {})[0] ?? `./bin/${identity.shortName}.mjs`;
-  pkg.bin = { [identity.shortName]: binTarget };
+  // The binary name comes from the SSOT; its target path does not. The target is
+  // deliberately written WITHOUT a leading `./`: npm >= 11 rejects a relative-
+  // prefixed bin target during publish, silently drops the entry and ships a
+  // package with no command at all — a warning buried in the publish log is the
+  // only sign. `npm pack` does not validate this, so the local dry run is not a
+  // check for it.
+  const binTarget = Object.values(pkg.bin ?? {})[0] ?? `bin/${identity.shortName}.mjs`;
+  pkg.bin = { [identity.shortName]: binTarget.replace(/^\.\//, '') };
 
   return `${JSON.stringify(pkg, null, 2)}\n`;
 }
