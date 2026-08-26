@@ -69,10 +69,13 @@ outside GitHub Actions.
    > unpublished name, do that and skip the rest of this box — the rail then does
    > the first publish too, and no token is ever created.
    >
-   > If it does not, the name has to be reserved with a **single manual publish**
-   > of the real `1.0.0` tarball from your own machine. This is the only
-   > sanctioned deviation from "nothing is published from a laptop", and it is
-   > bounded by the steps below. Do them in one sitting, start to finish:
+   > If it does not, the name has to be reserved with a **single token-authed
+   > publish**. Prefer doing it **on the rail** — an `NPM_TOKEN` repository
+   > secret, which the `npm-publish` job reads as an explicit fallback — over
+   > publishing from a laptop: CI publishes the exact tagged commit after the
+   > full gate, and the credential never touches your shell history or `~/.npmrc`.
+   > Either way it is bounded by the steps below. Do them in one sitting, start
+   > to finish:
    >
    > 1. **Mint the narrowest possible token.** npmjs.com → *Access Tokens* →
    >    *Generate New Token* → **Granular Access Token** with:
@@ -80,14 +83,22 @@ outside GitHub Actions.
    >    | Setting              | Value                                                     |
    >    | -------------------- | --------------------------------------------------------- |
    >    | Expiration           | **7 days** (the shortest npm offers; you need minutes)     |
-   >    | Packages and scopes  | **Only select packages** → `@ivanbbaev/facebook-mcp` — never "all packages", never a whole scope |
+   >    | Packages and scopes  | **Only select packages** → `@ivanbbaev/facebook-mcp`. A name that has never been published cannot be selected — it does not exist yet — so for the bootstrap publish only, scope the token to `@ivanbbaev/*` (still narrower than "all packages"), then replace or delete it once the package page exists. |
    >    | Permissions          | **Read and write** (publish needs write; nothing else does) |
    >    | Organizations        | **No access**                                              |
    >    | IP allow-list        | your current address, if you can be bothered — cheap and it costs nothing to be wrong |
    >
    >    Do **not** create a Classic/automation token: those are account-wide.
    >
-   > 2. **Publish once**, from a clean checkout of the exact tagged commit:
+   > 2. **Publish once.** On the rail (preferred): add the token as
+   >    `Settings → Secrets and variables → Actions → NPM_TOKEN`, then push the
+   >    release tag as usual. The `npm-publish` job picks the secret up, logs a
+   >    warning saying it did, and publishes the gated commit. Provenance still
+   >    works — `id-token: write` is granted and `--provenance` stays on, so even
+   >    the bootstrap tarball is attested.
+   >
+   >    From a laptop (only if CI is unavailable), from a clean checkout of the
+   >    exact tagged commit:
    >
    >    ```bash
    >    npm whoami                       # confirm you are the right account
@@ -97,34 +108,34 @@ outside GitHub Actions.
    >
    >    `ALLOW_LOCAL_PUBLISH=1` is the deliberate override of the
    >    `prepublishOnly` guard; it exists so that this one publish is a conscious
-   >    act and every other laptop publish is an error message. This tarball
-   >    carries **no provenance** — provenance requires OIDC. That is expected for
-   >    the bootstrap and is fixed by the next real release off the rail.
+   >    act and every other laptop publish is an error message. A laptop tarball
+   >    carries **no provenance** — provenance requires OIDC — which is the second
+   >    reason to prefer the rail.
    >
    > 3. **Configure the trusted publisher immediately** (the table above), now
    >    that the package page exists.
    >
-   > 4. **Revoke the token — mandatory, same sitting.** npmjs.com → *Access
-   >    Tokens* → delete it, and `npm logout` on the machine you used. Then
-   >    confirm nothing is left behind:
+   > 4. **Revoke the token — mandatory, same sitting.** Delete the `NPM_TOKEN`
+   >    repository secret, delete the token itself at npmjs.com → *Access
+   >    Tokens*, and (if you published locally) `npm logout` on the machine you
+   >    used. Then confirm nothing is left behind:
    >
    >    ```bash
-   >    npm whoami                       # -> ENEEDAUTH
-   >    grep -r "_authToken" ~/.npmrc    # -> no match
+   >    gh api repos/IvanBBaev/facebook-mcp/actions/secrets   # -> total_count 0
+   >    npm whoami                                            # -> ENEEDAUTH
+   >    grep -r "_authToken" ~/.npmrc                         # -> no match
    >    ```
    >
-   >    The invariant in `release.yml`'s header ("no long-lived publish
-   >    credential") is only true once this step is done. Leaving the token alive
-   >    "in case the release fails" is exactly the failure mode the rail was built
-   >    to remove.
-   >
-   > Do **not** add an `NPM_TOKEN` repository secret to make the workflow do any
-   > of this — the workflow is deliberately incapable of token auth, and that
-   > property is worth more than the convenience.
+   >    The invariant in `release.yml`'s header ("no publish credential in steady
+   >    state") is only true once this step is done, and the next release will
+   >    keep using the secret in preference to OIDC for as long as it exists.
+   >    Leaving the token alive "in case the release fails" is exactly the failure
+   >    mode the rail was built to remove.
 
-5. **Confirm no publish secret exists.** `Settings → Secrets and variables →
-   Actions` should contain no `NPM_TOKEN` and no Meta credential of any kind.
-   The release rail needs neither.
+5. **Confirm no publish secret survived the bootstrap.**
+   `Settings → Secrets and variables → Actions` should contain no `NPM_TOKEN`
+   (outside the single bootstrap sitting above) and no Meta credential of any
+   kind. In steady state the release rail needs neither.
 
 6. **GitHub Release assets need no setup** — the `github-release` job uses the
    built-in `GITHUB_TOKEN`, which is the only job in the workflow granted
@@ -251,7 +262,7 @@ the push, and its `gate` job logs `Tag v1.0.0 matches package.json 1.0.0`.
 | Job              | Token it holds                | What it does                                                                                                                                                                          |
 | ---------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gate`           | `contents: read`              | Asserts the trigger is a tag push, `tag == package.json` version, the package is publishable (`private` unset, `mcpName` present), every metadata surface agrees, the CHANGELOG has the section; derives the npm dist-tag from the version — then runs the full `npm run check`, `npm run metadata:check` and `npm audit --omit=dev --audit-level=high`. |
-| `npm-publish`    | `+ id-token: write`           | Installs the pinned `NPM_VERSION` (and asserts ≥ 11.5.1, since Node 22 ships npm 10), `npm ci`, `npm run build`, then `npm publish --provenance --access public --tag <derived>`. No `NODE_AUTH_TOKEN` exists.     |
+| `npm-publish`    | `+ id-token: write`           | Installs the pinned `NPM_VERSION` (and asserts ≥ 11.5.1, since Node 22 ships npm 10), `npm ci`, `npm run build`, then `npm publish --provenance --access public --tag <derived>`. Authenticates over OIDC unless an `NPM_TOKEN` secret exists, which is the bootstrap fallback only and is warned about in the log.     |
 | `bundle`         | `+ id-token: write`, `attestations: write` | Builds, runs `scripts/pack-mcpb.mjs`, independently re-verifies the emitted SHA-256 with `sha256sum -c`, **attests the bundle's build provenance** (`actions/attest-build-provenance`), and uploads the bundle + checksum as a workflow artifact. |
 | `github-release` | `contents: write`, `attestations: read` | Downloads the artifact, re-verifies the checksum a second time, **re-verifies the provenance attestation with `gh attestation verify` before the asset can become public**, then creates (or updates) the Release for the tag and attaches `*.mcpb` and `*.mcpb.sha256`. |
 | `mcp-registry`   | `+ id-token: write`           | Downloads a **version-pinned** `mcp-publisher` and verifies it against a SHA-256 committed to *this* repo, waits until the new npm version is actually visible on the registry CDN, then `mcp-publisher login github-oidc && mcp-publisher publish`. |

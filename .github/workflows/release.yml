@@ -6,17 +6,21 @@ name: Release
 # repo and whose commit passes the full `npm run check`.
 #
 # Trust properties this workflow is designed to keep:
-#   * No long-lived publish credential exists *in this repository*. npm
-#     publishing uses Trusted Publishing (GitHub OIDC), the MCP Registry uses
-#     `mcp-publisher login github-oidc`. There is no NPM_TOKEN secret here to
-#     steal or to silently expire, and adding one is never the fix for a failed
-#     run.
-#     Bootstrap exception (once, off this rail): npm binds a trusted publisher to
-#     an *existing* package page, so the very first tarball for a never-published
-#     name has to be pushed by hand with a short-lived granular token from the
-#     maintainer's machine — see docs/runbooks/release.md, "One-time setup". That
-#     token is revoked in the same sitting and never reaches CI. Steady state
-#     after that first publish is the invariant above, with no exceptions.
+#   * Publishing is OIDC-first. npm publishing uses Trusted Publishing (GitHub
+#     OIDC), the MCP Registry uses `mcp-publisher login github-oidc`. Neither
+#     reads a stored credential, so in steady state there is no publish secret
+#     here to steal or to silently expire — and adding one back is never the fix
+#     for a failed run.
+#     Bootstrap exception (once): npm binds a trusted publisher to an *existing*
+#     package page, so the very first tarball for a never-published name cannot
+#     use OIDC. For that publish only, the `npm-publish` job reads an
+#     `NPM_TOKEN` secret — a short-lived granular token, single package,
+#     read+write, no org access. It is a fallback, not a mode: `setup-node`
+#     writes the token into `.npmrc` only if the secret is non-empty, so once the
+#     trusted publisher is configured and the secret is deleted, the identical
+#     job publishes over OIDC with no edit here. Delete the secret in the same
+#     sitting as the bootstrap publish — see docs/runbooks/release.md,
+#     "One-time setup".
 #   * No Meta credential is ever available here (see SECURITY.md); this workflow
 #     runs no Graph API traffic.
 #   * Least privilege: the workflow-level token is read-only, `id-token: write`
@@ -280,7 +284,8 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
   # ---------------------------------------------------------------------------
-  # 2. npm publish via Trusted Publishing (OIDC). No NODE_AUTH_TOKEN anywhere.
+  # 2. npm publish via Trusted Publishing (OIDC), with NODE_AUTH_TOKEN as the
+  #    bootstrap-only fallback for the first publish of a not-yet-existing name.
   # ---------------------------------------------------------------------------
   npm-publish:
     name: npm publish (trusted publishing)
@@ -323,13 +328,26 @@ jobs:
       # --tag is always explicit. `npm publish` defaults to `latest`, and the
       # release trigger accepts prerelease tags, so the default would silently
       # hand `latest` to a release candidate.
+      #
+      # NODE_AUTH_TOKEN is the bootstrap fallback described in the header. npm
+      # prefers it over OIDC when it is set, which is why the secret must be
+      # deleted once the trusted publisher exists — otherwise every later release
+      # keeps authenticating with a credential nobody is watching. An empty or
+      # absent secret is not an error: `setup-node`'s .npmrc line then resolves to
+      # nothing and npm falls through to Trusted Publishing.
       - name: Publish
         shell: bash
         env:
           PUBLISH: ${{ needs.gate.outputs.publish }}
           DIST_TAG: ${{ needs.gate.outputs.dist-tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::warning::Publishing with the NPM_TOKEN bootstrap credential, not OIDC. Configure the trusted publisher and delete this secret (docs/runbooks/release.md)."
+          else
+            echo "No NPM_TOKEN set - publishing via Trusted Publishing (OIDC)."
+          fi
           if [ -z "$DIST_TAG" ]; then
             echo "::error::gate produced no dist-tag; refusing to publish with npm's default."
             exit 1
