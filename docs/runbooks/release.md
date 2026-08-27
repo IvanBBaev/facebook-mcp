@@ -83,12 +83,18 @@ outside GitHub Actions.
    >    | Setting              | Value                                                     |
    >    | -------------------- | --------------------------------------------------------- |
    >    | Expiration           | **7 days** (the shortest npm offers; you need minutes)     |
-   >    | Packages and scopes  | **Only select packages** → `@ivanbbaev/facebook-mcp`. A name that has never been published cannot be selected — it does not exist yet — so for the bootstrap publish only, scope the token to `@ivanbbaev/*` (still narrower than "all packages"), then replace or delete it once the package page exists. |
+   >    | Packages and scopes  | **Only select packages** → `@ivanbaev/facebook-mcp`. A name that has never been published cannot be selected — it does not exist yet — so for the bootstrap publish only, scope the token to `@ivanbaev/*` (still narrower than "all packages"), then replace or delete it once the package page exists. |
    >    | Permissions          | **Read and write** (publish needs write; nothing else does) |
    >    | Organizations        | **No access**                                              |
    >    | IP allow-list        | your current address, if you can be bothered — cheap and it costs nothing to be wrong |
    >
    >    Do **not** create a Classic/automation token: those are account-wide.
+   >
+   >    The scope in the package name is the **npm account** `ivanbaev` — one `b`,
+   >    unlike the GitHub user `IvanBBaev`. A token belonging to an account that
+   >    does not own the scope fails with a 404, not a 403, and re-minting it with
+   >    wider permissions changes nothing. `npm whoami` under the token settles it
+   >    in one line; the publish step prints it.
    >
    > 2. **Publish once.** On the rail (preferred): add the token as
    >    `Settings → Secrets and variables → Actions → NPM_TOKEN`, then push the
@@ -303,7 +309,7 @@ Run these once the workflow is green.
 
 ```bash
 # 1. The version is live and carries provenance attestations.
-npm view @ivanbbaev/facebook-mcp --json dist.attestations
+npm view @ivanbaev/facebook-mcp --json dist.attestations
 #    -> an object with a "provenance" entry; `null`/absent means the tarball was
 #       published without provenance and must be re-released.
 
@@ -313,10 +319,10 @@ npm audit signatures
 # 3. Cold start from the registry, exactly as a new user gets it.
 #    `--version` and `doctor` both exit on their own; any OTHER argument starts
 #    the stdio server, which would hang this check.
-npx -y @ivanbbaev/facebook-mcp@1.0.0 --version
+npx -y @ivanbaev/facebook-mcp@1.0.0 --version
 #    -> `facebook-mcp 1.0.0 (node v22…, …)`. Cross-check against the registry:
-npm view @ivanbbaev/facebook-mcp version
-npx -y @ivanbbaev/facebook-mcp@1.0.0 doctor
+npm view @ivanbaev/facebook-mcp version
+npx -y @ivanbaev/facebook-mcp@1.0.0 doctor
 
 # 4. The bundle on the Release page matches the checksum next to it.
 curl -fLO https://github.com/IvanBBaev/facebook-mcp/releases/download/v1.0.0/facebook-mcp-1.0.0.mcpb
@@ -357,13 +363,13 @@ To withdraw a bad release:
 
 1. **Deprecate it** with a message that says what to do instead:
    ```bash
-   npm deprecate "@ivanbbaev/facebook-mcp@1.0.0" \
+   npm deprecate "@ivanbaev/facebook-mcp@1.0.0" \
      "Broken release - upgrade to 1.0.1. See https://github.com/IvanBBaev/facebook-mcp/releases/tag/v1.0.1"
    ```
    Installs still work but print the warning; `npm view` shows it as deprecated.
 2. **Move `latest` off it** if a good version already exists:
    ```bash
-   npm dist-tag add "@ivanbbaev/facebook-mcp@0.9.9" latest
+   npm dist-tag add "@ivanbaev/facebook-mcp@0.9.9" latest
    ```
 3. **Ship the fix as a new version** (`1.0.1`) through this same rail. Do not try
    to re-tag or force-push `v1.0.0`; the tag is the audit record of what was
@@ -396,6 +402,7 @@ To withdraw a bad release:
 | `npm version` refuses with _do not bump the version with npm version_               | Working as designed — `package.json#version` is generated.                                | Edit `identity.version` in `scripts/metadata.config.mjs`, then `npm run metadata`.                                                                          |
 | Local `npm publish` refuses with _publishing happens in release.yml_                | `prepublishOnly` backstop. Working as designed.                                           | Push a tag instead. The only sanctioned override is the first-ever name-reserving publish (`ALLOW_LOCAL_PUBLISH=1`, one-time setup step 4).                 |
 | `npm-publish`: `ENEEDAUTH` / _Unable to authenticate_                               | Trusted publisher not configured, or its binding does not match this workflow.            | Re-check org, repo, workflow filename `release.yml` and the empty environment field on npmjs.com. Re-run the job; nothing else has published yet.           |
+| `npm-publish`: `E404` / _Not found — PUT https://registry.npmjs.org/@scope%2fname_ | The credential cannot create this package. npm answers 404 rather than 403 so it does not leak which scopes exist, which makes "token too narrow" and "token belongs to an account that does not own the scope" look identical. | Read the `npm identity for this token:` line the publish step prints. If the username does not own the scope, no token will ever work — fix the scope in `identity.packageName` or create the org. Only if the account is right is re-scoping the token the fix. |
 | `npm-publish`: _provenance requires `id-token: write`_ or _repository is private_   | Permissions changed, or the repo is not public.                                           | Restore `id-token: write` on the job / make the repo public. Provenance cannot be added later — re-release as a new patch version.                          |
 | `npm-publish`: _You cannot publish over the previously published versions_          | The version already exists on npm (usually a partially-failed earlier run).                | The npm half already succeeded. Do **not** bump blindly — verify with `npm view <pkg>@<version>`, then re-run only the remaining jobs via `workflow_dispatch` on the tag. |
 | `bundle`: _no MCPB manifest found_                                                  | `manifest.json` is missing or not generated.                                              | `npm run metadata`, commit, re-tag.                                                                                                                    |

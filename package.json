@@ -1,5 +1,5 @@
 {
-  "name": "@ivanbbaev/facebook-mcp",
+  "name": "@ivanbaev/facebook-mcp",
   "version": "0.7.0",
   "mcpName": "io.github.IvanBBaev/facebook-mcp",
   "description": "Local-first TypeScript MCP server for the Meta Graph API that lets an MCP client publish, read and moderate Facebook Pages through your own Meta developer app, with least-privilege tokens, plan-and-apply write safety and no telemetry.",

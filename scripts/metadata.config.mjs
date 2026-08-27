@@ -50,8 +50,16 @@
 
 /** Identity + distribution metadata. */
 export const identity = Object.freeze({
-  /** npm package name (scoped fallback per doc 02 §Naming). */
-  packageName: '@ivanbbaev/facebook-mcp',
+  /**
+   * npm package name (scoped fallback per doc 02 §Naming).
+   *
+   * The scope is the npm account `ivanbaev` — ONE `b`, unlike the GitHub user
+   * `IvanBBaev`. Publishing under a scope the account does not own fails with a
+   * 404 on PUT, which npm returns instead of a 403 so it does not leak which
+   * scopes exist; the error is indistinguishable from a token with too narrow a
+   * permission set. Do not "correct" this to match the repository owner.
+   */
+  packageName: '@ivanbaev/facebook-mcp',
   /** Official MCP registry identity; must ship in the first npm publish. */
   mcpName: 'io.github.IvanBBaev/facebook-mcp',
   /** Bare name used by the plugin manifests, the MCPB bundle and the binary. */

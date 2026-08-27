@@ -113,6 +113,13 @@ signposting):
      directories and the official registry, exactly where a trademark sweep would
      look. Carry a nominative-use `trademark` disclaimer in package.json and
      "unofficial / community" wording in the README. Flag, not legal advice.
+  - **Outcome (2026-08-27, at the 0.7.0 publish):** the fallback was taken, with
+    one correction — the scope is `@ivanbaev`, the npm account, which has ONE `b`
+    unlike the GitHub user `IvanBBaev`. The shipped name is
+    **`@ivanbaev/facebook-mcp`**; the `@ivanbbaev/…` spelling above is the
+    original proposal, kept as written. Publishing under an unowned scope returns
+    a 404 on PUT that looks exactly like a permissions failure, which cost a
+    release cycle to diagnose — see docs/runbooks/release.md.
   - Registry identity is decoupled from the npm name:
     `mcpName: "io.github.IvanBBaev/<name>"` for the official registry via
     `mcp-publisher`. The registry verifies ownership against the published

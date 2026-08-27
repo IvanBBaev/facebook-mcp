@@ -52,7 +52,7 @@ does and does not mean.
 | **Messaging**          | Conversation reads and replies within the 24-hour window                        | ✅ Implemented, not live-verified |
 | **Ads**                | Campaign/adset/ad reads, insights, status & budget control — **off by default** | ✅ Implemented, not live-verified |
 | **Live verification**  | Every tool exercised against a real Page and a real ad account                  | ❌ Not done — see the status note |
-| **npm / MCPB release** | `npx @ivanbbaev/facebook-mcp`, signed bundle, registry listing                  | ❌ Not published                  |
+| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, signed bundle, registry listing                   | ❌ Not published                  |
 
 The default profile exposes a deliberately small, curated tool surface — each
 tool wraps one real capability rather than mirroring every Graph edge.
@@ -118,7 +118,7 @@ client at that command with an absolute path:
   "mcpServers": {
     "facebook": {
       "command": "npx",
-      "args": ["-y", "@ivanbbaev/facebook-mcp"]
+      "args": ["-y", "@ivanbaev/facebook-mcp"]
     }
   }
 }

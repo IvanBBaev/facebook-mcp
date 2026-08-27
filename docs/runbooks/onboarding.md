@@ -85,7 +85,7 @@ argument is visible to every process on the machine (`ps`) and lands in your
 shell history; the tool warns when you do it anyway.
 
 ```sh
-FB_SETUP_TOKEN='<paste>' npx @ivanbbaev/facebook-mcp setup-token
+FB_SETUP_TOKEN='<paste>' npx @ivanbaev/facebook-mcp setup-token
 ```
 
 From a source checkout:
@@ -125,7 +125,7 @@ what to do about it.
 ## Step 5 — Confirm with `doctor`
 
 ```sh
-npx @ivanbbaev/facebook-mcp doctor
+npx @ivanbaev/facebook-mcp doctor
 ```
 
 The doctor never throws for an auth or scope problem — it *reports*. Read the

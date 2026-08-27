@@ -14,7 +14,7 @@
   "mcpServers": {
     "facebook": {
       "command": "npx",
-      "args": ["-y", "@ivanbbaev/facebook-mcp"]
+      "args": ["-y", "@ivanbaev/facebook-mcp"]
     }
   }
 }
