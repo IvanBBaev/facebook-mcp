@@ -37,11 +37,27 @@ name: Release
 #
 # `workflow_dispatch` runs the identical pipeline as a rehearsal: the gate and
 # the bundle build are real, every publishing step becomes a dry run.
+#
+# The one exception is `mode: resume`, dispatched on an already-released tag. npm
+# publishing is one-shot — a version cannot be published twice — so when the npm
+# half succeeds and something after it does not, a plain re-run is not available
+# and re-tagging would fail on the npm step before ever reaching the rest. That
+# mode leaves npm exactly as it is and runs the two jobs downstream of it, the
+# GitHub Release and the MCP Registry, for real against the tarball that is
+# already public. Both are idempotent (`gh release ... --clobber`, and the
+# registry accepts a re-publish of the same version), so resuming a release that
+# only partly failed is safe.
 
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'rehearsal (default, publishes nothing) or resume (re-runs the GitHub Release and MCP Registry steps for an already-published tag)'
+        type: choice
+        default: rehearsal
+        options: [rehearsal, resume]
 
 permissions:
   contents: read
@@ -89,6 +105,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       publish: ${{ steps.resolve.outputs.publish }}
+      finalize: ${{ steps.resolve.outputs.finalize }}
       dist-tag: ${{ steps.resolve.outputs.dist-tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
@@ -108,6 +125,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           pkg_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")"
@@ -118,8 +136,21 @@ jobs:
               exit 1
             fi
             publish=true
+            finalize=true
+          elif [ "$MODE" = "resume" ]; then
+            # Recovery for a release whose npm half is already done. It must be
+            # dispatched on the tag: the registry publishes `server.json` from the
+            # checkout, and the version it names has to be the one already on npm.
+            if [ "$REF_TYPE" != "tag" ]; then
+              echo "::error::resume must be dispatched on the release tag (got ref_type=$REF_TYPE)."
+              exit 1
+            fi
+            publish=false
+            finalize=true
+            echo "::notice::workflow_dispatch resume - npm is left exactly as it is; the GitHub Release and MCP Registry jobs run for real."
           else
             publish=false
+            finalize=false
             echo "::notice::workflow_dispatch - rehearsal only, nothing will be published."
           fi
 
@@ -167,6 +198,7 @@ jobs:
           {
             echo "version=$pkg_version"
             echo "publish=$publish"
+            echo "finalize=$finalize"
             echo "dist-tag=$dist_tag"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
@@ -455,7 +487,7 @@ jobs:
   github-release:
     name: github release
     needs: [gate, npm-publish, bundle]
-    if: needs.gate.outputs.publish == 'true'
+    if: needs.gate.outputs.finalize == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the Release and upload its assets
@@ -517,7 +549,7 @@ jobs:
   mcp-registry:
     name: mcp registry
     needs: [gate, npm-publish]
-    if: needs.gate.outputs.publish == 'true'
+    if: needs.gate.outputs.finalize == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -564,6 +596,15 @@ jobs:
           chmod +x mcp-publisher
 
       # npm's CDN needs a moment before the registry can read the new tarball.
+      #
+      # "A moment" is generous for a scope whose first package this is: the 0.7.0
+      # publish returned success at 18:30:16Z and the packument only answered 200
+      # at 18:35:33Z — five minutes, where a version added to an existing package
+      # is usually visible in seconds. The window is 10 minutes because the cost
+      # of it being too short is asymmetric: npm is already published and cannot
+      # be published again, so a premature give-up costs a manual recovery run
+      # (`workflow_dispatch` with mode `resume`), while waiting longer on a
+      # release that was going to succeed anyway costs only runner minutes.
       - name: Wait for the npm tarball to be visible
         shell: bash
         env:
@@ -571,7 +612,7 @@ jobs:
         run: |
           set -euo pipefail
           name="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).name")"
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          for attempt in $(seq 1 30); do
             if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${name}@${VERSION} is visible on npm."
               exit 0
@@ -594,5 +635,5 @@ jobs:
             echo "Publish attempt ${attempt} failed; retrying in 30s."
             sleep 30
           done
-          echo "::error::mcp-publisher failed three times. Re-run this workflow via workflow_dispatch on the tag once the cause is fixed."
+          echo "::error::mcp-publisher failed three times. npm is already published, so once the cause is fixed re-run this workflow via workflow_dispatch on the tag with mode 'resume' - not by re-tagging."
           exit 1

@@ -6,6 +6,22 @@ and its [milestones](https://github.com/IvanBBaev/facebook-mcp/milestones); the 
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release rail: a recovery path for a release whose npm half already
+  succeeded.** `npm publish` is one-shot, so when a later job failed there was no
+  way to finish the release: a plain re-run of the failed jobs is refused by
+  GitHub once the run is that old, and re-tagging dies on the npm step before it
+  reaches anything else. `workflow_dispatch` now takes a `mode` input — `resume`
+  runs `github-release` and `mcp-registry` for real against the tarball that is
+  already public, and leaves npm alone. The default stays `rehearsal`, which
+  publishes nothing.
+- **Release rail: the wait for npm CDN propagation was too short.** A scope's
+  first package is far slower to appear than a new version of an existing one —
+  0.7.0 took 5m17s against a 200-second window — so `mcp-registry` failed on a
+  release that had otherwise succeeded. The window is now 10 minutes; erring long
+  costs runner minutes, erring short costs a manual recovery run.
+
 ## [0.7.0] - 2026-08-25
 
 First public release. **Pre-1.0 on purpose, and the version number is the
