@@ -683,13 +683,32 @@ test('a credential file on win32 is reported as unenforceable, not as safe', asy
   assert.match(renderDoctorReport(report), /protection:\s+WARNING:/);
 });
 
-test('an unreadable credential path is reported instead of crashing the doctor', async () => {
+test('an unreadable credential path is reported instead of crashing the doctor', async (t) => {
+  if (process.platform === 'win32') {
+    // Statting THROUGH a regular file is ENOTDIR on POSIX but collapses to plain
+    // ENOENT on win32, which is the "no credential file" branch, not this one.
+    // The platform-independent shape below covers the same branch there.
+    t.skip('win32 reports ENOENT for this path shape');
+    return;
+  }
   const dir = await mkdtemp(join(tmpdir(), 'facebook-mcp-doctor-enotdir-'));
   const notADir = join(dir, 'env');
   await writeFile(notADir, 'FB_ACCESS_TOKEN=USER-TOKEN-PLACEHOLDER\n');
 
-  // Statting THROUGH a regular file yields ENOTDIR, not ENOENT.
   const { fb, deps } = makeDeps({ credentialFilePath: join(notADir, 'nested') });
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: [], expires_at: 0 });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.credentialFile.exists, false);
+  assert.match(report.credentialFile.note, /Could not read file protection/);
+});
+
+test('a credential path Node refuses outright is reported, not thrown', async () => {
+  // A NUL byte makes `stat` fail before any syscall, on every platform, with a
+  // code that is not ENOENT — the same branch as ENOTDIR, reachable everywhere.
+  // Built from a code point so this source file stays plain ASCII.
+  const nul = String.fromCharCode(0);
+  const { fb, deps } = makeDeps({ credentialFilePath: `${tmpdir()}${nul}env` });
   withDebugToken(fb, { type: 'USER', is_valid: true, scopes: [], expires_at: 0 });
 
   const report = await runDoctor(deps);

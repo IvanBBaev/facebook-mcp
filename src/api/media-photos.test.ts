@@ -54,6 +54,7 @@ import {
   cleanupUnpublishedPhotos,
   describeOrphans,
   detectPhotoContentType,
+  multipartFilename,
   preparePhotoSources,
   readLocalPhoto,
   resolveLocalMediaPath,
@@ -516,6 +517,10 @@ test('CC-MEDIA-5: zero-byte, non-regular and oversized files fail fast locally',
 });
 
 test('CC-MEDIA-5: an unreadable file is refused', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('chmod 0o000 does not restrict reads on win32 — protection is the NTFS ACL');
+    return;
+  }
   if (process.getuid?.() === 0) {
     t.skip('running as root — permission bits do not restrict reads');
     return;
@@ -533,25 +538,39 @@ test('CC-MEDIA-5: an unreadable file is refused', async (t) => {
   );
 });
 
-test('CC-MEDIA-5: a hostile filename is sanitized before it becomes a multipart name', async (t) => {
-  const fx = await mediaFixture(t);
-  // A quote (Content-Disposition injection), a control character, and U+FFFD --
-  // what a non-UTF-8 filename decodes to. Each must collapse to a single `_`.
-  // Built from code points so this source file stays plain ASCII.
-  const bel = String.fromCharCode(0x07);
-  const replacementChar = String.fromCharCode(0xfffd);
-  const hostile = `we"ird${bel}na${replacementChar}me.png`;
-  await writeFile(join(fx.mediaDir, hostile), pngBytes());
+// A quote (Content-Disposition injection), a control character, and U+FFFD --
+// what a non-UTF-8 filename decodes to. Each must collapse to a single `_`.
+// Built from code points so this source file stays plain ASCII.
+const BEL = String.fromCharCode(0x07);
+const REPLACEMENT_CHAR = String.fromCharCode(0xfffd);
+const HOSTILE_FILENAME = `we"ird${BEL}na${REPLACEMENT_CHAR}me.png`;
 
-  const resolved = await resolveLocalMediaPath(hostile, { mediaDir: fx.mediaDir });
-  assert.equal(resolved.filename, 'we_ird_na_me.png');
-  for (const unsafe of ['"', '\\', bel, replacementChar]) {
-    assert.equal(
-      resolved.filename.includes(unsafe),
-      false,
-      `"${unsafe}" survived sanitization`,
-    );
+/** Every character the multipart name must never carry. */
+function assertSanitized(filename: string): void {
+  assert.equal(filename, 'we_ird_na_me.png');
+  for (const unsafe of ['"', '\\', BEL, REPLACEMENT_CHAR]) {
+    assert.equal(filename.includes(unsafe), false, `"${unsafe}" survived sanitization`);
   }
+}
+
+test('CC-MEDIA-5: the multipart name sanitizer collapses every unsafe code point', () => {
+  assertSanitized(multipartFilename(HOSTILE_FILENAME));
+});
+
+test('CC-MEDIA-5: a hostile filename is sanitized before it becomes a multipart name', async (t) => {
+  if (process.platform === 'win32') {
+    // NTFS refuses `"` and control characters outright, so the hostile name cannot
+    // exist on disk here. The sanitizer itself is covered by the unit test above.
+    t.skip('win32 cannot create a file with this name');
+    return;
+  }
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, HOSTILE_FILENAME), pngBytes());
+
+  const resolved = await resolveLocalMediaPath(HOSTILE_FILENAME, {
+    mediaDir: fx.mediaDir,
+  });
+  assertSanitized(resolved.filename);
 });
 
 test('readLocalPhoto: buffers the bytes and sniffs the content type', async (t) => {

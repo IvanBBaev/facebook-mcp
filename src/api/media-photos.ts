@@ -339,8 +339,12 @@ function isInsideDir(root: string, target: string): boolean {
  * characters, quotes, backslashes, separators and U+FFFD (what a non-UTF-8 name
  * decodes to — CC-MEDIA-5) become `_`. `FormData` escapes the header too; this is
  * defense in depth plus a readable name in Meta's error messages.
+ *
+ * Exported for its own sake: NTFS refuses to hold a name containing `"` or a
+ * control character, so the on-disk end of this check cannot run on Windows and
+ * the sanitizer would otherwise be untested there.
  */
-function multipartFilename(name: string): string {
+export function multipartFilename(name: string): string {
   let out = '';
   for (const ch of name) {
     const code = ch.codePointAt(0) ?? 0;

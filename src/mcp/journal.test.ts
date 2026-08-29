@@ -295,12 +295,14 @@ test('a write failure returns "failed" without throwing and redacts the note (CC
   const dir = await tmpJournalDir();
   try {
     // Plant a regular FILE where the journal wants a directory: mkdir → ENOTDIR.
-    const blocker = path.join(dir, 'blocker');
+    // The blocker ITSELF carries the registered secret, so the OS error message
+    // quotes it back whichever component that platform names — POSIX reports the
+    // deepest path it tried, win32 stops at the blocker. That quoting is how a
+    // filesystem error becomes a leak channel, and why the note is worth
+    // asserting on rather than just counting.
+    const blocker = path.join(dir, 'SECRET');
     await writeFile(blocker, 'x');
-    // The failing path SEGMENT is the registered secret, so the OS error message
-    // quotes it back — which is how a filesystem error becomes a leak channel and
-    // why the note is worth asserting on, not just counting.
-    const journalPath = path.join(blocker, 'SECRET', 'journal.ndjson');
+    const journalPath = path.join(blocker, 'nested', 'journal.ndjson');
 
     const redactor = createFakeRedactor({ secrets: ['SECRET'] });
     const errors: string[] = [];
