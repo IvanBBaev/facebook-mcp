@@ -71,6 +71,8 @@
             "codeRepository": "https://github.com/IvanBBaev/facebook-mcp",
             "license": "https://opensource.org/licenses/MIT",
             "programmingLanguage": "TypeScript",
+            "softwareVersion": "0.7.0",
+            "downloadUrl": "https://www.npmjs.com/package/@ivanbaev/facebook-mcp",
             "author": {
               "@type": "Person",
               "name": "Ivan Baev",
@@ -115,15 +117,15 @@
                 "name": "What actually works today?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "All seven tool packages are implemented: 37 tools across core, reader, posts, insights, moderation, messages and ads. Six packages are on by default; ads is opt-in via FB_TOOL_PACKAGES. The project is still pre-1.0 and not yet published to npm, and the automated test suite runs entirely against fakes behind a network fence — no behaviour has been verified against the live Graph API yet. A manual smoke harness exists for that, gated behind FB_SMOKE=1 and never run in CI."
+                  "text": "All seven tool packages are implemented: 37 tools across core, reader, posts, insights, moderation, messages and ads. Six packages are on by default; ads is opt-in via FB_TOOL_PACKAGES. Version 0.7.0 is published on npm, but the project is still pre-1.0 and the automated test suite runs entirely against fakes and recorded fixtures behind a network fence — no behaviour has been verified against the live Graph API yet. A manual smoke harness exists for that, gated behind FB_SMOKE=1 and never run in CI."
                 }
               },
               {
                 "@type": "Question",
-                "name": "When will it be published to npm?",
+                "name": "Is it published to npm?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Not yet. facebook-mcp is pre-1.0 and in active development; the tool surface is implemented but the package has not been published. The repository already carries the release rail — an MCPB bundle builder, a Claude plugin manifest, an MCP registry server.json and an OIDC-based publish workflow — but there is no tag, no npm package and no registry listing so far. Until then you run it from source."
+                  "text": "Yes. The package is @ivanbaev/facebook-mcp — the npm scope carries one b, unlike the GitHub user IvanBBaev — and version 0.7.0 is the current latest, so npx -y @ivanbaev/facebook-mcp runs the server without an install step. It was published with npm provenance by the OIDC release workflow from the tagged commit. The same release rail ships the .mcpb desktop bundle on the v0.7.0 GitHub Release, with a build-provenance attestation you can check yourself using gh attestation verify, and the MCP registry listing io.github.IvanBBaev/facebook-mcp is live. It is still a pre-1.0 release: published, implemented and tested in isolation, not proven in production. Building from source stays supported as an alternative."
                 }
               },
               {
@@ -1355,7 +1357,7 @@
             <span class="badge">Node 22+</span>
             <span class="badge">Graph API v23.0</span>
             <span class="badge">37 tools · 7 packages</span>
-            <span class="badge warn">pre-1.0 · not on npm yet</span>
+            <span class="badge warn">v0.7.0 on npm · pre-1.0</span>
           </div>
 
           <div class="cta">
@@ -1415,10 +1417,11 @@
 
           <p class="note warn" style="margin-top: 32px">
             <strong>Status, honestly.</strong> All seven packages are implemented and
-            covered by 1,182 hermetic tests (98.9% statement coverage), but every one of
-            those tests runs against fakes behind a network fence. Nothing has been
-            verified against the live Graph API yet, there is no tagged release and there
-            is no npm package. Treat this as a pre-1.0 project you run from source.
+            covered by 1,349 hermetic tests (99.1% statement coverage), but every one of
+            those tests runs against fakes and recorded fixtures behind a network fence.
+            Version 0.7.0 is published on npm with provenance — published, implemented
+            and tested in isolation, not proven in production. Nothing has been verified
+            against the live Graph API yet. Treat this as a pre-1.0 project.
           </p>
         </div>
       </section>
@@ -1430,18 +1433,34 @@
             <span class="eyebrow">Install</span>
             <h2 id="h-install">Running in four steps</h2>
             <p class="sub">
-              There is no npm package yet, so you build from source and point your MCP
-              client at the compiled entry point. Node 22 or newer.
+              The package is on npm as <code>@ivanbaev/facebook-mcp</code> — one
+              <code>b</code> in the scope, unlike the GitHub user
+              <code>IvanBBaev</code> — so <code>npx</code> fetches it and there is no
+              install step. Node 22 or newer. Building from source stays supported if
+              you would rather compile it yourself.
             </p>
           </div>
 
           <div class="steps">
             <div class="step">
               <div>
-                <h3>Build it</h3>
+                <h3>Get it</h3>
                 <div class="code">
                   <div class="code-head">
                     <span>shell</span>
+                    <button class="copy" type="button" data-copy="c-run">Copy</button>
+                  </div>
+                  <pre id="c-run"><span class="c"># nothing is installed and nothing runs at install time</span>
+npx -y @ivanbaev/facebook-mcp --version</pre>
+                </div>
+                <p class="sub" style="margin-top: 10px; font-size: 14px">
+                  Prefer source? Clone and compile, then read
+                  <code>node build/index.js</code> everywhere the steps below write
+                  <code>npx -y @ivanbaev/facebook-mcp</code>.
+                </p>
+                <div class="code">
+                  <div class="code-head">
+                    <span>shell — from source</span>
                     <button class="copy" type="button" data-copy="c-build">Copy</button>
                   </div>
                   <pre id="c-build">git clone https://github.com/IvanBBaev/facebook-mcp.git
@@ -1469,7 +1488,7 @@ npm run build</pre>
                   </div>
                   <pre id="c-token"><span class="c"># --page pins the Page; add --dry-run first to rehearse without writing</span>
 FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
-  node build/index.js setup-token --page=1234567890</pre>
+  npx -y @ivanbaev/facebook-mcp setup-token --page=1234567890</pre>
                 </div>
               </div>
             </div>
@@ -1487,8 +1506,8 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
                     <span>shell</span>
                     <button class="copy" type="button" data-copy="c-doctor">Copy</button>
                   </div>
-                  <pre id="c-doctor">node build/index.js doctor
-node build/index.js --version   <span class="c"># server + Node version, no credential needed</span></pre>
+                  <pre id="c-doctor">npx -y @ivanbaev/facebook-mcp doctor
+npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node version, no credential needed</span></pre>
                 </div>
                 <p class="sub">
                   <code>doctor</code>, <code>setup-token</code> and
@@ -1502,9 +1521,11 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
               <div>
                 <h3>Point your client at it</h3>
                 <p class="sub">
-                  Use the absolute path to <code>build/index.js</code>. Start read-only —
-                  <code>FB_PACKAGES_READONLY</code> drops every write tool while keeping
-                  the reads — and open the gate once you trust what you see.
+                  Let the client run <code>npx</code>, or point it at the absolute path
+                  to <code>build/index.js</code> if you built from source. Start
+                  read-only — <code>FB_PACKAGES_READONLY</code> drops every write tool
+                  while keeping the reads — and open the gate once you trust what you
+                  see.
                 </p>
 
                 <div class="tabs" role="tablist" aria-label="MCP client">
@@ -1552,8 +1573,8 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
                     <pre id="c-claude">{
   <span class="p">"mcpServers"</span>: {
     <span class="p">"facebook"</span>: {
-      <span class="p">"command"</span>: "node",
-      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"command"</span>: "npx",
+      <span class="p">"args"</span>: ["-y", "@ivanbaev/facebook-mcp"],
       <span class="p">"env"</span>: {
         <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
         <span class="p">"FB_PAGE_ID"</span>: "1234567890",
@@ -1585,8 +1606,8 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
   <span class="p">"servers"</span>: {
     <span class="p">"facebook"</span>: {
       <span class="p">"type"</span>: "stdio",
-      <span class="p">"command"</span>: "node",
-      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"command"</span>: "npx",
+      <span class="p">"args"</span>: ["-y", "@ivanbaev/facebook-mcp"],
       <span class="p">"env"</span>: {
         <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
         <span class="p">"FB_PAGE_ID"</span>: "1234567890"
@@ -1612,8 +1633,8 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
                     <pre id="c-cursor">{
   <span class="p">"mcpServers"</span>: {
     <span class="p">"facebook"</span>: {
-      <span class="p">"command"</span>: "node",
-      <span class="p">"args"</span>: ["/absolute/path/to/facebook-mcp/build/index.js"],
+      <span class="p">"command"</span>: "npx",
+      <span class="p">"args"</span>: ["-y", "@ivanbaev/facebook-mcp"],
       <span class="p">"env"</span>: {
         <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
         <span class="p">"FB_PAGE_ID"</span>: "1234567890"
@@ -2417,25 +2438,38 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
                 <code>FB_TOOL_PACKAGES</code>.
               </p>
               <p>
-                The project is still pre-1.0 and not yet published to npm, and the
-                automated test suite runs entirely against fakes behind a network fence —
-                no behaviour has been verified against the live Graph API yet. A manual
-                smoke harness exists for exactly that, gated behind
-                <code>FB_SMOKE=1</code> and never run in CI.
+                Version 0.7.0 is published on npm, but the project is still pre-1.0 and
+                the automated test suite runs entirely against fakes and recorded
+                fixtures behind a network fence — no behaviour has been verified against
+                the live Graph API yet. A manual smoke harness exists for exactly that,
+                gated behind <code>FB_SMOKE=1</code> and never run in CI.
               </p>
             </div>
           </details>
 
           <details id="faq-npm">
-            <summary>When will it be published to npm?</summary>
+            <summary>Is it published to npm?</summary>
             <div class="details-body">
               <p>
-                Not yet. The tool surface is implemented but the package has not been
-                published. The repository already carries the release rail — an MCPB bundle
-                builder, a Claude plugin manifest, an MCP registry
-                <code>server.json</code> and an OIDC-based publish workflow — but there is
-                no tag, no npm package and no registry listing so far. Until then you run
-                it from source.
+                Yes. The package is <code>@ivanbaev/facebook-mcp</code> — the npm scope
+                carries one <code>b</code>, unlike the GitHub user
+                <code>IvanBBaev</code> — and version 0.7.0 is the current
+                <code>latest</code>, so <code>npx -y @ivanbaev/facebook-mcp</code> runs
+                the server without an install step. It was published with npm provenance
+                by the OIDC release workflow from the tagged commit.
+              </p>
+              <p>
+                The same rail ships the <code>.mcpb</code> desktop bundle on the
+                <code>v0.7.0</code> GitHub Release, with a build-provenance attestation
+                you can check yourself using
+                <code
+                  >gh attestation verify facebook-mcp-0.7.0.mcpb --repo
+                  IvanBBaev/facebook-mcp</code
+                >, and the MCP registry listing
+                <code>io.github.IvanBBaev/facebook-mcp</code> is live. It is still a
+                pre-1.0 release: published, implemented and tested in isolation, not
+                proven in production. Building from source stays supported as an
+                alternative.
               </p>
             </div>
           </details>
@@ -2504,7 +2538,7 @@ node build/index.js --version   <span class="c"># server + Node version, no cred
               <h3>Found a bug?</h3>
               <p class="sub" style="font-size: 15px">
                 Open an issue with the output of
-                <code>node build/index.js --version</code> and the summary from
+                <code>npx -y @ivanbaev/facebook-mcp --version</code> and the summary from
                 <code>doctor</code> — that pair answers most of the first round of
                 questions.
               </p>

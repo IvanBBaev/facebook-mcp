@@ -48,9 +48,11 @@ Three findings shape the design:
 
 ## Status
 
-- **Phase:** implemented, unreleased. This corpus preceded implementation by
-  design; `src/` now holds the full server. Nothing has been verified against the
-  live Graph API yet, and nothing is published.
+- **Phase:** implemented and published, not yet live-verified. This corpus
+  preceded implementation by design; `src/` now holds the full server, shipped as
+  `@ivanbaev/facebook-mcp` 0.7.0 on npm (the scope has one `b`, unlike the GitHub
+  user `IvanBBaev`), with the registry listing `io.github.IvanBBaev/facebook-mcp`
+  active. Nothing has been verified against the live Graph API yet.
 - **Reviews:** seven role-based senior reviews completed 2026-07-21/22 (see
   `docs/reviews/`), consolidated in
   [../reviews/SUMMARY.md](../reviews/SUMMARY.md) — 2 Blockers, all verdicts
@@ -60,5 +62,6 @@ Three findings shape the design:
   exclusive file ownership); [08-roadmap.md](08-roadmap.md) keeps governing
   verification/release gates.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
-  runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md)),
-  then the release rail in [../runbooks/release.md](../runbooks/release.md).
+  runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
+  the release rail in [../runbooks/release.md](../runbooks/release.md) has already
+  cut 0.7.0 and stays the path for every later tag.

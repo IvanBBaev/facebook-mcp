@@ -37,10 +37,11 @@ outside GitHub Actions.
    generated for public repositories, and free secret scanning + push protection
    assume one too. Flip visibility **before** the first tag, not after.
 
-2. **`package.json` must be publishable.** During pre-1.0 development the package
-   carries `"private": true`; npm refuses to publish while it is set. The release
-   gate fails loudly on this, so you cannot forget it — but fix it in a normal PR,
-   not in a panic on top of a tag.
+2. **`package.json` must be publishable.** npm refuses to publish while
+   `"private": true` is set — it was carried through pre-release development and
+   dropped for v0.7.0. If it ever comes back, the release gate fails loudly on it,
+   so you cannot forget it — but fix it in a normal PR, not in a panic on top of a
+   tag.
 
 3. **`mcpName` must already be in `package.json`.** The MCP Registry verifies
    ownership by reading `mcpName` out of the *published npm tarball*. It cannot be
@@ -62,6 +63,13 @@ outside GitHub Actions.
    adding a job `environment:` all break publishing until the trusted publisher
    is updated to match.
 
+   > **Already done for this package** (v0.7.0, 2026-08-27). npm would not
+   > pre-register a trusted publisher for a name that did not exist yet, so the
+   > first publish went out on the rail under a short-lived `NPM_TOKEN`. The box
+   > is kept for the next new package name — and steps 3 and 4 are the ones that
+   > close a bootstrap out, so check them against reality (step 5) before
+   > assuming this package is in steady state.
+   >
    > **First-publish ordering caveat — the bootstrap exception.** npm's
    > trusted-publisher settings live on a package page, so for a name that has
    > never been published there is nothing to configure yet. **Check the settings
@@ -276,24 +284,57 @@ the push, and its `gate` job logs `Tag v1.0.0 matches package.json 1.0.0`.
 Design notes worth knowing when you read a failed run:
 
 - `github-release` and `mcp-registry` are the only jobs that can change anything
-  outside npm, and both are gated on `needs.gate.outputs.finalize == 'true'` — a
-  `workflow_dispatch` rehearsal can never reach them.
+  outside npm. `github-release` is gated on `needs.gate.outputs.publish == 'true'`
+  and `mcp-registry` on `needs.gate.outputs.registry == 'true'` — a
+  `workflow_dispatch` rehearsal can never reach either.
 - **Resuming a partly-failed release.** `npm publish` is the one step that cannot
-  be repeated: a version exists on npm exactly once, so after it succeeds neither
-  a re-run nor a re-tag can get the rest of the rail to run — the re-tag dies on
-  the npm step before it reaches anything else. For that case only, dispatch the
-  workflow **on the tag** with `mode: resume`. It leaves npm alone (the publish
-  step degrades to `--dry-run`) and runs `github-release` and `mcp-registry` for
-  real. Both are idempotent — `gh release upload --clobber`, and the registry
-  accepts a re-publish of the same version — so resuming is safe even when only
-  one of them actually failed. `mode: resume` refuses to run off a tag, because
-  the registry publishes the `server.json` from the checkout and the version it
-  names has to be the one already on npm.
-  One consequence to know before you dispatch it: resuming rebuilds the `.mcpb`,
-  so an asset that was already attached is replaced by freshly built, freshly
-  attested bytes. Its `.sha256` is replaced in the same upload, so the published
-  pair stays consistent and verifiable — but a checksum somebody recorded from
-  the earlier upload will no longer match.
+  be repeated: a version exists on npm exactly once, so once it has succeeded the
+  release cannot be re-cut — a re-tag dies on the npm step before it reaches
+  anything else. **Re-running the failed jobs from the Actions UI is the first
+  thing to try, and it usually works** (that is how 0.7.0's registry listing
+  landed, once npm had finished propagating). Prefer it: a re-run replays the
+  original run's context, which is what keeps the bundle's provenance attestation
+  truthful. What a re-run cannot do is pick up a fix to `release.yml`, and GitHub
+  stops offering it on older runs. For that case only:
+
+  ```sh
+  gh workflow run release.yml --ref main -f mode=resume -f tag=v1.2.3
+  ```
+
+  **`resume` recovers exactly one job: `mcp-registry`.** npm is left alone (the
+  publish step degrades to `--dry-run`), and `bundle` and `github-release` are
+  skipped outright. That is narrower than it first looks like it should be, for a
+  reason worth stating: `actions/attest-build-provenance` derives its statement
+  from the run's own context and offers no ref override, so a bundle rebuilt
+  during a resume — which is dispatched from `main` — would be attested as coming
+  from `refs/heads/main` at main's HEAD while its bytes came from the tag's
+  checkout. That is a signed, publicly verifiable claim that is false, and the
+  rail will not make it. A failed `github-release` is therefore recovered by
+  re-running that job, not by dispatching a resume.
+
+  **`--ref main`, and the tag as an input — this is the whole point, not a
+  detail.** `workflow_dispatch` runs the workflow file _as it exists at the ref
+  you dispatch on_, so dispatching on the tag would run the rail as it was when
+  that release was cut — for any release cut before a fix landed here, that is
+  precisely the broken version you are recovering from. Dispatching from the
+  default branch gets today's rail; every job then checks out `inputs.tag`, so
+  the code that runs is current and the contents it publishes are the release's.
+  The gate still asserts the tag matches the `package.json` it checked out, so
+  nothing is weakened by the run starting from a branch.
+
+  Two things a resume does differently, both deliberate. It gives npm one
+  visibility check instead of the ten-minute propagation wait — the mode's whole
+  premise is that the tarball is already public, so if it is not, waiting only
+  delays the same answer. And it downgrades the production `npm audit` to a
+  warning: that is the one gate step whose verdict can change without the tree
+  changing, and blocking on an advisory filed _after_ a release would leave the
+  registry listing permanently uncreatable for a tarball that is public anyway.
+- **The MCP Registry is append-only.** A version can be listed exactly once;
+  a second publish is rejected with `cannot publish duplicate version` (HTTP 400)
+  and listings are immutable, like npm's. The publish step handles that response
+  rather than retrying it: on a resume it is success (the listing already exists,
+  which is what the run was for), and on a tag push it is a hard error, because it
+  means the version was listed before this tag ran.
 - No step is `continue-on-error`. A failure anywhere stops the rail; nothing is
   "published anyway".
 - Every third-party action is pinned to a commit SHA with a `# vX.Y.Z` comment,
@@ -413,14 +454,14 @@ To withdraw a bad release:
 | `gate`: _server.json / manifest.json / plugin.json version != …_                    | Metadata drift — the classic five-surface failure.                                        | `npm run metadata`, commit, re-tag.                                                                                                                    |
 | `gate`: _CHANGELOG.md has no `## [X.Y.Z]` section_                                  | Release notes not written, or the heading is `## Unreleased` / `## v1.0.0` instead of the literal `## [1.0.0]`. | Write/rename the section exactly as `## [X.Y.Z]`, commit, re-tag.                                                                       |
 | `gate`: `metadata:check` reports drift                                              | A generated artifact was hand-edited, or the version was bumped in `package.json` instead of `scripts/metadata.config.mjs`. | Bump `identity.version` in the SSOT, `npm run metadata`, commit, re-tag. Never patch the artifact.                    |
-| `gate`: `npm audit` exits non-zero                                                  | A high/critical advisory in the **production** tree.                                      | Fix it — bump the dependency, or drop it. This gate is not waived for a release; a release is the worst time to ship a known-vulnerable tree.               |
+| `gate`: `npm audit` exits non-zero                                                  | A high/critical advisory in the **production** tree.                                      | Fix it — bump the dependency, or drop it. This gate is not waived for a release; a release is the worst time to ship a known-vulnerable tree. (In `mode: resume` it is advisory only — the tarball it would block is already public.) |
 | `npm run check`: _Policy violation: package.json declares install lifecycle script(s)_ | Someone added `preinstall`/`install`/`postinstall`/`prepare`.                          | Remove it. This package runs no code at install time; the post-install check is the user-run `doctor` subcommand.                                            |
 | `npm version` refuses with _do not bump the version with npm version_               | Working as designed — `package.json#version` is generated.                                | Edit `identity.version` in `scripts/metadata.config.mjs`, then `npm run metadata`.                                                                          |
 | Local `npm publish` refuses with _publishing happens in release.yml_                | `prepublishOnly` backstop. Working as designed.                                           | Push a tag instead. The only sanctioned override is the first-ever name-reserving publish (`ALLOW_LOCAL_PUBLISH=1`, one-time setup step 4).                 |
 | `npm-publish`: `ENEEDAUTH` / _Unable to authenticate_                               | Trusted publisher not configured, or its binding does not match this workflow.            | Re-check org, repo, workflow filename `release.yml` and the empty environment field on npmjs.com. Re-run the job; nothing else has published yet.           |
 | `npm-publish`: `E404` / _Not found — PUT https://registry.npmjs.org/@scope%2fname_ | The credential cannot create this package. npm answers 404 rather than 403 so it does not leak which scopes exist, which makes "token too narrow" and "token belongs to an account that does not own the scope" look identical. | Read the `npm identity for this token:` line the publish step prints. If the username does not own the scope, no token will ever work — fix the scope in `identity.packageName` or create the org. Only if the account is right is re-scoping the token the fix. |
 | `npm-publish`: _provenance requires `id-token: write`_ or _repository is private_   | Permissions changed, or the repo is not public.                                           | Restore `id-token: write` on the job / make the repo public. Provenance cannot be added later — re-release as a new patch version.                          |
-| `npm-publish`: _You cannot publish over the previously published versions_          | The version already exists on npm (usually a partially-failed earlier run).                | The npm half already succeeded. Do **not** bump blindly — verify with `npm view <pkg>@<version>`, then run only the remaining jobs: `workflow_dispatch` on the tag with `mode: resume`. |
+| `npm-publish`: _You cannot publish over the previously published versions_          | The version already exists on npm (usually a partially-failed earlier run).                | The npm half already succeeded. Do **not** bump blindly — verify with `npm view <pkg>@<version>`, then recover the jobs that did not finish: re-run them from the Actions UI, or, if only the registry listing is missing, `gh workflow run release.yml --ref main -f mode=resume -f tag=vX.Y.Z`. |
 | `bundle`: _no MCPB manifest found_                                                  | `manifest.json` is missing or not generated.                                              | `npm run metadata`, commit, re-tag.                                                                                                                    |
 | `bundle`: _manifest declares server.entry_point "…" but that file is not in the bundle_ | The manifest points at a path `package.json#files` does not publish.                  | Fix the entry point or the `files` allowlist; a bundle without its entry point cannot start.                                                                |
 | `bundle`: _build/index.js is missing_                                               | Packer ran without a build.                                                               | `npm run build` first (CI already does; locally it is on you).                                                                                             |
@@ -428,15 +469,20 @@ To withdraw a bad release:
 | `github-release`: `gh attestation verify` fails                                     | The asset does not match any attestation for this repo — a stale artifact, or a bundle that did not come out of this run. | Stop. Do not upload it. Re-run the workflow from `bundle` so the artifact and its attestation are produced together, and treat an unexplained failure as a supply-chain incident, not a flake. |
 | `mcp-registry`: _mcp-publisher checksum mismatch_                                   | The downloaded binary does not match the `MCP_PUBLISHER_SHA256` pinned in `release.yml` — usually a `MCP_PUBLISHER_VERSION` bump without a digest re-pin. | Verify the asset by hand (download, `sha256sum`) and re-pin the digest in a reviewed commit. Never relax the check to unblock a release.                    |
 | `mcp-registry`: `::warning::` about the upstream checksums file                     | Upstream `registry_<version>_checksums.txt` disagreed or could not be fetched. The in-repo digest still passed, so the job continued. | Not a failure, but not noise either: confirm the pinned digest is still the right one for that version before the next release.                             |
-| `mcp-registry`: _… never became visible on npm_                                     | CDN propagation took longer than the 30 × 20 s (10 min) wait. A scope's **first** package is the slow case — 0.7.0 took 5m17s where a new version of an existing package is visible in seconds. | Wait until `npm view <pkg>@<version>` resolves, then `workflow_dispatch` on the tag with `mode: resume`. npm is unaffected.                                   |
+| `mcp-registry`: _… never became visible on npm_                                     | CDN propagation took longer than the 30 × 20 s (10 min) wait. A scope's **first** package is the slow case — 0.7.0 took 5m17s where a new version of an existing package is visible in seconds. | Wait until `npm view <pkg>@<version>` resolves, then `gh workflow run release.yml --ref main -f mode=resume -f tag=vX.Y.Z`. npm is unaffected.                                   |
 | `mcp-registry`: _authentication failed_ / ownership not verified                    | `mcpName` missing from the published tarball, or `server.json.name` does not match it.     | Both must be right in the tarball itself — fix and release a new version.                                                                                  |
-| `github-release`: _release not found_ / tag mismatch                                | Tag was deleted or re-pointed while the run was in flight.                                | Restore the tag, then `workflow_dispatch` on it with `mode: resume`. The job is idempotent: it uploads with `--clobber` when the Release already exists.     |
+| `mcp-registry`: _cannot publish duplicate version_ on a **tag push**                | The registry already lists this version — it was listed before this tag ran.               | Stop and find out what listed it. Registry listings are immutable, so the tag cannot claim the version; publish a new one rather than trying to overwrite. (The same response during `mode: resume` is success, not a failure — the listing the run was sent to create exists.) |
+| `github-release`: _release not found_ / tag mismatch                                | Tag was deleted or re-pointed while the run was in flight.                                | Restore the tag, then re-run `bundle` + `github-release` from the Actions UI. Do **not** reach for `mode: resume` — it skips both jobs on purpose (see [What CI does](#what-ci-does-step-by-step)). The upload itself is idempotent: `--clobber` when the Release already exists. |
 
-**Safe to re-run:** the whole workflow is idempotent except `npm publish`, which
-fails on an already-published version. Re-running after a partial failure is the
-normal recovery path, not a last resort — and once npm has succeeded, the way to
-re-run is `workflow_dispatch` on the tag with `mode: resume`, which is exactly
-the "everything except npm" run that a plain re-run cannot express.
+**Safe to re-run:** every job except `npm-publish` can be repeated — `npm publish`
+fails on an already-published version, and `mcp-registry` is append-only, so it
+succeeds exactly once and rejects the second attempt. Re-running the failed jobs
+from the Actions UI is the normal recovery path, not a last resort, and it is the
+one that keeps the bundle's provenance attestation truthful. Reach for
+`gh workflow run release.yml --ref main -f mode=resume -f tag=vX.Y.Z` only when
+the missing piece is the registry listing **and** a plain re-run cannot fix it —
+because the failure was a bug in `release.yml` itself, or because GitHub no
+longer offers a re-run on that run.
 
 ---
 

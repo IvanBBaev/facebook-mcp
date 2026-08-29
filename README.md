@@ -13,7 +13,9 @@ MCP client (Claude, VS Code, the Inspector…) and operated locally by a Page ad
 using their own Meta developer app. Least-privilege tokens, plan-and-apply write
 safety, and no telemetry.
 
-> 🚧 **Status: pre-1.0, in active development. Not yet published to npm.**
+> 🚧 **Status: pre-1.0, in active development.** Published on npm as
+> [`@ivanbaev/facebook-mcp`](https://www.npmjs.com/package/@ivanbaev/facebook-mcp)
+> — and the version number is the warning.
 >
 > All seven tool packages are implemented — see the [tool table](#tools) for the
 > exact surface. **Nothing has been verified against the live Graph API yet.**
@@ -22,9 +24,8 @@ safety, and no telemetry.
 > does what the fixtures say", not "Meta accepted it". A live smoke harness
 > exists ([`scripts/smoke/`](scripts/smoke/README.md)) but has not been run
 > against a real Page as part of any released state. Treat every capability below
-> as **implemented but unproven**, expect breaking changes until the first tagged
-> release, and read [Known limitations](#known-limitations) before you rely on
-> anything.
+> as **implemented but unproven**, expect breaking changes until 1.0, and read
+> [Known limitations](#known-limitations) before you rely on anything.
 
 **Contents:** [Features](#features) · [Requirements](#requirements) ·
 [Setup](#setup) · [Client compatibility](#client-compatibility) ·
@@ -52,7 +53,7 @@ does and does not mean.
 | **Messaging**          | Conversation reads and replies within the 24-hour window                        | ✅ Implemented, not live-verified |
 | **Ads**                | Campaign/adset/ad reads, insights, status & budget control — **off by default** | ✅ Implemented, not live-verified |
 | **Live verification**  | Every tool exercised against a real Page and a real ad account                  | ❌ Not done — see the status note |
-| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, signed bundle, registry listing                   | ❌ Not published                  |
+| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, attested bundle, registry listing                 | ✅ Published — 0.7.0              |
 
 The default profile exposes a deliberately small, curated tool surface — each
 tool wraps one real capability rather than mirroring every Graph edge.
@@ -80,38 +81,16 @@ tool wraps one real capability rather than mirroring every Graph edge.
 
 ## Setup
 
-### (a) From source (the only way today)
+### (a) Via npx
 
-The package is not on npm yet, so build from a clone:
+Configure credentials first (see [below](#configure-credentials)), then run the
+pre-flight check:
 
 ```bash
-git clone https://github.com/IvanBBaev/facebook-mcp.git
-cd facebook-mcp
-npm install
-npm run build
-node build/index.js doctor   # pre-flight: token, scopes, package matrix
-node build/index.js          # or: ./bin/facebook-mcp.mjs
+npx -y @ivanbaev/facebook-mcp doctor   # token, scopes, package matrix
 ```
 
-Configure credentials (see [below](#configure-credentials)), then point your MCP
-client at that command with an absolute path:
-
-```json
-{
-  "mcpServers": {
-    "facebook": {
-      "command": "node",
-      "args": ["/absolute/path/to/facebook-mcp/build/index.js"],
-      "env": { "FB_SYSTEM_TOKEN": "…", "FB_PAGE_ID": "…" }
-    }
-  }
-}
-```
-
-### (b) Via npx (after the first release)
-
-> Both snippets below become available **after the first published release** —
-> the package is currently unpublished, so they do not work yet.
+Register it with your MCP client:
 
 ```json
 {
@@ -129,6 +108,42 @@ client at that command with an absolute path:
 ```bash
 /plugin marketplace add IvanBBaev/facebook-mcp
 /plugin install facebook-mcp
+```
+
+**Claude Desktop** takes the `.mcpb` bundle attached to the
+[latest release](https://github.com/IvanBBaev/facebook-mcp/releases/latest). It
+carries a build-provenance attestation, so you can prove it came out of this
+repository's workflow before you install it:
+
+```bash
+gh attestation verify facebook-mcp-0.7.0.mcpb --repo IvanBBaev/facebook-mcp
+```
+
+### (b) From source
+
+For development, or to run a commit that is not released yet:
+
+```bash
+git clone https://github.com/IvanBBaev/facebook-mcp.git
+cd facebook-mcp
+npm install
+npm run build
+node build/index.js doctor   # pre-flight: token, scopes, package matrix
+node build/index.js          # or: ./bin/facebook-mcp.mjs
+```
+
+Point your MCP client at that command with an absolute path:
+
+```json
+{
+  "mcpServers": {
+    "facebook": {
+      "command": "node",
+      "args": ["/absolute/path/to/facebook-mcp/build/index.js"],
+      "env": { "FB_SYSTEM_TOKEN": "…", "FB_PAGE_ID": "…" }
+    }
+  }
+}
 ```
 
 ## Client compatibility
@@ -204,7 +219,7 @@ versions on one line and exits — it needs no credential, so it still answers o
 an install that cannot start:
 
 ```text
-facebook-mcp 0.0.0 (node v22.23.0, darwin arm64, sdk 1.29.0)
+facebook-mcp 0.7.0 (node v22.23.0, darwin arm64, sdk 1.30.0)
 ```
 
 The bare server version is always the second field, so `--version | awk '{print
@@ -395,7 +410,7 @@ Point-in-time survey (2026-07-21); the full write-up is in
 
 | Project                            | Focus                 | Language   | License  | Distribution           | Notes                                                                        |
 | ---------------------------------- | --------------------- | ---------- | -------- | ---------------------- | ---------------------------------------------------------------------------- |
-| **facebook-mcp** (this)            | Pages / organic + ads | TypeScript | MIT      | npm (planned)          | Multi-Page, plan-and-apply writes, redaction, MCP annotations & outputSchema |
+| **facebook-mcp** (this)            | Pages / organic + ads | TypeScript | MIT      | npm + MCPB bundle      | Multi-Page, plan-and-apply writes, redaction, MCP annotations & outputSchema |
 | **Meta's official hosted Ads MCP** | Ads only              | hosted     | Meta ToS | `mcp.facebook.com/ads` | Business OAuth, no developer app, ~29 tools. Free.                           |
 | **pipeboard-co/meta-ads-mcp**      | Ads                   | Python     | BUSL-1.1 | hosted-remote          | Market leader (~1.1k ★), 42 tools. Not OSI open source.                      |
 | **HagaiHen/facebook-mcp-server**   | Pages                 | Python     | MIT      | source only            | The only other notable Pages server: 27 tools, single Page, no tests.        |
@@ -418,8 +433,10 @@ Current, factual, and deliberately unflattering:
 
 - **No live Graph API verification.** Nothing here has been proven against Meta's
   servers. Fixtures encode what the API is documented to do; reality gets a vote.
-- **Not published.** No npm package, no `.mcpb` bundle, no registry listing yet,
-  so `npx` and the plugin marketplace snippets do not work.
+- **Published, but brand new.** 0.7.0 is on npm with provenance, the `.mcpb`
+  bundle is attached to the release and the MCP Registry listing is active — but
+  no install path has been walked end-to-end by anyone except CI. See
+  [Client compatibility](#client-compatibility) for what that means per client.
 - **Clients that cannot prompt need an operator token.** `irreversible` and
   `spend` writes need a per-call `apply` plus a `plan_id` _and_ an out-of-band
   confirmation the model cannot supply itself. Where the client advertises the
@@ -440,7 +457,7 @@ Current, factual, and deliberately unflattering:
   quiet for more than 24 hours cannot be replied to without a message tag, and
   this server does not paper over that.
 - **Single maintainer, pre-1.0.** Interfaces may change without a deprecation
-  period until the first tagged release.
+  period until 1.0.
 
 ## Not in scope
 

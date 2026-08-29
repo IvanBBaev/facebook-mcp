@@ -38,15 +38,43 @@ name: Release
 # `workflow_dispatch` runs the identical pipeline as a rehearsal: the gate and
 # the bundle build are real, every publishing step becomes a dry run.
 #
-# The one exception is `mode: resume`, dispatched on an already-released tag. npm
-# publishing is one-shot — a version cannot be published twice — so when the npm
-# half succeeds and something after it does not, a plain re-run is not available
-# and re-tagging would fail on the npm step before ever reaching the rest. That
-# mode leaves npm exactly as it is and runs the two jobs downstream of it, the
-# GitHub Release and the MCP Registry, for real against the tarball that is
-# already public. Both are idempotent (`gh release ... --clobber`, and the
-# registry accepts a re-publish of the same version), so resuming a release that
-# only partly failed is safe.
+# The one exception is `mode: resume` with a `tag` input, and it recovers exactly
+# one job: `mcp-registry`. npm publishing is one-shot — a version cannot be
+# published twice — so once the npm half succeeds, re-tagging would die on the npm
+# step before reaching anything downstream. `resume` leaves npm exactly as it is
+# and runs the registry publish for real against the tarball that is already
+# public.
+#
+# The tag is an *input*, not the ref this is dispatched on, and that separation is
+# the point: `workflow_dispatch` runs the workflow file as it exists at the ref it
+# is dispatched on, so dispatching on the tag would run the rail as it was when
+# that release was cut — which, for any release cut before a fix lands here, is
+# exactly the broken version being recovered from. Dispatch on the default branch
+# to get the current rail; every job then checks out `inputs.tag`, so the *code*
+# that runs is today's and the *contents* it publishes are the release's.
+#
+# Two things `resume` deliberately does NOT do, both because dispatching from a
+# branch changes what the run can honestly claim:
+#
+#   * It does not re-attach the .mcpb bundle, and the `bundle` job is skipped
+#     entirely. `attest-build-provenance` derives its statement from the run's own
+#     context, so a bundle built during a resume would be attested as coming from
+#     `refs/heads/main` at main's HEAD, while the bytes came from the tag's
+#     checkout — a signed, publicly verifiable claim that is false. There is no
+#     ref override, so the only honest option is not to make the claim.
+#   * It is not a general "re-run the release". A failed `github-release` is
+#     recovered by re-running that job from the Actions UI, which replays the
+#     original run's context and therefore keeps the attestation truthful. What a
+#     re-run cannot do is pick up a fix to this file — which is precisely why the
+#     registry, whose failure mode was a workflow bug (too short a wait for npm's
+#     CDN), is the job that needs a dispatch-based recovery and the release job is
+#     not.
+#
+# The MCP Registry is NOT idempotent: a version may be listed exactly once, and a
+# second publish is rejected with `cannot publish duplicate version`. A resume
+# treats that rejection as success — the listing it was sent to create exists —
+# while on a tag push the same response is a hard error, because it means the
+# version was listed before this tag ran.
 
 on:
   push:
@@ -54,18 +82,27 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'rehearsal (default, publishes nothing) or resume (re-runs the GitHub Release and MCP Registry steps for an already-published tag)'
+        description: 'rehearsal (default, publishes nothing) or resume (re-runs the MCP Registry publish for an already-published tag; npm and the GitHub Release are left alone)'
         type: choice
         default: rehearsal
         options: [rehearsal, resume]
+      tag:
+        description: 'resume only: the already-published release tag to finish, e.g. v1.2.3. Dispatch this from the default branch, not from the tag.'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
-# Never let two releases of the same ref interleave; never cancel one mid-flight
-# (a half-published release is worse than a slow one).
+# Never let two releases of the same tag interleave; never cancel one mid-flight
+# (a half-published release is worse than a slow one). Keyed on the release tag
+# rather than the ref, because every resume is dispatched on the default branch:
+# keying on `github.ref` would drop every recovery run into one `refs/heads/main`
+# group, and GitHub keeps only one pending run per group — so a second dispatch
+# would silently cancel a recovery still waiting to start.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -104,13 +141,24 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      release-tag: ${{ steps.resolve.outputs.release-tag }}
+      # `publish` gates everything that only a tag push may do: the npm publish,
+      # the bundle build and the GitHub Release. `registry` is the one flag a
+      # resume also turns on. `resume` is the mode itself, for the steps that have
+      # to behave differently rather than simply not run.
       publish: ${{ steps.resolve.outputs.publish }}
-      finalize: ${{ steps.resolve.outputs.finalize }}
+      registry: ${{ steps.resolve.outputs.registry }}
+      resume: ${{ steps.resolve.outputs.resume }}
       dist-tag: ${{ steps.resolve.outputs.dist-tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -126,9 +174,26 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           MODE: ${{ inputs.mode }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           pkg_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")"
+
+          # The tag this run is about. On a push it is the ref; on a resume it is
+          # the input, because the run is dispatched on the default branch to get
+          # the current workflow file (see the header note). Every job checks out
+          # this same `inputs.tag || github.ref`, so `pkg_version` above was read
+          # from the release's own checkout either way.
+          release_tag="$REF_NAME"
+
+          # Both inputs carry a `default:`, so the runner sets them even when the
+          # form is left blank - but only for `workflow_dispatch`. On a tag push
+          # the whole context is absent and `set -u` would abort on the first
+          # reference, so every read below is defaulted rather than relying on the
+          # runner exporting empty strings.
+          mode="${MODE:-}"
+          input_tag="${INPUT_TAG:-}"
+          resume=false
 
           if [ "$EVENT_NAME" = "push" ]; then
             if [ "$REF_TYPE" != "tag" ]; then
@@ -136,31 +201,45 @@ jobs:
               exit 1
             fi
             publish=true
-            finalize=true
-          elif [ "$MODE" = "resume" ]; then
-            # Recovery for a release whose npm half is already done. It must be
-            # dispatched on the tag: the registry publishes `server.json` from the
-            # checkout, and the version it names has to be the one already on npm.
-            if [ "$REF_TYPE" != "tag" ]; then
-              echo "::error::resume must be dispatched on the release tag (got ref_type=$REF_TYPE)."
+            registry=true
+          elif [ "$mode" = "resume" ]; then
+            # Recovery for a release whose npm half is already done.
+            if [ -z "$input_tag" ]; then
+              echo "::error::resume needs the 'tag' input - the release tag to finish, e.g. v1.2.3."
+              exit 1
+            fi
+            release_tag="$input_tag"
+            resume=true
+            publish=false
+            registry=true
+            echo "::notice::workflow_dispatch resume of $release_tag - npm, the bundle and the GitHub Release are left exactly as they are; only the MCP Registry publish runs for real."
+          else
+            if [ -n "$input_tag" ]; then
+              echo "::error::the 'tag' input only applies to mode 'resume'; a rehearsal runs against the ref it is dispatched on."
               exit 1
             fi
             publish=false
-            finalize=true
-            echo "::notice::workflow_dispatch resume - npm is left exactly as it is; the GitHub Release and MCP Registry jobs run for real."
-          else
-            publish=false
-            finalize=false
+            registry=false
             echo "::notice::workflow_dispatch - rehearsal only, nothing will be published."
           fi
 
-          if [ "$REF_TYPE" = "tag" ]; then
-            tag_version="${REF_NAME#v}"
+          # A resume checks out `release_tag`, so this assertion still compares
+          # the tag against the package.json that shipped under it - it is not
+          # weakened by the run being dispatched from a branch.
+          if [ "$REF_TYPE" = "tag" ] || [ "$resume" = "true" ]; then
+            case "$release_tag" in
+              v*.*.*) ;;
+              *)
+                echo "::error::'$release_tag' is not a release tag (expected the v*.*.* form)."
+                exit 1
+                ;;
+            esac
+            tag_version="${release_tag#v}"
             if [ "$tag_version" != "$pkg_version" ]; then
-              echo "::error::Tag $REF_NAME declares version $tag_version but package.json says $pkg_version."
+              echo "::error::Tag $release_tag declares version $tag_version but package.json says $pkg_version."
               exit 1
             fi
-            echo "Tag $REF_NAME matches package.json $pkg_version."
+            echo "Tag $release_tag matches package.json $pkg_version."
           else
             echo "::notice::Rehearsing on branch $REF_NAME - the tag/version assertion is skipped."
           fi
@@ -197,8 +276,10 @@ jobs:
 
           {
             echo "version=$pkg_version"
+            echo "release-tag=$release_tag"
             echo "publish=$publish"
-            echo "finalize=$finalize"
+            echo "registry=$registry"
+            echo "resume=$resume"
             echo "dist-tag=$dist_tag"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
@@ -325,8 +406,26 @@ jobs:
       #                   noise that would train the operator to bypass the gate,
       #                   and with three runtime dependencies a real high here is
       #                   worth stopping the rail for.
+      #
+      # Advisory-only during a resume. The audit database is external and mutable,
+      # so this is the one gate step whose verdict can change without the tree
+      # changing — and a resume runs it against a tree that is already published
+      # and cannot be amended. Blocking there would mean an advisory filed after
+      # the release stops the registry listing from ever being created, which
+      # helps nobody: the vulnerable tarball is public either way, and the fix is
+      # a new version, not a stuck recovery run.
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+        shell: bash
+        env:
+          RESUME: ${{ steps.resolve.outputs.resume }}
+        run: |
+          set -euo pipefail
+          if [ "$RESUME" = "true" ]; then
+            npm audit --omit=dev --audit-level=high \
+              || echo "::warning::npm audit reports a high/critical advisory in the production tree of an already-published version. It does not block this recovery run; fix it in the next release."
+          else
+            npm audit --omit=dev --audit-level=high
+          fi
 
   # ---------------------------------------------------------------------------
   # 2. npm publish via Trusted Publishing (OIDC), with NODE_AUTH_TOKEN as the
@@ -342,6 +441,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -417,6 +521,12 @@ jobs:
   bundle:
     name: mcpb bundle
     needs: gate
+    # Skipped on a resume, which skips `github-release` with it (a skipped
+    # dependency skips its dependants). The reason is the attestation below: it is
+    # derived from the run's own context, and a resume runs on the default branch,
+    # so the statement would claim a source ref and commit that are not where the
+    # bytes came from. See the header note.
+    if: needs.gate.outputs.resume != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -425,6 +535,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -487,7 +602,7 @@ jobs:
   github-release:
     name: github release
     needs: [gate, npm-publish, bundle]
-    if: needs.gate.outputs.finalize == 'true'
+    if: needs.gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the Release and upload its assets
@@ -524,7 +639,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.gate.outputs.release-tag }}
           PRERELEASE: ${{ needs.gate.outputs.prerelease }}
         run: |
           set -euo pipefail
@@ -549,7 +664,7 @@ jobs:
   mcp-registry:
     name: mcp registry
     needs: [gate, npm-publish]
-    if: needs.gate.outputs.finalize == 'true'
+    if: needs.gate.outputs.registry == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -557,6 +672,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -605,13 +725,30 @@ jobs:
       # be published again, so a premature give-up costs a manual recovery run
       # (`workflow_dispatch` with mode `resume`), while waiting longer on a
       # release that was going to succeed anyway costs only runner minutes.
+      #
+      # A resume gets one attempt, not thirty: its whole premise is that the npm
+      # half already succeeded, so the tarball has been public since the run being
+      # recovered from. If it is not there, the premise is wrong and waiting ten
+      # minutes only delays the same answer — worse, it would be the last check
+      # standing between a wrong tag and a registry listing for a version nobody
+      # can install.
       - name: Wait for the npm tarball to be visible
         shell: bash
         env:
           VERSION: ${{ needs.gate.outputs.version }}
+          RESUME: ${{ needs.gate.outputs.resume }}
+          TAG: ${{ needs.gate.outputs.release-tag }}
         run: |
           set -euo pipefail
           name="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).name")"
+          if [ "$RESUME" = "true" ]; then
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION} is on npm, as a resume requires."
+              exit 0
+            fi
+            echo "::error::${name}@${VERSION} is not on npm, so ${TAG} was never published and there is nothing to resume. Cut the release normally by pushing the tag."
+            exit 1
+          fi
           for attempt in $(seq 1 30); do
             if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
               echo "${name}@${VERSION} is visible on npm."
@@ -623,17 +760,40 @@ jobs:
           echo "::error::${name}@${VERSION} never became visible on npm; not registering a version the registry cannot verify."
           exit 1
 
+      # The registry is append-only: a version may be listed exactly once, and a
+      # second publish of the same one is rejected with `cannot publish duplicate
+      # version` (HTTP 400). That is not a transient failure, so it is handled
+      # rather than retried — and what it means depends on why this run exists. On
+      # a resume the listing is the outcome being aimed at, so finding it already
+      # there is success. On a tag push it means the version was listed before this
+      # tag ran, which is a real problem worth stopping for.
       - name: Publish server.json to the MCP Registry
         shell: bash
+        env:
+          TAG: ${{ needs.gate.outputs.release-tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RESUME: ${{ needs.gate.outputs.resume }}
         run: |
           set -euo pipefail
           ./mcp-publisher login github-oidc
           for attempt in 1 2 3; do
-            if ./mcp-publisher publish; then
+            if out="$(./mcp-publisher publish 2>&1)"; then
+              printf '%s\n' "$out"
               exit 0
             fi
+            printf '%s\n' "$out"
+            case "$out" in
+              *'duplicate version'*)
+                if [ "$RESUME" = "true" ]; then
+                  echo "::notice::version ${VERSION} is already listed on the MCP Registry - nothing left to resume."
+                  exit 0
+                fi
+                echo "::error::the MCP Registry already lists version ${VERSION}. Listings are immutable, so ${TAG} cannot claim it: publish a new version rather than trying to overwrite this one."
+                exit 1
+                ;;
+            esac
             echo "Publish attempt ${attempt} failed; retrying in 30s."
             sleep 30
           done
-          echo "::error::mcp-publisher failed three times. npm is already published, so once the cause is fixed re-run this workflow via workflow_dispatch on the tag with mode 'resume' - not by re-tagging."
+          echo "::error::mcp-publisher failed three times. npm is already published, so do not re-tag. Fix the cause on the default branch, then: gh workflow run release.yml --ref main -f mode=resume -f tag=$TAG"
           exit 1

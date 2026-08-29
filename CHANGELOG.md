@@ -8,19 +8,41 @@ and its [milestones](https://github.com/IvanBBaev/facebook-mcp/milestones); the 
 
 ### Fixed
 
-- **Release rail: a recovery path for a release whose npm half already
-  succeeded.** `npm publish` is one-shot, so when a later job failed there was no
-  way to finish the release: a plain re-run of the failed jobs is refused by
-  GitHub once the run is that old, and re-tagging dies on the npm step before it
-  reaches anything else. `workflow_dispatch` now takes a `mode` input — `resume`
-  runs `github-release` and `mcp-registry` for real against the tarball that is
-  already public, and leaves npm alone. The default stays `rehearsal`, which
-  publishes nothing.
+- **Release rail: a recovery path for a registry listing that a re-run cannot
+  fix.** `npm publish` is one-shot, so once it succeeds the release cannot be
+  re-cut: a re-tag dies on the npm step before it reaches anything else.
+  Re-running the failed jobs from the Actions UI is the normal recovery and it
+  usually works, but it replays the workflow file _as it was_, so it cannot pick
+  up a fix for whatever failed. `workflow_dispatch` now takes `mode: resume` plus
+  a `tag` input: dispatched from the default branch it runs today's rail, checks
+  out the release tag, leaves npm alone, and re-runs `mcp-registry` against the
+  tarball that is already public. The default stays `rehearsal`, which publishes
+  nothing.
+
+  Resume deliberately stops at the registry rather than covering the whole
+  release. `attest-build-provenance` derives its statement from the run's own
+  context and has no ref override, so a bundle rebuilt during a resume — which is
+  dispatched from a branch — would be attested as coming from `refs/heads/main`
+  while its bytes came from the tag's checkout: a signed, publicly verifiable
+  claim that is false. `bundle` and `github-release` are therefore skipped on a
+  resume, and a failed Release is recovered by re-running that job, which replays
+  the original context and keeps the attestation truthful. What a re-run cannot
+  do is pick up a workflow fix — which is exactly the registry's failure mode,
+  and why the registry is the job that needs a dispatch-based recovery.
+
+- **Release rail: a duplicate MCP Registry listing is no longer a silent
+  ambiguity.** The registry is append-only — a version may be listed once, and a
+  second publish is rejected with `cannot publish duplicate version` — so the
+  publish step now reads that response instead of failing on it blindly: during a
+  resume it is success, because the listing the run was sent to create exists,
+  and on a tag push it is a hard error naming the real problem, because it means
+  the version was listed before this tag ran.
 - **Release rail: the wait for npm CDN propagation was too short.** A scope's
   first package is far slower to appear than a new version of an existing one —
   0.7.0 took 5m17s against a 200-second window — so `mcp-registry` failed on a
-  release that had otherwise succeeded. The window is now 10 minutes; erring long
-  costs runner minutes, erring short costs a manual recovery run.
+  release that had otherwise succeeded, and only went through on a re-run once
+  the tarball had propagated. The window is now 10 minutes; erring long costs
+  runner minutes, erring short costs a manual recovery run.
 
 ## [0.7.0] - 2026-08-25
 

@@ -14,9 +14,10 @@ use the right channel below so issues stay searchable and triage stays sane.
 - **Operator procedures** — the runbooks in
   [`docs/runbooks/`](docs/runbooks/README.md) cover credential rotation, halting
   writes, and clean uninstall.
-- **Diagnostics** — run the doctor / `facebook_whoami` flow first; it reports
-  token type, validity, scopes, expiry, and which tools will and won't work. Its
-  output (with secrets redacted) is exactly what a good bug report needs.
+- **Diagnostics** — run the doctor / `facebook_whoami` flow first
+  (`npx -y @ivanbaev/facebook-mcp doctor`); it reports token type, validity,
+  scopes, expiry, and which tools will and won't work. Its output (with secrets
+  redacted) is exactly what a good bug report needs.
 
 ## Where to get help
 
@@ -45,7 +46,7 @@ that promise was fixed **before** launch rather than after enthusiasm ran out
 
 - The **minimum maintained core** is `core` + `reader` + `posts` + `insights`.
   These packages get bug fixes and Meta-changelog upkeep for as long as the
-  project is published at all.
+  project stays published on npm.
 - `moderation`, `messages` and `ads` ship on the same terms as everything else
   today, but they are the packages a scope reduction would touch first.
 - At **90 days after launch** the project is measured against a pre-committed
