@@ -166,7 +166,7 @@ interface RawPageAccount {
 /** Fields fetched for a single Page node (doc 06 `facebook_get_page`). */
 const GET_PAGE_FIELDS =
   'id,name,username,category,category_list,about,link,fan_count,followers_count,' +
-  'has_transitioned_to_new_page_experience,video_upload_limits,is_published,' +
+  'has_transitioned_to_new_page_experience,is_published,' +
   'verification_status';
 
 // ---------------------------------------------------------------------------
@@ -303,8 +303,8 @@ export function createCorePackage(opts: CoreVersions): PackageSpec {
     name: 'facebook_get_page',
     title: 'Get Page',
     description:
-      'Fetch metadata for one Page — name, category, follower/fan counts, ' +
-      'publish state, new-Page-experience flag and video upload limits. Accepts ' +
+      'Fetch metadata for one Page — name, category, follower/fan counts, publish ' +
+      'state and new-Page-experience flag. Accepts ' +
       'an optional profile key or Page ID; omitted ⇒ the default Page.',
     inputSchema: z.object({
       profile: z
