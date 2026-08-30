@@ -366,7 +366,13 @@ test('get_page resolves a named profile and fetches that Page node with its toke
   const req = lastJson(fb);
   assert.equal(req.path, '/200');
   assert.equal(req.token, 'EAA-BRAND'); // per-page token (C1)
-  assert.ok(String(req.params?.fields).includes('followers_count'));
+  const fields = String(req.params?.fields);
+  assert.ok(fields.includes('followers_count'));
+  assert.equal(
+    fields.includes('video_upload_limits'),
+    false,
+    'Graph v25 rejects video_upload_limits on the Page node',
+  );
 });
 
 test('get_page with no profile resolves the default Page and echoes profile null', async () => {
