@@ -59,7 +59,7 @@
     },
     {
       "name": "facebook_get_page",
-      "description": "Fetch metadata for one Page — name, category, follower/fan counts, publish state, new-Page-experience flag and video upload limits."
+      "description": "Fetch metadata for one Page — name, category, follower/fan counts, publish state and new-Page-experience flag."
     },
     {
       "name": "facebook_usage",
