@@ -2,7 +2,7 @@
 // insights, reshaped into a compact, flat, model-readable row shape.
 //
 //   * facebook_page_insights — `/{page-id}/insights`: a metric list over a
-//     since/until window (max 90 days), as flat rows or per-metric totals.
+//     since/until window (max 90 days), as flat rows or semantics-aware summaries.
 //   * facebook_post_insights — `/{post-id}/insights`: the same reshape for one
 //     published post.
 //   * facebook_reel_insights — `/{video-id}/video_insights`: the same reshape
@@ -122,7 +122,7 @@ const sinceArg = z
   .min(1)
   .optional()
   .describe(
-    `Start of the window as a calendar date "YYYY-MM-DD" (inclusive, Page timezone). Omitted ⇒ Graph's own default window. The since..until span may not exceed ${String(INSIGHTS_MAX_WINDOW_DAYS)} days per call (checked before the request); read longer histories in slices.`,
+    `Start boundary as a calendar date "YYYY-MM-DD" (inclusive). Insights uses a [since, until) range; Page period=day boundaries are Pacific Time. Omitted ⇒ Graph's own default window. The elapsed since..until span may not exceed ${String(INSIGHTS_MAX_WINDOW_DAYS)} days per call (checked before the request); read longer histories in slices.`,
   );
 
 const untilArg = z
@@ -130,14 +130,14 @@ const untilArg = z
   .min(1)
   .optional()
   .describe(
-    'End of the window as a calendar date "YYYY-MM-DD". Each returned `date` is the END of the period the value covers, so a window reaching today ends in a partial, still-being-computed bucket. Omitted ⇒ today.',
+    'Exclusive end boundary as a calendar date "YYYY-MM-DD". Insights uses [since, until): for Page period=day, an until of 2026-08-30 includes the 2026-08-29 Pacific day but not 2026-08-30. Each returned `date` is Graph\'s exclusive end boundary. Omitted ⇒ Graph\'s default/live tail.',
   );
 
 const aggregateArg = z
   .boolean()
   .optional()
   .describe(
-    'True ⇒ return per-metric totals only (period, points, total, first/last boundary) and NO per-point rows. Use it for wide windows or many metrics: it is the cheapest way to stay inside the result budget when a daily series would otherwise be truncated.',
+    'True ⇒ return per-metric summaries only and NO per-point rows. The summary is semantics-aware: non-overlapping flow buckets may be summed, gauge/snapshot metrics use the latest value, rolling windows are not double-counted, and unknown multi-point metrics are left unaggregated rather than guessed. Use it for wide windows or many metrics when the daily rows would otherwise be truncated.',
   );
 
 const maxRowsArg = z
@@ -147,7 +147,7 @@ const maxRowsArg = z
   .max(INSIGHTS_MAX_ROWS)
   .optional()
   .describe(
-    `Lower the per-point row cap for this call (1-${String(INSIGHTS_MAX_ROWS)}; the default and the ceiling are both ${String(INSIGHTS_MAX_ROWS)} — this argument can only shrink it). Rows past the cap are dropped and the result reports how many; prefer aggregate:true over a tiny cap when you only need totals.`,
+    `Lower the per-point row cap for this call (1-${String(INSIGHTS_MAX_ROWS)}; the default and the ceiling are both ${String(INSIGHTS_MAX_ROWS)} — this argument can only shrink it). Rows past the cap are dropped and the result reports how many; prefer aggregate:true over a tiny cap when you only need per-metric summaries.`,
   );
 
 /**
@@ -292,8 +292,11 @@ export function createInsightsPackage(): PackageSpec {
     description:
       'Read Graph insights for one Page in a compact flat shape: one row per ' +
       'metric per data point ({metric, date, value}, plus `breakdown` for ' +
-      'by-action-type metrics) and one summary per metric (period, points, ' +
-      'total). Set aggregate:true for totals only. The window is since/until ' +
+      'by-action-type metrics) and one semantics-aware summary per metric. ' +
+      'Summaries state their aggregation method; follower stock/gauges are never ' +
+      'summed, rolling windows are not double-counted, and unknown multi-point ' +
+      'metrics are left unaggregated rather than guessed. Set aggregate:true to ' +
+      'omit rows and return summaries only. The window is [since, until), with ' +
       `calendar dates, at most ${String(INSIGHTS_MAX_WINDOW_DAYS)} days per call. ` +
       'Metric names renamed by the 2024-09 / 2025-11 / 2026-06 waves are answered ' +
       'with their replacement instead of a Graph error, and a metric Graph ' +
@@ -314,8 +317,9 @@ export function createInsightsPackage(): PackageSpec {
     description:
       'Read Graph insights for one published post (post_media_view, post_clicks, ' +
       'post_reactions_by_type_total, video metrics, ...) in the same compact flat ' +
-      'shape as facebook_page_insights: rows plus per-metric summaries, or totals ' +
-      'only with aggregate:true. The default period is "lifetime" — one ' +
+      'shape as facebook_page_insights: rows plus semantics-aware per-metric ' +
+      'summaries, or summaries only with aggregate:true. The default period is ' +
+      '"lifetime" — one ' +
       'cumulative value per metric. Post metrics lag minutes to hours after ' +
       'publishing, so empty series on a fresh post are normal and are flagged as ' +
       'such rather than reported as zeros. Reel metrics are NOT reachable through ' +
@@ -335,8 +339,9 @@ export function createInsightsPackage(): PackageSpec {
       'edge Reel metrics actually live on, which facebook_post_insights cannot ' +
       'reach. Takes the VIDEO id (digits only, as returned by ' +
       'facebook_create_reel), NOT a "{page-id}_{post-id}" post ID. Same compact ' +
-      'shape as the other insights tools: flat rows plus one summary per metric, ' +
-      'or totals only with aggregate:true. The default period is "lifetime", ' +
+      'shape as the other insights tools: flat rows plus one semantics-aware ' +
+      'summary per metric, or summaries only with aggregate:true. The default ' +
+      'period is "lifetime", ' +
       'because plays and watch time are cumulative counters rather than a daily ' +
       'series. Metric names are their own vocabulary — page/post names do not ' +
       "transfer — and Meta's reference lists blue_reels_play_count, " +
