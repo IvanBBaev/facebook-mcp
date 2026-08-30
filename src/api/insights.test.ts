@@ -148,24 +148,23 @@ test('reshapeInsights carries period, totals and exact boundaries once per metri
     ),
   );
 
-  assert.deepEqual(out.metrics, [
-    {
-      metric: 'page_media_view',
-      period: 'day',
-      points: 2,
-      total: 210,
-      firstEnd: end('2026-07-01'),
-      lastEnd: end('2026-07-02'),
-    },
-    {
-      metric: 'page_follows',
-      period: 'week',
-      points: 1,
-      total: 4,
-      firstEnd: end('2026-07-07'),
-      lastEnd: end('2026-07-07'),
-    },
-  ]);
+  const views = out.metrics[0];
+  assert.equal(views?.kind, 'flow');
+  assert.equal(views?.aggregation, 'sum');
+  assert.equal(views?.value, 210);
+  assert.equal(views?.total, 210);
+  assert.equal(views?.firstValue, 120);
+  assert.equal(views?.lastValue, 90);
+  assert.equal(views?.firstEnd, end('2026-07-01'));
+  assert.equal(views?.lastEnd, end('2026-07-02'));
+
+  const followers = out.metrics[1];
+  assert.equal(followers?.kind, 'gauge');
+  assert.equal(followers?.aggregation, 'single');
+  assert.equal(followers?.value, 4);
+  assert.equal(followers?.total, undefined, 'a follower snapshot is never summed');
+  assert.equal(followers?.firstEnd, end('2026-07-07'));
+  assert.equal(followers?.lastEnd, end('2026-07-07'));
 });
 
 test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
@@ -198,7 +197,13 @@ test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
     },
   ]);
   assert.equal(out.metrics[0]?.breakdowns, 3);
-  assert.equal(out.metrics[0]?.total, 8);
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.equal(
+    out.metrics[0]?.total,
+    undefined,
+    'breakdown keys are not assumed additive',
+  );
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /breakdown keys/);
   assert.equal(out.metrics[0]?.points, 3);
 });
 
@@ -221,7 +226,12 @@ test('reshapeInsights joins nested breakdown keys and guards excessive depth', (
     out.rows.find((row) => row.breakdown === 'deep/a/b')?.value,
     '[nested breakdown omitted]',
   );
-  assert.equal(out.metrics[0]?.total, 7, 'the placeholder stays out of the total');
+  assert.equal(
+    out.metrics[0]?.total,
+    undefined,
+    'partial/non-numeric breakdowns are never totalled',
+  );
+  assert.equal(out.metrics[0]?.aggregation, 'none');
   assert.equal(out.metrics[0]?.nonNumeric, true);
 });
 
@@ -261,7 +271,13 @@ test('reshapeInsights keeps non-numeric values as strings and flags them', () =>
 
   assert.equal(out.rows[1]?.value, 'n/a');
   assert.equal(out.metrics[0]?.nonNumeric, true);
-  assert.equal(out.metrics[0]?.total, 5, 'non-numeric points stay out of the total');
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.equal(
+    out.metrics[0]?.total,
+    undefined,
+    'a partial numeric subset must not masquerade as a range total',
+  );
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /non-numeric/);
 });
 
 test('reshapeInsights records a metric with no values as an empty series', () => {
@@ -271,7 +287,13 @@ test('reshapeInsights records a metric with no values as an empty series', () =>
   assert.equal(out.metrics[0]?.firstEnd, undefined);
   assert.deepEqual(out.rows, []);
   assert.deepEqual(out.metrics, [
-    { metric: 'page_media_view', period: 'day', points: 0 },
+    {
+      metric: 'page_media_view',
+      period: 'day',
+      points: 0,
+      kind: 'flow',
+      aggregation: 'none',
+    },
   ]);
 });
 
@@ -293,7 +315,104 @@ test('reshapeInsights survives malformed bodies without throwing', () => {
   const unnamed = reshapeInsights({ data: [{ period: 'day', values: [] }] });
   assert.deepEqual(unnamed.metrics, [], 'an entry with no name is skipped');
   const noValues = reshapeInsights({ data: [{ name: 'm', values: 'x' }] });
-  assert.deepEqual(noValues.metrics, [{ metric: 'm', period: 'unknown', points: 0 }]);
+  assert.deepEqual(noValues.metrics, [
+    { metric: 'm', period: 'unknown', points: 0, kind: 'unknown', aggregation: 'none' },
+  ]);
+});
+
+test('fetchInsights reconciles follower stock against daily follow flows without summing the stock', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk(
+      insightsBody(
+        series('page_follows', 'day', [
+          [end('2026-07-01'), 881],
+          [end('2026-07-02'), 880],
+          [end('2026-07-03'), 882],
+        ]),
+        series('page_daily_follows', 'day', [
+          [end('2026-07-01'), 0],
+          [end('2026-07-02'), 0],
+          [end('2026-07-03'), 2],
+        ]),
+        series('page_daily_unfollows', 'day', [
+          [end('2026-07-01'), 0],
+          [end('2026-07-02'), 1],
+          [end('2026-07-03'), 0],
+        ]),
+      ),
+    ),
+  );
+
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({
+      metrics: ['page_follows', 'page_daily_follows', 'page_daily_unfollows'],
+      period: 'day',
+      aggregate: true,
+    }),
+  );
+
+  const stock = result.metrics.find((metric) => metric.metric === 'page_follows');
+  assert.equal(stock?.aggregation, 'latest');
+  assert.equal(stock?.value, 882);
+  assert.equal(
+    stock?.total,
+    undefined,
+    '881+880+882 must never be reported as a follower total',
+  );
+  assert.equal(stock?.change, 1);
+  assert.deepEqual(result.derived?.followers, {
+    start: 881,
+    end: 882,
+    stockChange: 1,
+    follows: 2,
+    unfollows: 1,
+    netFlow: 1,
+    discrepancy: 0,
+    consistent: true,
+    note: 'Follower stock change reconciles exactly with daily follows minus daily unfollows for the returned buckets.',
+  });
+});
+
+test('rolling flow windows report the latest window instead of double-counting overlaps', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'days_28', [
+        [end('2026-07-01'), 1000],
+        [end('2026-07-02'), 1100],
+      ]),
+    ),
+  );
+
+  const summary = out.metrics[0];
+  assert.equal(summary?.kind, 'flow');
+  assert.equal(summary?.aggregation, 'latest_window');
+  assert.equal(summary?.value, 1100);
+  assert.equal(summary?.total, undefined);
+  assert.match(summary?.aggregationNote ?? '', /rolling windows.*not the sum/);
+});
+
+test('unknown multi-point metrics are not guessed into totals', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('future_metric_meta_added_yesterday', 'day', [
+        [end('2026-07-01'), 10],
+        [end('2026-07-02'), 20],
+      ]),
+    ),
+  );
+
+  const summary = out.metrics[0];
+  assert.equal(summary?.kind, 'unknown');
+  assert.equal(summary?.aggregation, 'none');
+  assert.equal(summary?.value, undefined);
+  assert.equal(summary?.total, undefined);
+  assert.match(
+    summary?.aggregationNote ?? '',
+    /additivity is not in the verified semantics table/,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -326,13 +445,13 @@ test('capRows never emits a zero-row cap for a nonsense limit', () => {
 // 3. checkWindow — the 90-day ceiling (CC-INS-5)
 // ---------------------------------------------------------------------------
 
-test('checkWindow echoes the window and computes an inclusive day span', () => {
+test('checkWindow echoes [since, until) and computes the boundary span', () => {
   const window = checkWindow({ since: '2026-07-01', until: '2026-07-10', nowMs: NOW });
-  assert.deepEqual(window, { since: '2026-07-01', until: '2026-07-10', days: 10 });
+  assert.deepEqual(window, { since: '2026-07-01', until: '2026-07-10', days: 9 });
 });
 
 test('checkWindow measures a lone since against today and omits days without since', () => {
-  assert.equal(checkWindow({ since: '2026-07-18', nowMs: NOW }).days, 3);
+  assert.equal(checkWindow({ since: '2026-07-18', nowMs: NOW }).days, 2);
   assert.deepEqual(checkWindow({ until: '2026-07-10', nowMs: NOW }), {
     until: '2026-07-10',
   });
@@ -365,16 +484,16 @@ test('checkWindow enforces the documented day ceiling with actionable text', () 
   assert.match(err.message, /slices/);
   assert.equal(err.action?.category, 'validation');
 
-  // Exactly at the ceiling is fine; one day more is not.
+  // Exactly at the [since, until) ceiling is fine; one boundary day more is not.
   const edge = checkWindow({
     since: '2026-07-01',
-    until: '2026-07-03',
+    until: '2026-07-04',
     nowMs: NOW,
     maxDays: 3,
   });
   assert.equal(edge.days, 3);
   throwsGraph(() =>
-    checkWindow({ since: '2026-07-01', until: '2026-07-04', nowMs: NOW, maxDays: 3 }),
+    checkWindow({ since: '2026-07-01', until: '2026-07-05', nowMs: NOW, maxDays: 3 }),
   );
 });
 
@@ -519,7 +638,7 @@ test('fetchInsights returns flat rows plus summaries in series mode', async () =
     { metric: 'page_media_view', date: '2026-07-03', value: 5 },
   ]);
   assert.equal(result.metrics[0]?.total, 15);
-  assert.deepEqual(result.window, { since: '2026-07-01', days: 20 });
+  assert.deepEqual(result.window, { since: '2026-07-01', days: 19 });
   assert.ok(result.notes.includes(PERIOD_BOUNDARY_NOTE));
   assert.deepEqual(result.deprecatedMetrics, []);
   assert.deepEqual(result.unavailableMetrics, []);
@@ -553,13 +672,13 @@ test('fetchInsights aggregate mode returns totals only, with no per-point rows',
   assert.equal(Object.hasOwn(result, 'rows'), false, 'the rows key is absent, not empty');
   assert.equal(result.rowsAvailable, 120);
   assert.equal(result.truncated, false, 'aggregate mode never reports row truncation');
-  assert.deepEqual(
-    result.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
-    [
-      ['page_media_view', 60, 120],
-      ['page_follows', 60, 60],
-    ],
-  );
+  const views = result.metrics.find((metric) => metric.metric === 'page_media_view');
+  assert.equal(views?.aggregation, 'sum');
+  assert.equal(views?.total, 120);
+  const followers = result.metrics.find((metric) => metric.metric === 'page_follows');
+  assert.equal(followers?.aggregation, 'latest');
+  assert.equal(followers?.value, 1);
+  assert.equal(followers?.total, undefined);
   assert.equal(
     result.notes.some((note) => note.includes('Row cap reached')),
     false,
@@ -1037,11 +1156,17 @@ test('the reel scope shares the reshape contract: rows, cap and aggregate', asyn
   assert.equal(capped.rowsAvailable, 40);
   assert.equal(capped.truncated, true);
 
-  const totals = await fetchInsights(fake.fn, reelRequest({ aggregate: true }));
-  assert.equal(totals.mode, 'aggregate');
-  assert.equal(totals.rows, undefined);
-  assert.deepEqual(
-    totals.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
-    [['post_video_view_time', 40, 120]],
+  const summary = await fetchInsights(fake.fn, reelRequest({ aggregate: true }));
+  assert.equal(summary.mode, 'aggregate');
+  assert.equal(summary.rows, undefined);
+  const metric = summary.metrics[0];
+  assert.equal(metric?.metric, 'post_video_view_time');
+  assert.equal(metric?.points, 40);
+  assert.equal(metric?.aggregation, 'latest');
+  assert.equal(metric?.value, 3);
+  assert.equal(
+    metric?.total,
+    undefined,
+    'lifetime observations are cumulative and must not be summed',
   );
 });
