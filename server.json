@@ -33,7 +33,7 @@
         },
         {
           "name": "FB_PAGE_TOKEN",
-          "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured.",
+          "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured. It belongs to exactly one Page, so set FB_PAGE_ID to that Page ID alongside it (the doctor / facebook_whoami reports it as the acting Page); a Page token without its Page ID is bound to nothing.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
@@ -53,7 +53,7 @@
         },
         {
           "name": "FB_PAGE_ID",
-          "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument.",
+          "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument. Required when FB_PAGE_TOKEN is the only credential: it names the Page that token belongs to.",
           "isRequired": false,
           "format": "string"
         },
@@ -95,7 +95,7 @@
         },
         {
           "name": "FB_CONFIRM_TOKEN",
-          "description": "Operator confirmation token for out-of-band approval of irreversible or spend actions. The server prompts through MCP elicitation where the client supports it; otherwise the caller passes this value as the confirm_token tool argument.",
+          "description": "Operator confirmation token for out-of-band approval of irreversible or spend actions. The server prompts through MCP elicitation where the client supports it; otherwise the caller passes this value as the confirm_token tool argument. At least 16 characters — a shorter value fails startup; mint one with openssl rand -hex 32.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
@@ -120,13 +120,13 @@
         },
         {
           "name": "FB_PACKAGES_DENY",
-          "description": "Comma-separated packages to exclude even when FB_TOOL_PACKAGES enables them. Deny wins over allow.",
+          "description": "Comma-separated packages OR profiles to exclude even when FB_TOOL_PACKAGES enables them; deny wins over allow. Profile names expand here exactly as they do in FB_TOOL_PACKAGES, and a profile beats a same-spelled package, so FB_PACKAGES_DENY=core denies the whole six-package core profile rather than the single core package. The core package is then forced back on regardless, because its identity and diagnostic tools are what you need to debug the surface you just narrowed. An unrecognized name is a startup error, not a silently ignored token.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "FB_PACKAGES_READONLY",
-          "description": "Comma-separated packages whose write tools are not registered at all; the read tools of those packages stay available.",
+          "description": "Comma-separated packages OR profiles whose write tools are not registered at all; the read tools of those packages stay available. Profile names expand as they do in FB_TOOL_PACKAGES, so FB_PACKAGES_READONLY=core makes every default package read-only in one token. An unrecognized name is a startup error.",
           "isRequired": false,
           "format": "string"
         },
@@ -140,7 +140,7 @@
         },
         {
           "name": "FB_HTTP_TOKEN",
-          "description": "Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it).",
+          "description": "Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it). At least 16 characters — a shorter value is refused (under stdio it is dropped with a warning); mint one with openssl rand -hex 32.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
@@ -160,7 +160,7 @@
         },
         {
           "name": "FB_ADS_BUDGET_CEILING",
-          "description": "Hard ceiling for any ads budget write, in minor currency units (e.g. cents). Non-negative integer; a write above it is refused.",
+          "description": "Hard ceiling for any ads budget write, in minor units of the ad account's own currency (e.g. cents for USD). Non-negative integer; a write above it is refused. No currency conversion: size it for the account's currency (1000 is $10 but only 1000 JPY).",
           "isRequired": false,
           "format": "number"
         },

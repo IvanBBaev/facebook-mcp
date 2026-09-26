@@ -172,7 +172,8 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
 **Total as shipped: 30 model-facing tools in the default `core` profile** (core 4
 + posts 8 + reader 4 + insights 3 + moderation 8 + messages 3), with the opt-in
 `ads` package adding 7 more in 1.1 — **37 across all 7 packages**, split 23 read
-/ 14 write (10 reversible, 4 irreversible, 0 spend). Deliberately smaller than the 100+
+/ 14 write (10 reversible, 3 irreversible, 1 spend — the single `spend` tool is
+`facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Stories
 (pending Phase 2 verification), Events, Live video, albums / photo-library reads,

@@ -33,7 +33,7 @@
 //     metadata; binary payloads are never inlined and the CDN URLs are flagged
 //     as short-lived.
 
-import { GraphApiError } from '../core/index.js';
+import { ambiguousWriteAction, errorMessageOf, GraphApiError } from '../core/index.js';
 import type {
   ErrorAction,
   FbRequestFn,
@@ -233,12 +233,74 @@ export interface ConversationRecord {
 // 4. Pure shaping helpers
 // ---------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** A string field off the wire, or `undefined` when Graph sent something else. */
+function readString(raw: unknown): string | undefined {
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+/**
+ * A NON-EMPTY string field off the wire, else `undefined`. The sticker URL, an
+ * attachment's file name and a share's link and title are all declared
+ * `string` and were all read with `.length` — on a `null` that is a TypeError,
+ * thrown inside `fetchPage`'s shaping pass, which costs the caller the whole
+ * thread page for one malformed node. The send tool pays twice: its window
+ * probe reads the same page, so one such node made `facebook_send_message`
+ * fail before it could even plan (CC-NET-2).
+ */
+function readText(raw: unknown): string | undefined {
+  const text = readString(raw);
+  return text !== undefined && text.length > 0 ? text : undefined;
+}
+
+/**
+ * A Graph node id off the wire (CC-NET-2). Strings only, and never coerced. A
+ * sender id here becomes the `recipient` of a reply and a conversation id
+ * becomes the thread the operator polls next, so a wrong id is not a cosmetic
+ * problem. A number cannot be rescued: Graph ids run past the safe-integer
+ * range, so a numeric id has already lost digits by the time `JSON.parse` is
+ * finished with it, and `String(n)` would mint a plausible-looking id that
+ * addresses nobody. Reporting no id is the only honest answer — the same call
+ * `graphId` makes in `core/auth.ts` for the token-debug identity.
+ */
+function graphId(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * The usable rows of a Graph edge. `fbRequest<T>` CASTS the body, so `data`
+ * being an array of objects is a hope about the wire, not a fact about it: a
+ * non-array reaches `.map` as a `TypeError` and a `null` row reaches the shaper
+ * as one. Either would cost the caller the whole page — already paid for with a
+ * metered Graph call — instead of the one malformed edge (CC-NET-2).
+ */
+function edgeRows<T>(edge: RawEdge<T> | undefined): readonly T[] {
+  const rows: unknown = edge?.data;
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row): row is T => isRecord(row));
+}
+
+/**
+ * An ISO-8601 date-time carrying an EXPLICIT offset (`Z`, `+0000`, `+05:30`).
+ * Anything else is refused before it reaches `Date.parse`, which reads an
+ * offset-less date-time in the server's LOCAL zone and turns bare numbers and
+ * month names (`"12"`, `"July 28"`) into dates in 2001 — either one a confident
+ * epoch that would shift, or invent, the 24-hour window verdict (CC-MSG-1).
+ */
+const GRAPH_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
 /**
  * Parse a Graph timestamp (`2026-07-28T10:00:00+0000`) to epoch ms. Returns
- * `undefined` for anything unparseable rather than propagating `NaN`.
+ * `undefined` for anything unparseable or zone-less rather than propagating
+ * `NaN` or guessing a zone — and takes `unknown`, because the declared `string`
+ * is only a cast (CC-NET-2).
  */
-export function parseGraphTime(value: string | undefined): number | undefined {
-  if (value === undefined || value.length === 0) return undefined;
+export function parseGraphTime(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !GRAPH_TIME.test(value)) return undefined;
   // Graph emits `+0000`; normalize to the `+00:00` form every engine accepts.
   const normalized = value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
   const ms = Date.parse(normalized);
@@ -247,16 +309,18 @@ export function parseGraphTime(value: string | undefined): number | undefined {
 
 function shapeParticipant(raw: RawParticipant): ParticipantRecord {
   // `email` is intentionally dropped: it is PII the model never needs to reply.
+  const id = graphId(raw.id);
+  const name = readString(raw.name);
   return {
-    ...(raw.id !== undefined ? { id: raw.id } : {}),
-    ...(raw.name !== undefined ? { name: raw.name } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(name !== undefined ? { name } : {}),
   };
 }
 
 function shapeParticipants(
   edge: RawEdge<RawParticipant> | undefined,
 ): ParticipantRecord[] {
-  return (edge?.data ?? []).map(shapeParticipant);
+  return edgeRows(edge).map(shapeParticipant);
 }
 
 /** Human-readable byte size for a placeholder (never a precise contract). */
@@ -268,9 +332,49 @@ function formatBytes(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * A MIME type in RFC 6838 token grammar (optionally with `; key=value`
+ * parameters), else `undefined`. The MIME type, dimensions, size and URL of an
+ * attachment are all rendered OUTSIDE the taint envelope, in the placeholder
+ * the model reads as trusted metadata — so each one must look like what it
+ * claims to be, or it is not reported at all. A free-text "MIME type" carrying
+ * a `]` and a sentence would otherwise close the placeholder bracket and speak
+ * with the server's voice (CC-MSG-6).
+ */
+const MIME_TOKEN = '[a-z0-9][a-z0-9!#$&^_.+-]{0,126}';
+const MIME_TYPE = new RegExp(
+  `^${MIME_TOKEN}/${MIME_TOKEN}(?:\\s*;\\s*${MIME_TOKEN}=${MIME_TOKEN})*$`,
+  'i',
+);
+
+function readMimeType(raw: unknown): string | undefined {
+  return typeof raw === 'string' && MIME_TYPE.test(raw) ? raw : undefined;
+}
+
+/** A finite, non-negative number (a size or a pixel dimension), else `undefined`. */
+function readCount(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
+}
+
+/**
+ * An absolute http(s) URL of printable ASCII only, else `undefined`. A CDN link
+ * is percent-encoded by construction; whitespace, a line break or a control
+ * character in one means it is not a CDN link, and it must not ride into the
+ * trusted placeholder line (CC-MSG-6).
+ */
+function readUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !/^[\x21-\x7e]+$/.test(raw)) return undefined;
+  try {
+    const { protocol } = new URL(raw);
+    return protocol === 'https:' || protocol === 'http:' ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Classify an attachment from its media sub-objects and MIME type. */
 export function attachmentKind(raw: RawAttachment): AttachmentKind {
-  const mime = raw.mime_type?.toLowerCase() ?? '';
+  const mime = readMimeType(raw.mime_type)?.toLowerCase() ?? '';
   if (raw.image_data !== undefined || mime.startsWith('image/')) return 'image';
   if (raw.video_data !== undefined || mime.startsWith('video/')) return 'video';
   if (mime.startsWith('audio/')) return 'audio';
@@ -299,14 +403,22 @@ export function formatAttachmentPlaceholder(parts: {
 
 function shapeAttachment(raw: RawAttachment): AttachmentPlaceholder {
   const kind = attachmentKind(raw);
-  const media = raw.image_data ?? raw.video_data;
-  const url = media?.url ?? raw.file_url;
+  const media: RawMediaData | undefined = isRecord(raw.image_data)
+    ? raw.image_data
+    : isRecord(raw.video_data)
+      ? raw.video_data
+      : undefined;
+  const url = readUrl(media?.url) ?? readUrl(raw.file_url);
+  const mimeType = readMimeType(raw.mime_type);
+  const sizeBytes = readCount(raw.size);
+  const width = readCount(media?.width);
+  const height = readCount(media?.height);
   const parts = {
     kind,
-    ...(raw.mime_type !== undefined ? { mimeType: raw.mime_type } : {}),
-    ...(raw.size !== undefined ? { sizeBytes: raw.size } : {}),
-    ...(media?.width !== undefined ? { width: media.width } : {}),
-    ...(media?.height !== undefined ? { height: media.height } : {}),
+    ...(mimeType !== undefined ? { mimeType } : {}),
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
     ...(url !== undefined ? { url } : {}),
   };
   return { ...parts, placeholder: formatAttachmentPlaceholder(parts) };
@@ -318,19 +430,20 @@ function shapeAttachment(raw: RawAttachment): AttachmentPlaceholder {
  * Never inlines a payload; each entry carries only metadata plus a CDN URL.
  */
 export function summariseAttachments(raw: RawMessage): AttachmentPlaceholder[] {
-  const out: AttachmentPlaceholder[] = (raw.attachments?.data ?? []).map(shapeAttachment);
-  if (raw.sticker !== undefined && raw.sticker.length > 0) {
+  const out: AttachmentPlaceholder[] = edgeRows(raw.attachments).map(shapeAttachment);
+  const sticker = readUrl(raw.sticker);
+  if (sticker !== undefined) {
     out.push({
       kind: 'sticker',
-      url: raw.sticker,
-      placeholder: formatAttachmentPlaceholder({ kind: 'sticker', url: raw.sticker }),
+      url: sticker,
+      placeholder: formatAttachmentPlaceholder({ kind: 'sticker', url: sticker }),
     });
   }
   // A shared link and its title are chosen by the SENDER, not by Meta, so
   // neither may appear in the trusted placeholder line — an arbitrary URL is as
   // attacker-controlled as a message body. Both travel in the untrusted channel
   // built by `attachmentNames` instead.
-  for (let i = 0; i < (raw.shares?.data ?? []).length; i += 1) {
+  for (let i = 0; i < edgeRows(raw.shares).length; i += 1) {
     out.push({
       kind: 'share',
       placeholder: formatAttachmentPlaceholder({ kind: 'share' }),
@@ -347,19 +460,21 @@ export function summariseAttachments(raw: RawMessage): AttachmentPlaceholder[] {
  */
 export function attachmentNames(raw: RawMessage): AttachmentNameRef[] {
   const names: AttachmentNameRef[] = [];
-  const attachments = raw.attachments?.data ?? [];
+  const attachments = edgeRows(raw.attachments);
   attachments.forEach((att, index) => {
-    if (att.name !== undefined && att.name.length > 0) {
-      names.push({ index, name: att.name });
-    }
+    const name = readText(att.name);
+    if (name !== undefined) names.push({ index, name });
   });
   // `summariseAttachments` emits attachments, then the sticker, then the shares;
   // mirror that layout so `index` addresses the same placeholder in both lists.
-  const hasSticker = raw.sticker !== undefined && raw.sticker.length > 0;
+  // The sticker test is the same `readUrl` as above on purpose: the two
+  // functions must agree on what counts as a sticker, or the share indexes
+  // drift by one and a title is pinned to the wrong placeholder.
+  const hasSticker = readUrl(raw.sticker) !== undefined;
   const shareOffset = attachments.length + (hasSticker ? 1 : 0);
-  (raw.shares?.data ?? []).forEach((share, offset) => {
-    const parts = [share.name, share.link].filter(
-      (part): part is string => part !== undefined && part.length > 0,
+  edgeRows(raw.shares).forEach((share, offset) => {
+    const parts = [readText(share.name), readText(share.link)].filter(
+      (part): part is string => part !== undefined,
     );
     if (parts.length > 0) {
       names.push({ index: shareOffset + offset, name: parts.join(' — ') });
@@ -370,11 +485,13 @@ export function attachmentNames(raw: RawMessage): AttachmentNameRef[] {
 
 export function shapeMessage(raw: RawMessage): MessageRecord {
   const createdAtMs = parseGraphTime(raw.created_time);
+  const id = graphId(raw.id);
+  const createdTime = readString(raw.created_time);
   return {
-    ...(raw.id !== undefined ? { id: raw.id } : {}),
-    ...(raw.created_time !== undefined ? { createdTime: raw.created_time } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(createdTime !== undefined ? { createdTime } : {}),
     ...(createdAtMs !== undefined ? { createdAtMs } : {}),
-    ...(raw.from !== undefined ? { from: shapeParticipant(raw.from) } : {}),
+    ...(isRecord(raw.from) ? { from: shapeParticipant(raw.from) } : {}),
     to: shapeParticipants(raw.to),
     ...(raw.message !== undefined ? { body: raw.message } : {}),
     attachments: summariseAttachments(raw),
@@ -384,9 +501,11 @@ export function shapeMessage(raw: RawMessage): MessageRecord {
 
 export function shapeConversation(raw: RawConversation): ConversationRecord {
   const updatedAtMs = parseGraphTime(raw.updated_time);
+  const id = graphId(raw.id);
+  const updatedTime = readString(raw.updated_time);
   return {
-    ...(raw.id !== undefined ? { id: raw.id } : {}),
-    ...(raw.updated_time !== undefined ? { updatedTime: raw.updated_time } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(updatedTime !== undefined ? { updatedTime } : {}),
     ...(updatedAtMs !== undefined ? { updatedAtMs } : {}),
     ...(raw.unread_count !== undefined ? { unreadCount: raw.unread_count } : {}),
     ...(raw.message_count !== undefined ? { messageCount: raw.message_count } : {}),
@@ -426,8 +545,9 @@ export interface MessagingWindow {
 /**
  * Decide client-side whether a plain RESPONSE send is allowed, using the injected
  * clock (never `Date.now()`). `unknown` is a first-class answer: without a
- * last-inbound timestamp the server does not guess, it says so and lets Graph be
- * the authority.
+ * last-inbound timestamp — or with one that cannot be true, because it is ahead
+ * of the clock — the server does not guess, it says so and lets Graph be the
+ * authority.
  */
 export function evaluateMessagingWindow(input: {
   readonly lastInboundAtMs?: number;
@@ -445,6 +565,25 @@ export function evaluateMessagingWindow(input: {
     };
   }
   const ageMs = nowMs - lastInboundAtMs;
+  if (ageMs < 0) {
+    // A last-inbound timestamp AHEAD of the clock cannot be true, so nothing
+    // derived from it is an age. `open` would be the dangerous answer: it hands
+    // back a `closesAtMs` later than the real deadline and the caller sends
+    // untagged on the strength of it. An unusable timestamp is worth exactly
+    // what no timestamp is worth here — Facebook stays the authority.
+    return {
+      status: 'unknown',
+      lastInboundAtMs,
+      ageMs,
+      explanation:
+        'The most recent inbound timestamp is in the future relative to this ' +
+        "server's clock, so the 24-hour standard messaging window could not be " +
+        'verified: one of the two clocks is wrong and the age computed from them ' +
+        'would be meaningless. Facebook remains the authority: if the window is ' +
+        'closed the send is rejected. ' +
+        MESSAGE_TAG_GUIDANCE,
+    };
+  }
   const closesAtMs = lastInboundAtMs + STANDARD_MESSAGING_WINDOW_MS;
   const hours = (ageMs / (60 * 60 * 1000)).toFixed(1);
   if (ageMs > STANDARD_MESSAGING_WINDOW_MS) {
@@ -595,8 +734,38 @@ function reclassify(
     ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
     httpStatus: err.httpStatus,
     action,
+    // Meta's own headline and reason: on a refusal they are often the only
+    // human-readable explanation, so a rebuilt error must not drop them.
+    ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+    ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
     cause: err,
   });
+}
+
+/** Where a possibly-delivered private message can be verified (never the feed). */
+const SEND_VERIFY_TOOL = 'facebook_get_conversation';
+
+/** The transport detail inside the standard `ambiguousWriteAction` guidance. */
+const AMBIGUOUS_DETAIL =
+  /^Write outcome unknown \((.*)\) — the request reached Facebook/s;
+
+/**
+ * Point an ambiguous send at the conversation instead of the transport default
+ * (`facebook_list_posts`, where a DM never appears). The category, the
+ * not-retryable verdict and the transport detail are all kept; when the guidance
+ * is not the standard shape only the verify tool is swapped, so no text is lost.
+ */
+function ambiguousSendError(err: GraphApiError, action: ErrorAction): GraphApiError {
+  if (action.nextTool === SEND_VERIFY_TOOL) return err;
+  const detail = AMBIGUOUS_DETAIL.exec(action.operatorText)?.[1];
+  const rebuilt: ErrorAction =
+    detail !== undefined
+      ? {
+          ...action,
+          ...ambiguousWriteAction({ verifyTool: SEND_VERIFY_TOOL, detail }),
+        }
+      : { ...action, nextTool: SEND_VERIFY_TOOL };
+  return reclassify(err, err.message, rebuilt);
 }
 
 /**
@@ -616,15 +785,17 @@ export function messagingWindowClosedError(window: MessagingWindow): GraphApiErr
 /**
  * Turn a raw send failure into an actionable one. Window and recipient failures
  * get the specific explanation the corpus demands (CC-MSG-1 / -3); an ambiguous
- * outcome is passed through untouched because the transport already classified it
- * as "may have landed — verify first" (C2 / CC-MSG-2), and everything else is
- * returned unchanged so no information is invented.
+ * outcome keeps the transport's "may have landed — verify first" verdict (C2 /
+ * CC-MSG-2) but names the conversation as the place to verify, and everything
+ * else is returned unchanged so no information is invented.
  */
 export function explainSendFailure(err: unknown): Error {
   if (!(err instanceof GraphApiError)) {
-    return err instanceof Error ? err : new Error(`send failed: ${String(err)}`);
+    return err instanceof Error
+      ? err
+      : new Error(`send failed: ${errorMessageOf(err)}`, { cause: err });
   }
-  if (err.action?.category === 'ambiguous') return err;
+  if (err.action?.category === 'ambiguous') return ambiguousSendError(err, err.action);
   if (isMessagingWindowError(err)) {
     return reclassify(
       err,
@@ -730,9 +901,21 @@ export interface SendMessageResult {
   readonly recipientId?: string;
 }
 
+/**
+ * The send acknowledgement as it actually arrives. The transport casts the
+ * parsed body to the declared type without validating it (`data as T`), so the
+ * fields are `unknown` here on purpose: Graph is free to answer with a null id,
+ * a numeric one, or no body at all, and a wrong assumption here is what turns
+ * an unconfirmed send into a claimed one.
+ */
 interface RawSendResponse {
-  readonly message_id?: string;
-  readonly recipient_id?: string;
+  readonly message_id?: unknown;
+  readonly recipient_id?: unknown;
+}
+
+/** A Graph id counts only when it is a non-empty string; anything else is absent. */
+function sendId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -761,11 +944,16 @@ export async function sendMessage(
   };
   try {
     const res = await fbRequest<RawSendResponse>(req);
+    // An HTTP 200 with an empty body parses to `undefined`, so the acknowledgement
+    // is read defensively: a crash here would report a send that DID go out as a
+    // failure, and an unusable id would report one that did not as confirmed.
+    const ack: RawSendResponse =
+      typeof res.data === 'object' && res.data !== null ? res.data : {};
+    const messageId = sendId(ack.message_id);
+    const recipientId = sendId(ack.recipient_id);
     return {
-      ...(res.data.message_id !== undefined ? { messageId: res.data.message_id } : {}),
-      ...(res.data.recipient_id !== undefined
-        ? { recipientId: res.data.recipient_id }
-        : {}),
+      ...(messageId !== undefined ? { messageId } : {}),
+      ...(recipientId !== undefined ? { recipientId } : {}),
     };
   } catch (err) {
     throw explainSendFailure(err);

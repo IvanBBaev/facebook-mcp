@@ -60,8 +60,9 @@ telemetry — teardown is entirely local:
    directory belongs to you; the server created nothing there, but confirm no
    copies of media you no longer want remain.
 
-> The doctor does not print these paths, so use the platform conventions
-> directly. Config: `$XDG_CONFIG_HOME/facebook-mcp/` (default
+> The doctor prints the credential-file path (`cred file:` in its report) but
+> not the state/journal directory, so use the platform conventions below for the
+> latter. Config: `$XDG_CONFIG_HOME/facebook-mcp/` (default
 > `~/.config/facebook-mcp/`) on POSIX, `%APPDATA%\facebook-mcp\` on Windows.
 > State: `$XDG_STATE_HOME/facebook-mcp/` (default
 > `~/.local/state/facebook-mcp/`) on POSIX, `%LOCALAPPDATA%\facebook-mcp\` on

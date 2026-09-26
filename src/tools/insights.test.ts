@@ -31,6 +31,7 @@ import type {
 } from '../core/index.js';
 import { INSIGHTS_MAX_ROWS, INSIGHTS_MAX_WINDOW_DAYS } from '../api/insights.js';
 import { createInsightsPackage } from './insights.js';
+import { VIDEO_ID_MESSAGE } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -481,6 +482,41 @@ test('page_insights aggregate mode returns per-metric totals and no rows at all'
   assert.equal(noteMatching(parsed, /Row cap reached/), undefined);
 });
 
+test('page_insights aggregate mode reports a rolling-window total as the latest point, and says so', async () => {
+  // `days_28` comes back as one point per day, each already a 28-day window.
+  // Summing 30 of them told the model "3000 views" for a Page that had 100 —
+  // the headline figure of aggregate mode, which the description sells as
+  // "per-metric totals". The total is the newest window and the notes say why.
+  const { fb, ctx } = makeCtx();
+  serve(fb, series('page_media_view', 'days_28', days(30, 100)));
+
+  const parsed = body(
+    await tool('facebook_page_insights').handler(
+      { metrics: ['page_media_view'], period: 'days_28', aggregate: true },
+      ctx,
+    ),
+  );
+
+  assert.deepEqual(
+    summariesOf(parsed).map((m) => [
+      m.metric,
+      m.period,
+      m.points,
+      m.total,
+      m.totalIsLatest,
+    ]),
+    [['page_media_view', 'days_28', 30, 100, true]],
+  );
+  // Matched by wording rather than an imported constant on purpose: reverting
+  // the fix must fail this assertion, not the module load.
+  const note = noteMatching(parsed, /latest point|not a sum/i);
+  assert.ok(
+    note,
+    `expected the rolling-window note in ${JSON.stringify(notesOf(parsed))}`,
+  );
+  assert.match(note, /week|days_28|lifetime/);
+});
+
 test('page_insights enforces the default row cap and says exactly what was dropped', async () => {
   const { fb, ctx } = makeCtx();
   const available = INSIGHTS_MAX_ROWS + 50;
@@ -732,6 +768,73 @@ test('page_insights rejects an over-wide window before issuing any request', asy
   assert.equal(fb.calls.length, 0, 'the ceiling is enforced client-side');
 });
 
+test('page_insights refuses a window that starts after tomorrow instead of blaming the Page for its empty series', async () => {
+  const { fb, ctx } = makeCtx({ nowMs: NOW });
+  // What Graph answers for days that have not happened: accepted, zero points.
+  serve(fb, series('page_media_view', 'day', []));
+
+  await assert.rejects(
+    tool('facebook_page_insights').handler(
+      { metrics: ['page_media_view'], since: '2026-07-25', until: '2026-07-30' },
+      ctx,
+    ),
+    (err: unknown) => {
+      assert.ok(
+        err instanceof GraphApiError,
+        `expected a GraphApiError, got ${String(err)}`,
+      );
+      assert.match(err.message, /2026-07-25/);
+      assert.match(err.message, /future/);
+      assert.match(err.message, /2026-07-20/);
+      assert.equal(err.code, 100);
+      assert.equal(err.action?.retryable, false);
+      return true;
+    },
+  );
+  assert.equal(fb.calls.length, 0, 'a window with no past day in it is never sent');
+
+  // The same refusal on the post and Reel edges, which share the window.
+  await rejects(
+    tool('facebook_post_insights').handler(
+      {
+        metrics: ['post_clicks'],
+        post_id: POST_ID,
+        since: '2026-08-01',
+        until: '2026-08-02',
+      },
+      ctx,
+    ),
+    /future/,
+  );
+  await rejects(
+    tool('facebook_reel_insights').handler(
+      {
+        metrics: ['blue_reels_play_count'],
+        video_id: VIDEO_ID,
+        since: '2026-08-01',
+        until: '2026-08-02',
+      },
+      ctx,
+    ),
+    /future/,
+  );
+  assert.equal(fb.calls.length, 0);
+});
+
+test('page_insights still sends a window starting tomorrow (UTC), which is today in a Page timezone ahead of UTC', async () => {
+  const { fb, ctx } = makeCtx({ nowMs: NOW });
+  serve(fb, series('page_media_view', 'day', days(1, 1)));
+
+  const parsed = body(
+    await tool('facebook_page_insights').handler(
+      { metrics: ['page_media_view'], since: '2026-07-21', until: '2026-07-22' },
+      ctx,
+    ),
+  );
+  assert.equal(fb.calls.length, 1);
+  assert.deepEqual(parsed.window, { since: '2026-07-21', until: '2026-07-22', days: 2 });
+});
+
 test('page_insights surfaces a malformed date as one actionable validation error', async () => {
   const { fb, ctx } = makeCtx();
 
@@ -878,14 +981,14 @@ test('post_insights refuses a permalink URL as a post ID with an actionable mess
       },
       ctx,
     ),
-    /not a URL, a permalink or a query string/,
+    /a URL, a permalink or a query string/,
   );
   await rejects(
     tool('facebook_post_insights').handler(
       { post_id: '111 999', metrics: ['post_media_view'] },
       ctx,
     ),
-    /not a URL, a permalink or a query string/,
+    /a URL, a permalink or a query string/,
   );
   assert.equal(fb.calls.length, 0, 'a malformed ID never reaches Graph');
 });
@@ -901,18 +1004,73 @@ test('post_insights refuses a dot-segment post ID that would escape the API vers
         { post_id: postId, metrics: ['post_media_view'] },
         ctx,
       ),
-      /not a URL, a permalink or a query string/,
+      /a URL, a permalink or a query string/,
     );
   }
-  // A dot inside an otherwise ordinary ID stays legal — this is containment,
-  // not a ban on the character.
+  assert.equal(fb.calls.length, 0, 'no dot-segment ID reached Graph');
+});
+
+test('post_insights refuses a Page username, so the read cannot land on the Page node by its alias', async () => {
+  const { fb, ctx } = makeCtx();
+
+  // Graph resolves `/{vanity}/insights` to the PAGE's insights edge: a Page
+  // username must not pass as a post ID (the reader tools refuse it the same way).
+  for (const postId of [
+    'mybrandpage',
+    'my.brand.page',
+    'my-brand',
+    'brand_page',
+    '111.999',
+  ]) {
+    await rejects(
+      tool('facebook_post_insights').handler(
+        { post_id: postId, metrics: ['post_media_view'] },
+        ctx,
+      ),
+      /not a Page username/,
+    );
+  }
+  assert.equal(fb.calls.length, 0, 'no alias reached Graph');
+
   serve(fb, series('post_media_view', 'lifetime', [[end('2026-07-19'), 1]]));
   await tool('facebook_post_insights').handler(
-    { post_id: '111.999', metrics: ['post_media_view'] },
+    { post_id: '111222333_999', metrics: ['post_media_view'] },
     ctx,
   );
-  assert.equal(lastJson(fb).path, '/111.999/insights');
-  assert.equal(fb.calls.length, 1, 'only the legal ID reached Graph');
+  assert.equal(lastJson(fb).path, '/111222333_999/insights');
+});
+
+test('post_insights refuses a bare numeric post ID before any Graph call', async () => {
+  const { fb, ctx } = makeCtx();
+
+  // `/{post-id}/insights` only resolves for the composite "{page-id}_{post-id}";
+  // a bare number is the un-prefixed half of one, or a video / photo object id,
+  // and Graph answers it with a generic "Unsupported get request" that never
+  // mentions the shape. The mirror of the Reel tool refusing a composite.
+  for (const postId of ['999', VIDEO_ID]) {
+    await rejects(
+      tool('facebook_post_insights').handler(
+        { post_id: postId, metrics: ['post_media_view'] },
+        ctx,
+      ),
+      /composite .*\{page-id\}_\{post-id\}/,
+    );
+    await rejects(
+      tool('facebook_post_insights').handler(
+        { post_id: postId, metrics: ['post_media_view'] },
+        ctx,
+      ),
+      /facebook_list_posts/,
+    );
+    await rejects(
+      tool('facebook_post_insights').handler(
+        { post_id: postId, metrics: ['post_media_view'] },
+        ctx,
+      ),
+      /facebook_reel_insights/,
+    );
+  }
+  assert.equal(fb.calls.length, 0, 'a bare numeric ID never reaches Graph');
 });
 
 test('post_insights explains an empty post result as publish lag, or a Reel', async () => {
@@ -1012,6 +1170,23 @@ test('reel_insights rejects a post ID before any Graph call', async () => {
   assert.equal(fb.calls.length, 0, 'the composite ID never reached Graph');
 });
 
+test('reel_insights rejects a post ID with the shared video-id message', () => {
+  // The shape and the wording come from `./shared.js`, so this tool and
+  // facebook_get_video_status cannot drift back into disagreeing about which
+  // ids are acceptable — only the trailing hint is tool-specific.
+  const rejected = tool('facebook_reel_insights').inputSchema.safeParse({
+    video_id: POST_ID,
+    metrics: ['blue_reels_play_count'],
+  });
+  assert.equal(rejected.success, false);
+  const message = rejected.success ? '' : (rejected.error.issues[0]?.message ?? '');
+  assert.ok(
+    message.startsWith(VIDEO_ID_MESSAGE),
+    `the shared message was not used: ${message}`,
+  );
+  assert.match(message, /facebook_create_reel returns it as/);
+});
+
 test('reel_insights refuses every ID shape that could escape the path', async () => {
   const { fb, ctx } = makeCtx();
   serve(fb, series('blue_reels_play_count', 'lifetime', []));
@@ -1099,9 +1274,11 @@ test('reel_insights shares the reshape contract: rows, cap and aggregate mode', 
   );
   assert.equal(totals.mode, 'aggregate');
   assert.equal(Object.hasOwn(totals, 'rows'), false);
+  // Forty `lifetime` points are forty cumulative snapshots of the same
+  // counter, so the honest total is the newest one — not 40 × 3 = 120.
   assert.deepEqual(
-    summariesOf(totals).map((m) => [m.metric, m.points, m.total]),
-    [['post_video_view_time', 40, 120]],
+    summariesOf(totals).map((m) => [m.metric, m.points, m.total, m.totalIsLatest]),
+    [['post_video_view_time', 40, 3, true]],
   );
 });
 
@@ -1113,4 +1290,98 @@ test('reel_insights description names the edge, the ID and the metric caveat', (
   // The metric list is a snapshot of Meta's reference, not a validated set —
   // saying otherwise would be the exact overclaim this server avoids.
   assert.match(description, /examples, not a whitelist/);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 12 — input-shape honesty
+// ---------------------------------------------------------------------------
+
+test('metrics refuse a comma-packed entry instead of smuggling several names past the checks', async () => {
+  const { fb, ctx } = makeCtx();
+  serve(
+    fb,
+    series('page_media_view', 'day', days(1, 3)),
+    series('page_follows', 'day', days(1, 5)),
+  );
+
+  // One entry holding two names bypasses the rename table (a dead name reaches
+  // Graph and fails the whole call), the 20-name cap and the returned-name
+  // check: Graph answers both metrics, but the packed string matches neither
+  // entry, so the model would get the rows AND a note calling the name invalid.
+  for (const packed of [
+    'page_impressions,page_follows',
+    'page_media_view, page_follows',
+  ]) {
+    await rejects(
+      tool('facebook_page_insights').handler({ metrics: [packed] }, ctx),
+      /one metric name per array entry/,
+    );
+  }
+  assert.equal(fb.calls.length, 0, 'a packed metric list never reaches Graph');
+});
+
+test("post_insights refuses a post whose Page prefix is not the resolved Page's", async () => {
+  const { fb, ctx } = makeCtx();
+  serve(fb, series('post_media_view', 'lifetime', [[end('2026-07-19'), 1]]));
+
+  // The resolved Page's token cannot read another Page's post: Graph answers
+  // with a generic permission / object error that never says "wrong profile".
+  const foreign = '444555666_999';
+  for (const pattern of [
+    /belongs to Page 444555666/,
+    new RegExp(`resolved Page is ${PAGE_ID}`),
+    /`profile`/,
+  ]) {
+    await rejects(
+      tool('facebook_post_insights').handler(
+        { post_id: foreign, metrics: ['post_media_view'] },
+        ctx,
+      ),
+      pattern,
+    );
+  }
+  assert.equal(fb.calls.length, 0, 'the foreign post never reached Graph');
+});
+
+test('reel_insights names facebook_list_reels as the source of an existing Reel id', () => {
+  const rejected = tool('facebook_reel_insights').inputSchema.safeParse({
+    video_id: POST_ID,
+    metrics: ['blue_reels_play_count'],
+  });
+  assert.equal(rejected.success, false);
+  const message = rejected.success ? '' : (rejected.error.issues[0]?.message ?? '');
+  assert.match(message, /facebook_list_reels/);
+  assert.match(tool('facebook_reel_insights').description, /facebook_list_reels/);
+});
+
+test('post_insights re-reads the rest when Graph rejects one metric by position', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) =>
+      req.protocol === 'json' && req.params?.metric === 'post_clicks,page_media_view',
+    fbErr(
+      new GraphApiError('(#100) metric[1] must be one of the following values: a', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+  fb.on(
+    (req) => req.protocol === 'json' && req.params?.metric === 'post_clicks',
+    fbOk(insightsBody(series('post_clicks', 'lifetime', [[end('2026-07-10'), 12]]))),
+  );
+
+  const parsed = body(
+    await tool('facebook_post_insights').handler(
+      { metrics: ['post_clicks', 'page_media_view'], post_id: POST_ID },
+      ctx,
+    ),
+  );
+  assert.deepEqual(
+    rowsOf(parsed).map((row) => [row.metric, row.value]),
+    [['post_clicks', 12]],
+  );
+  const rejected = parsed.rejectedMetrics as readonly Record<string, unknown>[];
+  assert.equal(rejected[0]?.metric, 'page_media_view');
+  assert.match(String(rejected[0]?.reason), /Page-level metric.*facebook_page_insights/);
 });

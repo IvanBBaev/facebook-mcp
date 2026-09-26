@@ -49,7 +49,12 @@
 // `verification` / `verified` flag. Anything marked `assumed` is an open Phase-2
 // question (G-TOOL-3) and is written down here rather than guessed silently.
 
-import { GraphApiError, parseFileOffset } from '../core/index.js';
+import {
+  DEFAULT_THROTTLE_RETRY_AFTER_MS,
+  errorMessageOf,
+  GraphApiError,
+  parseFileOffset,
+} from '../core/index.js';
 import type {
   Clock,
   ErrorAction,
@@ -59,6 +64,7 @@ import type {
   GraphApiErrorInit,
   Logger,
   ProgressReporter,
+  ProgressUpdate,
   Settings,
 } from '../core/index.js';
 
@@ -92,6 +98,22 @@ export const REEL_CHUNK_BYTES = 4 * 1024 * 1024;
 
 /** How many times the transfer loop may resume before giving up. */
 export const REEL_MAX_RESUME_ATTEMPTS = 5;
+
+/**
+ * Base wait before a transfer re-drive (a resumed chunk after a transient fault,
+ * or a re-send after a POST that left the offset where it was); scaled linearly
+ * by the attempt number. Without it the whole resume budget burns in
+ * milliseconds against the very outage it is meant to ride out.
+ */
+export const REEL_RESUME_BACKOFF_MS = 250;
+
+/**
+ * Longest server-named wait (`retryAfterMs`, from a `Retry-After`) the transfer
+ * loop sleeps through before a re-drive. A longer one surfaces at once with the
+ * wait attached, so the caller schedules the retry instead of this call holding
+ * the upload open — or, worse, re-driving straight into the announced window.
+ */
+export const REEL_MAX_RESUME_WAIT_MS = 30_000;
 
 /**
  * Reels scheduling window: strictly MORE than 10 minutes ahead and no more than
@@ -145,6 +167,8 @@ export interface ReelsDeps {
   readonly chunkBytes?: number;
   /** Resume budget override; defaults to {@link REEL_MAX_RESUME_ATTEMPTS}. */
   readonly maxResumeAttempts?: number;
+  /** Base re-drive backoff; defaults to {@link REEL_RESUME_BACKOFF_MS}. 0 disables the local backoff (a server-named wait is still honoured). */
+  readonly resumeBackoffMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +214,13 @@ export interface ReelFailure {
   readonly signatureId?: string;
   /** false ⇒ the mapping rests on an inferred, not doc-confirmed, signature. */
   readonly verified: boolean;
+  /**
+   * The reserved `video_id` the failure concerns, once one exists (finish
+   * phase). It is the only handle that addresses the Reel on
+   * `GET /{video-id}?fields=status`, so an operator verifying an ambiguous
+   * publish needs it.
+   */
+  readonly videoId?: string;
 }
 
 /**
@@ -285,7 +316,20 @@ export function isReelQuotaError(err: unknown): boolean {
   if (!(err instanceof GraphApiError)) return false;
   const row = matchQuotaSignature(err.code, err.subcode);
   if (row?.codeOnly === true) return true;
-  return namesReelCap(err.message);
+  if (!namesReelCap(err.message)) return false;
+  if (row !== undefined) return true;
+
+  // No code family corroborates the wording, so the message is the only signal
+  // left - and Meta rejects an out-of-spec Reel in the cap's own vocabulary
+  // ("the Reels duration limit ... reached"). The cap itself always arrives as a
+  // throttle, a policy block or an undocumented code; it is never reported as a
+  // parameter validation failure. So when core has already read the error as
+  // validation/not_found, that verdict outranks the wording: the file is out of
+  // spec, and answering "wait ~24 h" would bury a fix that takes a minute.
+  // Anything else keeps the message-only path, which is what catches a genuine
+  // cap on a code Meta has not documented (`quota-message-only`).
+  const category = err.action?.category;
+  return category !== 'validation' && category !== 'not_found';
 }
 
 function quotaOperatorText(retryAfterMs: number | undefined, estimated: boolean): string {
@@ -315,8 +359,48 @@ function constraintText(phase: ReelPhase, message: string): string {
   return `Reels ${phase} phase rejected: ${message} ${where} ${spec} This server does not decode the file locally, so Meta's verdict is the only spec check.`;
 }
 
-const REEL_AMBIGUOUS_TEXT =
-  'The Reels write may or may not have landed and Graph offers no idempotency key, so it is NEVER retried automatically. Verify before acting: a Reel does NOT appear on /feed, /posts or /published_posts — read GET /{page-id}/video_reels instead, or a feed listing will look empty even on success.';
+/**
+ * The ambiguous verdict WITHOUT a read instruction. The finish phase appends
+ * its own, keyed on the requested `video_state` (see {@link reelVerifyToolFor}
+ * and `withReelVideoId`), so the text and the surfaced `nextTool` can never
+ * name two different reads.
+ */
+const REEL_AMBIGUOUS_BASE_TEXT =
+  'The Reels write may or may not have landed and Graph offers no idempotency key, so it is NEVER retried automatically. Verify before acting: a Reel does NOT appear on /feed, /posts or /published_posts (facebook_list_posts), so a feed listing will look empty even on success.';
+
+/**
+ * A lost response on the start or transfer POST. Core stamps every such write
+ * `ambiguous` because it cannot know what the POST does, but here we do: start
+ * only reserves an upload session and a rupload chunk only stores bytes, so no
+ * Reel can be live and no listing can show the outcome. Telling the caller the
+ * Reel "may have landed" and to verify on `/video_reels` sends them to a read
+ * that is always empty and withholds the one safe move — re-running the
+ * publish, which reserves a fresh `video_id`.
+ */
+function preFinishAmbiguousText(phase: ReelPhase, message: string): string {
+  const what =
+    phase === 'start'
+      ? 'the start POST only reserves an upload session, so at worst an unreturned video_id was reserved and left unfinished'
+      : 'a chunk POST only stores bytes in an upload session that was never finished';
+  return `The Reels ${phase} request lost its response (${message}). Nothing was published: only the finish phase publishes a Reel, and ${what}. There is nothing to verify on /video_reels or any other listing, so the generic "verify first" advice does not apply here. Re-running the publish is safe — it reserves a fresh video_id and re-uploads.`;
+}
+
+/**
+ * The read that can show whether a finish with this `video_state` landed.
+ *
+ *   * `PUBLISHED` — `facebook_list_reels` (the `/video_reels` edge, the only
+ *     listing a published Reel is on).
+ *   * `DRAFT` / `SCHEDULED` — whether such a Reel is listed on `/video_reels`
+ *     is unverified (see the lifecycle notes), so an empty listing proves
+ *     nothing. The finish error carries the reserved `video_id`, which
+ *     `facebook_get_video_status` reads directly (`GET /{video-id}?fields=status`).
+ *
+ * Start and transfer name none: start only reserves an id no listing shows, and
+ * a rupload chunk is offset-idempotent, never an ambiguous write.
+ */
+export function reelVerifyToolFor(videoState: ReelVideoState): string {
+  return videoState === 'PUBLISHED' ? 'facebook_list_reels' : 'facebook_get_video_status';
+}
 
 /**
  * Map any thrown value to a Reels-level verdict. Pure and idempotent: passing a
@@ -326,6 +410,25 @@ export function classifyReelFailure(err: unknown, phase: ReelPhase): ReelFailure
   if (err instanceof ReelPublishError) return err.reel;
 
   if (!(err instanceof GraphApiError)) {
+    // The transport rethrows the CALLER's abort untouched (it is the one fault
+    // core does not classify), so it reaches here as a plain non-Graph throw.
+    // In the finish phase that is not "nothing happened": the finish POST is
+    // the write that publishes, and cancelling a request already on the wire
+    // loses the response, not the write. Same verdict as a 5xx or a timeout on
+    // this POST (C2): ambiguous, never retried, verify on the read edge. A
+    // `passthrough` here would be journaled as a clean failure and invite a
+    // re-run that publishes a second Reel. Start and transfer keep the
+    // passthrough: nothing is published before finish.
+    if (phase === 'finish' && isAbortError(err)) {
+      return {
+        kind: 'ambiguous',
+        phase,
+        category: 'ambiguous',
+        retryable: false,
+        operatorText: `${REEL_AMBIGUOUS_BASE_TEXT} (phase: finish; the finish request was aborted by the caller after it may have reached Graph)`,
+        verified: true,
+      };
+    }
     return {
       kind: 'passthrough',
       phase,
@@ -341,7 +444,19 @@ export function classifyReelFailure(err: unknown, phase: ReelPhase): ReelFailure
   // 1. Quota first — it is the one verdict a generic category would hide.
   if (isReelQuotaError(err)) {
     const row = matchQuotaSignature(err.code, err.subcode);
-    const fromGraph = action?.retryAfterMs;
+    // Core's throttle rows stamp a generic 60 s default into `retryAfterMs`
+    // when the envelope carries no ETA, and the documented throttle cap families
+    // (4, 32, 80000-80099) are such rows (368 is a policy row and carries no
+    // default, so it arrives here as "no ETA" already). That figure is core's guess, not Graph's
+    // estimate: echoing it as "Graph estimates about 1 minute" for a rolling 24 h
+    // cap sends the operator back 1439 minutes early. The error does not carry
+    // the raw envelope ETA, so an exact match on the default is read as "no ETA";
+    // a genuine 1-minute ETA then falls back to the 24 h upper bound, which is
+    // still a true statement ("at most"), whereas the opposite mistake is not.
+    const fromGraph =
+      action?.retryAfterMs === DEFAULT_THROTTLE_RETRY_AFTER_MS
+        ? undefined
+        : action?.retryAfterMs;
     const retryAfterMs = fromGraph ?? REEL_QUOTA_DEFAULT_RESET_MS;
     return {
       kind: 'quota',
@@ -388,12 +503,24 @@ export function classifyReelFailure(err: unknown, phase: ReelPhase): ReelFailure
         verified: true,
       };
     case 'ambiguous':
+      if (phase !== 'finish') {
+        // Unknown outcome, but of a write that publishes nothing: safe to re-run.
+        return {
+          kind: 'ambiguous',
+          phase,
+          category: 'ambiguous',
+          retryable: true,
+          operatorText: preFinishAmbiguousText(phase, err.message),
+          verified: true,
+        };
+      }
       return {
         kind: 'ambiguous',
         phase,
         category: 'ambiguous',
         retryable: false,
-        operatorText: `${REEL_AMBIGUOUS_TEXT} (phase: ${phase}; Graph said: ${err.message})`,
+        operatorText: `${REEL_AMBIGUOUS_BASE_TEXT} (phase: ${phase}; Graph said: ${err.message})`,
+        ...(action.nextTool !== undefined ? { nextTool: action.nextTool } : {}),
         verified: true,
       };
     case 'validation':
@@ -473,6 +600,8 @@ export function wrapReelError(err: unknown, phase: ReelPhase): ReelPublishError 
     ...(base?.subcode !== undefined ? { subcode: base.subcode } : {}),
     ...(base?.type !== undefined ? { type: base.type } : {}),
     ...(base?.fbtraceId !== undefined ? { fbtraceId: base.fbtraceId } : {}),
+    ...(base?.userTitle !== undefined ? { userTitle: base.userTitle } : {}),
+    ...(base?.userMessage !== undefined ? { userMessage: base.userMessage } : {}),
     httpStatus: base?.httpStatus ?? 0,
     action: actionFor(failure),
     cause: err,
@@ -500,6 +629,49 @@ function localReelError(
     httpStatus: 0,
     action: actionFor(failure),
     reel: failure,
+  });
+}
+
+/**
+ * Re-raise a finish-phase failure naming the `video_id` it concerns.
+ *
+ * By the finish phase a `video_id` is reserved and every byte is on Meta's side,
+ * and that id is the only direct handle on the Reel. An `ambiguous` finish tells
+ * the operator to verify before acting; without the id they are left scanning
+ * the Page's whole Reels edge for a video they cannot identify. The Graph
+ * envelope (code, subcode, type, trace id, status, cause) is carried over.
+ */
+function withReelVideoId(
+  err: ReelPublishError,
+  videoId: string,
+  verifyTool: string,
+): ReelPublishError {
+  if (err.reel.videoId !== undefined) return err;
+  const ambiguous = err.reel.kind === 'ambiguous';
+  const handle = !ambiguous
+    ? `The upload reserved video_id ${videoId} (all bytes transferred); read GET /${videoId}?fields=status to inspect it.`
+    : verifyTool === 'facebook_list_reels'
+      ? `This Reel is video_id ${videoId}: verify via facebook_list_reels (GET /{page-id}/video_reels; an item with id ${videoId} means it was published) before doing anything else. facebook_get_video_status (GET /${videoId}?fields=status) then reads its processing state.`
+      : `This Reel is video_id ${videoId}: verify via facebook_get_video_status with video_id ${videoId} (GET /${videoId}?fields=status) before doing anything else. Whether a DRAFT or SCHEDULED Reel is listed on facebook_list_reels (/video_reels) is unverified, so an empty listing is not proof the write was lost.`;
+  const reel: ReelFailure = {
+    ...err.reel,
+    operatorText: `${err.reel.operatorText} ${handle}`,
+    // Only the ambiguous verdict asks for verification; the other kinds keep
+    // whatever next step they already carried.
+    ...(ambiguous ? { nextTool: verifyTool } : {}),
+    videoId,
+  };
+  return new ReelPublishError(`${err.message} (video_id ${videoId})`, {
+    code: err.code,
+    ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
+    ...(err.type !== undefined ? { type: err.type } : {}),
+    ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+    httpStatus: err.httpStatus,
+    action: actionFor(reel),
+    ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+    ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
+    ...(err.cause !== undefined ? { cause: err.cause } : {}),
+    reel,
   });
 }
 
@@ -717,19 +889,51 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
 }
 
+/**
+ * A string field off the wire — strings only, and never coerced (CC-NET-2).
+ *
+ * `fbRequest` CASTS the body, so a `video_id` or a `post_id` arriving as a JSON
+ * number is a thing this edge can do, and a number cannot be rescued: Graph ids
+ * run past the safe-integer range, so the low digits are gone before
+ * `JSON.parse` hands the value over. `String(n)` would mint a plausible-looking
+ * id for a video that does not exist — and on this edge that id is the upload
+ * target, so the whole file would be transferred and then committed against
+ * somebody else's node. Reporting no id is the only honest answer; the start
+ * phase fails closed on it before a single byte moves.
+ */
 function stringField(
   rec: Record<string, unknown> | undefined,
   key: string,
 ): string | undefined {
   const value = rec?.[key];
-  if (typeof value === 'string' && value.length > 0) return value;
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return undefined;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Did the finish response NAME an id, whatever shape it arrived in?
+ *
+ * This is deliberately not the same question as "can we hand that id back".
+ * `stringField` refuses a rounded numeric id, and that refusal must not be
+ * re-read as "Graph confirmed nothing": a numeric `post_id` is Graph
+ * ACKNOWLEDGING the publish, it is simply not a handle we can trust. Conflating
+ * the two would raise the `ambiguous` failure below for a write Graph has
+ * already confirmed, sending the operator to verify a live Reel over an optional
+ * field they do not need — a Reel is addressed by its `video_id`, which this
+ * module has held since the start phase.
+ */
+function namesAnId(rec: Record<string, unknown> | undefined): boolean {
+  const value = rec?.['post_id'] ?? rec?.['id'];
+  return value !== undefined && value !== null && value !== '';
 }
 
 function messageOf(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** The caller's own cancellation, rethrown raw by the transport (`AbortError`). */
+function isAbortError(err: unknown): err is Error {
+  return err instanceof Error && err.name === 'AbortError';
 }
 
 /**
@@ -801,6 +1005,18 @@ function serverOffsetOf(res: FbResponse<unknown>): number | undefined {
 }
 
 /**
+ * Did a 2xx chunk response explicitly decline the bytes? `fbRequest` casts the
+ * body unvalidated, so only a `success` flag that is present and not `true`
+ * (`false`, `"false"`, `0`, `null`) counts as a refusal — the rule the finish
+ * phase already applies to its own `success`.
+ */
+function chunkRefused(res: FbResponse<unknown>): boolean {
+  const rec = asRecord(res.data);
+  if (rec === undefined || !('success' in rec)) return false;
+  return rec['success'] !== true;
+}
+
+/**
  * Derive the relative rupload path from Meta's `upload_url`.
  *
  * The URL is treated as untrusted input: its host must be exactly the
@@ -869,12 +1085,38 @@ export interface ReelUploadSession {
   readonly startedAtMs: number;
 }
 
+/**
+ * Feed the progress sink, defensively. A sink is ADVISORY: the tools layer
+ * bridges it onto an MCP `progressToken` notification (CC-MCP-1), and that
+ * notification can fail on a closing transport. A throwing sink must never fail
+ * an upload whose bytes are already on Meta's side — on this edge the damage is
+ * worse than a lost notification, because a reserved `video_id` lives for one
+ * server lifetime (CC-MEDIA-1) and only `finishReelUpload` names it, so a throw
+ * in front of the commit strands the whole transfer where nothing can find it.
+ * The throw is contained, and logged rather than silently dropped.
+ *
+ * `media-video.ts` states and keeps the same contract for the legacy resumable
+ * edge; the two upload paths must not disagree about whether reporting is fatal.
+ */
+function reportReelProgress(deps: ReelsDeps, update: ProgressUpdate): void {
+  if (deps.onProgress === undefined) return;
+  try {
+    deps.onProgress(update);
+  } catch (err) {
+    deps.logger.warn('reels.progress.failed', {
+      progress: update.progress,
+      ...(update.total !== undefined ? { total: update.total } : {}),
+      error: errorMessageOf(err),
+    });
+  }
+}
+
 /** Phase 1: reserve a `video_id` and an upload target. Mutates nothing visible. */
 export async function startReelUpload(
   deps: ReelsDeps,
   input: StartReelInput,
 ): Promise<ReelUploadSession> {
-  deps.onProgress?.({ progress: 0, message: 'reels: start phase' });
+  reportReelProgress(deps, { progress: 0, message: 'reels: start phase' });
 
   let res: FbResponse<unknown>;
   try {
@@ -971,6 +1213,26 @@ export interface ReelTransferResult {
  * design — resuming an unknown session state is exactly the silent re-create
  * CC-MEDIA-1/3 forbids.
  */
+/**
+ * Wait before a transfer re-drive: the longer of the linear local backoff and a
+ * server-named wait (RFC 9110: a minimum), on the injected clock and honouring
+ * the caller's abort. A cancelled wait is wrapped like any transfer fault.
+ */
+async function reelResumeBackoff(
+  deps: ReelsDeps,
+  baseMs: number,
+  attempt: number,
+  serverWaitMs?: number,
+): Promise<void> {
+  const waitMs = Math.max(baseMs * attempt, serverWaitMs ?? 0);
+  if (waitMs === 0) return;
+  try {
+    await deps.clock.sleep(waitMs, deps.signal);
+  } catch (err) {
+    throw wrapReelError(err, 'transfer');
+  }
+}
+
 export async function uploadReelBinary(
   deps: ReelsDeps,
   input: UploadReelBinaryInput,
@@ -985,11 +1247,25 @@ export async function uploadReelBinary(
     0,
     'maxResumeAttempts',
   );
+  // Validated up front, like the other knobs, so a bad value refuses before a byte moves.
+  const backoffMs = intOption(
+    deps.resumeBackoffMs,
+    REEL_RESUME_BACKOFF_MS,
+    0,
+    'resumeBackoffMs',
+  );
 
   let offset = 0;
   let chunks = 0;
   let resumes = 0;
   let stalled = 0;
+  /**
+   * Furthest offset the server has ever acknowledged. The stall guard measures
+   * progress against THIS, not against the previous chunk: a server that
+   * alternates between acknowledging and rewinding advances on every other POST
+   * and would otherwise reset the guard forever.
+   */
+  let highWater = 0;
   /** Offset left by the last successful chunk POST — the rewind point. */
   let acknowledged = 0;
   let lastServerOffset: number | undefined;
@@ -1029,6 +1305,18 @@ export async function uploadReelBinary(
       if (failure.kind !== 'transient' || resumes >= maxResumes) {
         throw wrapReelError(err, 'transfer');
       }
+      // A server-named wait longer than this call may hold the upload open is
+      // surfaced with the wait attached, never re-driven into: the next chunk
+      // would land inside the very window the server just announced.
+      const serverWaitMs =
+        failure.retryAfterMs !== undefined &&
+        Number.isFinite(failure.retryAfterMs) &&
+        failure.retryAfterMs > 0
+          ? failure.retryAfterMs
+          : undefined;
+      if (serverWaitMs !== undefined && serverWaitMs > REEL_MAX_RESUME_WAIT_MS) {
+        throw wrapReelError(err, 'transfer');
+      }
       resumes += 1;
       // Rewind to the last acknowledged offset. Before the first successful chunk
       // that is 0, i.e. the same chunk is re-sent from its own start.
@@ -1039,6 +1327,7 @@ export async function uploadReelBinary(
         attempt: resumes,
         reason: failure.kind,
       });
+      await reelResumeBackoff(deps, backoffMs, resumes, serverWaitMs);
       continue;
     }
 
@@ -1069,12 +1358,18 @@ export async function uploadReelBinary(
         });
       }
       offset = reported;
+    } else if (chunkRefused(res)) {
+      // A 2xx that says the chunk was NOT taken, with no offset to follow: the
+      // bytes stay unacknowledged and the same chunk is re-sent. Advancing by our
+      // own arithmetic would report a complete transfer — and let publishReel
+      // finish a Reel — for bytes the host declined. The stall guard bounds it.
+      offset = previous;
     } else {
       offset = end;
     }
     acknowledged = offset;
 
-    deps.onProgress?.({
+    reportReelProgress(deps, {
       progress: Math.min(offset, total),
       total,
       message: `reels: uploaded ${String(Math.min(offset, total))}/${String(total)} bytes`,
@@ -1083,14 +1378,24 @@ export async function uploadReelBinary(
     // Termination guard: a server offset that never advances would otherwise
     // hammer the edge forever. Bounded like the pagination loop guard — the loop
     // ALWAYS terminates, either by reaching `total` or by failing loudly here.
-    stalled = offset > previous ? 0 : stalled + 1;
+    if (offset > highWater) {
+      highWater = offset;
+      stalled = 0;
+    } else {
+      stalled += 1;
+    }
     if (stalled > maxResumes) {
       throw localReelError(
         'transfer',
         'session',
         'validation',
-        `The rupload host stopped advancing: ${String(stalled)} consecutive chunk POSTs left the offset at ${String(offset)} of ${String(total)}. ${REEL_SESSION_TEXT}`,
+        `The rupload host stopped advancing: ${String(stalled)} consecutive chunk POSTs left the offset at ${String(offset)} of ${String(total)} without passing its furthest acknowledged offset ${String(highWater)}. ${REEL_SESSION_TEXT}`,
       );
+    }
+    // A POST that did not move the offset forward is re-sent after a pause,
+    // not back-to-back: a host that is not taking bytes is not helped by more.
+    if (stalled > 0 && offset < total) {
+      await reelResumeBackoff(deps, backoffMs, stalled);
     }
   }
 
@@ -1123,6 +1428,12 @@ export interface FinishReelInput {
 
 export interface ReelFinishResult {
   readonly videoId: string;
+  /**
+   * The state that was REQUESTED (`video_state` on the finish call), echoed
+   * from the input — Graph's finish response carries no state to read back
+   * (it acknowledges with `success`, at most an id). The live state is only
+   * observable afterwards via `GET /{video-id}?fields=status`.
+   */
   readonly videoState: ReelVideoState;
   /**
    * Graph confirmed acceptance. Always `true` on a returned result — a finish
@@ -1157,7 +1468,8 @@ export async function finishReelUpload(
     input.pageTimezone,
   );
 
-  deps.onProgress?.({ progress: 1, total: 1, message: 'reels: finish phase' });
+  reportReelProgress(deps, { progress: 1, total: 1, message: 'reels: finish phase' });
+  const verifyTool = reelVerifyToolFor(input.videoState);
 
   let res: FbResponse<unknown>;
   try {
@@ -1166,6 +1478,8 @@ export async function finishReelUpload(
       method: 'POST',
       host: 'graph',
       path: `/${input.pageId}/${REEL_EDGE}`,
+      // Never sent to Graph: core names it on an ambiguous outcome.
+      verifyTool,
       params: {
         upload_phase: 'finish',
         video_id: input.videoId,
@@ -1181,19 +1495,28 @@ export async function finishReelUpload(
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     });
   } catch (err) {
-    throw wrapReelError(err, 'finish');
+    throw withReelVideoId(wrapReelError(err, 'finish'), input.videoId, verifyTool);
   }
 
   const rec = asRecord(res.data);
   const postId = stringField(rec, 'post_id') ?? stringField(rec, 'id');
-  const success = rec?.['success'] === true || postId !== undefined;
+  // Only an explicit `true` confirms; an id confirms only when Graph said
+  // nothing about success at all. An explicit `false` (or any non-`true`
+  // value) next to an id is Graph's verdict, and the id is a reference to
+  // the video, not a contradiction of that verdict.
+  const rawSuccess = rec?.['success'];
+  const success = rawSuccess === true || (rawSuccess === undefined && namesAnId(rec));
   if (!success) {
     // A 2xx whose payload confirms nothing (`{"success": false}`, or a shape we
     // do not recognise). Returning this as a result with `success: false` is how
     // a failed publish gets rendered as a completed one, so it is raised instead
     // — as `ambiguous`, because the bytes did reach Graph and the write may still
     // have landed. Never re-published automatically: verify first (C2).
-    throw localReelError('finish', 'ambiguous', 'ambiguous', REEL_AMBIGUOUS_TEXT);
+    throw withReelVideoId(
+      localReelError('finish', 'ambiguous', 'ambiguous', REEL_AMBIGUOUS_BASE_TEXT),
+      input.videoId,
+      verifyTool,
+    );
   }
 
   deps.logger.info('reels.finish', {
@@ -1303,12 +1626,40 @@ export interface PublishReelResult {
 }
 
 /**
+ * Re-raise a finish-phase schedule rejection that the upload itself caused.
+ *
+ * `finishReelUpload` re-validates the schedule against a FRESH clock, which is
+ * right — the lead that matters is the one at the commit, not the one at
+ * submission. But by that point a `video_id` is reserved and every byte is on
+ * Meta's side, so the plain message ("only N minutes ahead") reads as if the
+ * operator submitted a bad time when in fact they submitted a good one and the
+ * upload outran it. Reported as-is it sends them to fix the wrong thing and says
+ * nothing about the session they now own (CC-MEDIA-9).
+ */
+function scheduleOutrunError(
+  original: ReelPublishError,
+  session: ReelUploadSession,
+  transfer: ReelTransferResult,
+  elapsedMs: number,
+): ReelPublishError {
+  return localReelError(
+    'finish',
+    'schedule',
+    'validation',
+    `The upload outran the requested schedule: scheduled_publish_time was inside the Reels window when this publish started, and was not ${String(Math.round(elapsedMs / 1000))} s later when the ${String(transfer.byteLength)}-byte upload finished. ${original.reel.operatorText} Nothing was published and the finish call was never made, but video_id ${session.videoId} is reserved with all bytes already uploaded. Re-running the publish reserves a NEW video_id and re-uploads — choose a scheduled_publish_time with enough lead to cover the upload itself. ✎ UNVERIFIED (G-TOOL-3, Phase 2): whether a reserved-but-never-finished session expires on its own or leaves a visible artefact — read GET /${session.videoId}?fields=status before assuming it is gone.`,
+  );
+}
+
+/**
  * Drive all three phases.
  *
  * The schedule is validated FIRST, before the start call, so an invalid publish
- * time costs no Graph write and no uploaded bytes. Failures keep their phase
- * name (CC-MEDIA-9) so the operator learns whether the parameters, the bytes or
- * the media spec was the problem.
+ * time costs no Graph write and no uploaded bytes. That check is not the last
+ * word: the lead Graph enforces is the one at the FINISH call, so a slow upload
+ * can carry a legal time out of the window — and THAT rejection is not free, so
+ * it is re-raised naming the cause and the session left behind. Failures keep
+ * their phase name (CC-MEDIA-9) so the operator learns whether the parameters,
+ * the bytes or the media spec was the problem.
  */
 export async function publishReel(
   deps: ReelsDeps,
@@ -1340,18 +1691,26 @@ export async function publishReel(
     ...(input.contentType !== undefined ? { contentType: input.contentType } : {}),
   });
 
-  const finish = await finishReelUpload(deps, {
-    pageId: input.pageId,
-    videoId: session.videoId,
-    videoState: input.videoState,
-    ...(input.description !== undefined ? { description: input.description } : {}),
-    ...(input.title !== undefined ? { title: input.title } : {}),
-    ...(input.scheduledPublishTime !== undefined
-      ? { scheduledPublishTime: input.scheduledPublishTime }
-      : {}),
-    ...(input.pageTimezone !== undefined ? { pageTimezone: input.pageTimezone } : {}),
-    ...(input.token !== undefined ? { token: input.token } : {}),
-  });
+  let finish: ReelFinishResult;
+  try {
+    finish = await finishReelUpload(deps, {
+      pageId: input.pageId,
+      videoId: session.videoId,
+      videoState: input.videoState,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.scheduledPublishTime !== undefined
+        ? { scheduledPublishTime: input.scheduledPublishTime }
+        : {}),
+      ...(input.pageTimezone !== undefined ? { pageTimezone: input.pageTimezone } : {}),
+      ...(input.token !== undefined ? { token: input.token } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ReelPublishError && err.reel.kind === 'schedule') {
+      throw scheduleOutrunError(err, session, transfer, deps.clock.now() - startedAtMs);
+    }
+    throw err;
+  }
 
   return {
     session,

@@ -25,6 +25,31 @@ import { findMarkerNonce, isMarked, MARKER_RE } from './nonce.mjs';
 /** Upper bound on deletions per sweep — a runaway loop must not eat a Page. */
 export const SWEEP_DELETE_CAP = 100;
 
+/** The one command that cleans the test Page without running any smoke. */
+const SWEEP_ONLY_HINT = 'FB_SMOKE=1 npm run smoke -- --sweep-only';
+
+/**
+ * Report a sweep that could not run AT ALL, and return a report in the shape
+ * `runSweep` produces so the summary can still account for it.
+ *
+ * Every sweep is a sequence of tool calls, so it needs a live server session. If
+ * the session never came up — or died — the honest answer is not "nothing was
+ * found", it is "nothing was looked at". Saying that out loud is the whole point
+ * of this function: silence here reads as a clean Page.
+ *
+ * @param {object} opts
+ * @param {'start'|'end'} opts.phase
+ * @param {string} opts.reason  why there is no session
+ * @param {string} opts.consequence  what is therefore still on the test Page
+ * @param {ReturnType<import('./log.mjs').createLogger>} opts.log
+ */
+export function sweepUnavailable({ phase, reason, consequence, log }) {
+  log.fail(
+    `${phase} sweep SKIPPED (${reason}) — ${consequence} Clean the test Page with:  ${SWEEP_ONLY_HINT}`,
+  );
+  return { phase, items: [], deleted: [], leaked: [], skipped: true };
+}
+
 function describe(item) {
   const age = item.nonce === undefined ? 'unmarked' : item.nonce;
   return `${item.kind} ${item.id} (${age})${item.label === undefined ? '' : ` — ${item.label}`}`;
@@ -107,11 +132,12 @@ export async function runSweep({ phase, session, pages, nonce, log }) {
  */
 export async function runEndSweep({ session, pages, nonce, log, reason }) {
   if (session === undefined) {
-    log.fail(
-      `end sweep SKIPPED (${reason}) — any artifact marked with this run's nonce is still on ` +
-        `the test Page. Clean it up with:  FB_SMOKE=1 npm run smoke -- --sweep-only`,
-    );
-    return { phase: 'end', items: [], deleted: [], leaked: [], skipped: true };
+    return sweepUnavailable({
+      phase: 'end',
+      reason,
+      consequence: "any artifact marked with this run's nonce is still on the test Page.",
+      log,
+    });
   }
   try {
     return await runSweep({ phase: 'end', session, pages, nonce, log });

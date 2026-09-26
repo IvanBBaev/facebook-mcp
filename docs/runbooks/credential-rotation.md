@@ -56,9 +56,16 @@ limits the damage in the meantime.
    revocation is **deleting the system user** (then recreating it and reassigning
    Page + ad-account assets); an expiring token can be left to lapse only if
    compromise is _not_ suspected.
-4. Update the secret in the server's configuration (the `FB_ACCESS_TOKEN`
-   environment value / XDG env file). The env file is written atomically with
-   `0600`; keep it that way.
+4. Update the secret in the server's configuration — **in the variable this
+   install actually reads.** `setup-token` stores a System User credential as
+   `FB_SYSTEM_TOKEN`, and every consumer resolves
+   `FB_SYSTEM_TOKEN` → `FB_ACCESS_TOKEN` → `FB_PAGE_TOKEN` in that order, so a
+   new value written to a lower-precedence variable is never read: the
+   compromised token stays in use, and the doctor and `facebook_whoami` still
+   report a valid token, so the rotation looks successful. Check which of the
+   three is set in the XDG env file, replace that one, and delete the
+   compromised value rather than leaving it behind a higher-precedence key. The
+   env file is written atomically with `0600`; keep it that way.
 5. **Restart** the server so it re-reads config and re-validates on startup.
 
 **Verify by:** running the doctor / `facebook_whoami` — confirm the new token's

@@ -36,8 +36,9 @@ import {
   type FakePageResolver,
   type MemoryJournal,
 } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, ambiguousWriteAction } from '../core/index.js';
 import type {
+  Confirmer,
   JsonRequest,
   Logger,
   Settings,
@@ -49,6 +50,15 @@ import { MESSAGE_TAG_GUIDANCE, STANDARD_MESSAGING_WINDOW_MS } from '../api/messa
 import { TAINT_BEGIN, TAINT_END, TAINT_WARNING, createWriteGate } from '../mcp/index.js';
 import { createMessagesPackage } from './messages.js';
 import type { WriteToolContext } from './shared.js';
+
+/**
+ * The gate requires an out-of-band confirmation seam to exist. These suites never
+ * reach a high-consequence apply, so they hand in one that always approves rather
+ * than leaving the seam missing — which the gate now (correctly) refuses.
+ */
+const ALWAYS_CONFIRMS: Confirmer = {
+  confirm: () => Promise.resolve({ confirmed: true, method: 'operator_token' }),
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures & scaffolding
@@ -149,6 +159,7 @@ function makeCtx(
     clock,
     journal,
     writeGate: createWriteGate({
+      confirmer: ALWAYS_CONFIRMS,
       clock,
       journal,
       defaultWriteMode: opts.writeMode ?? 'plan',
@@ -478,6 +489,68 @@ test('facebook_send_message rejects an over-long message before any request', as
   assert.equal(payload.status, 'applied');
 });
 
+/**
+ * The arguments this package has cleared for the per-call stderr line. A
+ * conversation id is the Graph URL segment an operator needs to find the thread
+ * again; a PSID and the message body are not, and this package is the one place
+ * where a log line could quietly accumulate a record of who was talked to and
+ * what was said. Anything beyond this set has to be argued in first.
+ */
+const SAFE_TO_LOG: ReadonlySet<string> = new Set([
+  'profile',
+  'apply',
+  'plan_id',
+  'conversation_id',
+]);
+
+test('every messages log allowlist names real, non-content arguments', () => {
+  // `logFields` is the ONLY thing that reaches the per-call log line
+  // (04 §"Log hygiene"), so the declarations are audited rather than trusted:
+  // this table IS the reviewed decision. The listing is missing on purpose — a
+  // model is told to poll it, and its arguments are the profile selector and
+  // paging, so a line per poll would be noise carrying nothing.
+  const expected: Record<string, readonly string[]> = {
+    [TOOL_GET]: ['profile', 'conversation_id'],
+    [TOOL_SEND]: ['profile', 'apply', 'plan_id', 'conversation_id'],
+  };
+
+  for (const spec of createMessagesPackage().tools) {
+    const want = expected[spec.name];
+    if (want === undefined) {
+      assert.equal(
+        spec.logFields,
+        undefined,
+        `${spec.name} started logging without being audited here`,
+      );
+      continue;
+    }
+    assert.deepEqual(
+      [...(spec.logFields ?? [])],
+      [...want],
+      `${spec.name}'s allowlist changed without this audit changing with it`,
+    );
+
+    // The zod shape is the argument list: a key that is not in it would log
+    // nothing at all while reading like a control.
+    const { shape } = spec.inputSchema as unknown as {
+      readonly shape: Record<string, unknown>;
+    };
+    for (const key of want) {
+      assert.ok(key in shape, `${spec.name} logs ${key}, which is not an argument`);
+      assert.ok(
+        SAFE_TO_LOG.has(key),
+        `${spec.name} logs ${key}, which is not cleared for stderr`,
+      );
+    }
+  }
+
+  // The named dangers, spelled out so the reason survives a refactor of the set:
+  // the recipient's identity and the text sent to a real person.
+  for (const banned of ['recipient_id', 'psid', 'user_id', 'message']) {
+    assert.ok(!SAFE_TO_LOG.has(banned), `${banned} must never be cleared for stderr`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // facebook_list_conversations
 // ---------------------------------------------------------------------------
@@ -726,6 +799,71 @@ test('facebook_get_conversation reports the window open inside 24h and closed ou
   assert.equal(unknownWindow.closesAt, undefined);
 });
 
+test('facebook_get_conversation never declares the window closed from a continuation page', async () => {
+  // Page 2 of a thread (`after` given). The newest inbound message HERE is 30h
+  // old, but a continuation page is by construction older than the first page,
+  // which is where the person's actual latest message lives — so 30h is only a
+  // lower bound on how recently they wrote, and "closed" is a claim this page
+  // cannot support. The true verdict is unknowable from here; "open" would be.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [
+    inboundNode({ agoMs: STANDARD_MESSAGING_WINDOW_MS + 6 * HOUR_MS, message: 'older' }),
+    outboundNode({
+      agoMs: STANDARD_MESSAGING_WINDOW_MS + 7 * HOUR_MS,
+      message: 'oldest',
+    }),
+  ]);
+
+  const parsed = body(
+    await tool(TOOL_GET).handler(
+      { conversation_id: CONVERSATION_ID, after: 'CURSOR-PAGE-2' },
+      ctx,
+    ),
+  );
+  const window = record(parsed.messagingWindow, 'messagingWindow');
+  assert.equal(
+    window.status,
+    'unknown',
+    'a continuation page can only bound the last inbound message from below',
+  );
+  assert.equal(
+    window.closesAt,
+    undefined,
+    'no closing time is minted from a lower bound',
+  );
+  assert.match(
+    String(window.explanation),
+    /without `after`/,
+    'the model is told where the verdict actually is',
+  );
+  // The continuation itself is unaffected: the page was still read as asked.
+  assert.equal(parsed.count, 2);
+  assert.equal(lastJson(fb).params?.after, 'CURSOR-PAGE-2');
+});
+
+test('a continuation page holding a fresh inbound message still proves the window open', async () => {
+  // Regression coverage for the other direction: any inbound message under 24h
+  // old proves the window open whichever page it sits on, so `after` must not
+  // turn a provable "open" into a shrug.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'still fresh' })]);
+
+  const window = record(
+    body(
+      await tool(TOOL_GET).handler(
+        { conversation_id: CONVERSATION_ID, after: 'CURSOR-PAGE-2' },
+        ctx,
+      ),
+    ).messagingWindow,
+    'messagingWindow',
+  );
+  assert.equal(window.status, 'open');
+  assert.equal(
+    window.closesAt,
+    new Date(NOW - 2 * HOUR_MS + STANDARD_MESSAGING_WINDOW_MS).toISOString(),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // facebook_send_message — gating
 // ---------------------------------------------------------------------------
@@ -848,6 +986,81 @@ test('facebook_send_message applies against the plan it previewed', async () => 
   assert.ok(!JSON.stringify(entry.metadata).includes('Yes, it is.'));
 });
 
+test('a send acknowledged without a message id is unconfirmed, not applied, and journalled attempted', async () => {
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Is this in stock?' })]);
+  // Graph answered 200 but omitted `message_id`. `sendMessage` returns `{}`
+  // here, so there is no acknowledgement to point at and delivery is UNKNOWN —
+  // the mirror image of the case commitment 2 guards: it must not be reported
+  // as "not sent", and it must not be overclaimed as confirmed either.
+  stubSend(fb, fbOk({}));
+
+  const applied = await sendApplied(
+    { conversation_id: CONVERSATION_ID, message: 'Yes, it is.' },
+    ctx,
+  );
+
+  // The envelope must agree with the result it carries: `status:"applied"`
+  // beside `delivery:"unconfirmed"` hands the model two answers to the one
+  // question the envelope exists to answer, and the wrong one reads first.
+  assert.equal(applied.status, 'not_applied');
+  assert.equal(applied.applied, false);
+  assert.equal(applied.outcome, 'attempted');
+  assert.match(String(applied.notPerformedNotice), /ATTEMPTED/);
+  const result = record(applied.result, 'result');
+  assert.equal(result.messageId, undefined, 'Graph returned no message id');
+  assert.equal(result.delivery, 'unconfirmed');
+
+  const note = String(result.note);
+  assert.ok(
+    !note.includes('delivery is confirmed'),
+    `an unacknowledged send must not claim confirmed delivery; got: ${note}`,
+  );
+  assert.ok(
+    !note.includes('message id'),
+    `the note must not cite a message id that was never returned; got: ${note}`,
+  );
+  // The resend hazard is unchanged: the message may well have landed.
+  assert.match(note, /do not send it again/i);
+  assert.match(note, /facebook_get_conversation/);
+
+  // The request reached the wire and nothing vouches for what it did, so the
+  // journal holds an ATTEMPT for an operator to reconcile (C2 / CC-LIFE-2) —
+  // not a change that was never confirmed.
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('a 200 whose body is a Graph error envelope is never reported as sent', async () => {
+  // Regression coverage (CC-NET-2 / CC-MSG-2): the transport only rejects on a
+  // non-2xx status, so a 200 carrying `{ error: {...} }` reaches the tool as
+  // "data". There is no message id in it, and the tool must fall on the
+  // unconfirmed side — a model told "sent" here would stop checking the inbox
+  // for a message that may never have existed.
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Still open?' })]);
+  stubSend(
+    fb,
+    fbOk({
+      error: { message: 'Temporarily unable to send', code: 1, type: 'OAuthException' },
+    }),
+  );
+
+  const applied = await sendApplied(
+    { conversation_id: CONVERSATION_ID, message: 'Yes, until 18:00.' },
+    ctx,
+  );
+
+  const result = record(applied.result, 'result');
+  assert.equal(result.delivery, 'unconfirmed');
+  assert.equal(result.messageId, undefined);
+  assert.doesNotMatch(String(result.note), /delivery is confirmed/);
+  // Same verdict as any other id-less acknowledgement: unconfirmed is not applied.
+  assert.equal(applied.status, 'not_applied');
+  assert.equal(applied.outcome, 'attempted');
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
 test('facebook_send_message refuses locally when the 24-hour window has closed', async () => {
   const { fb, journal, ctx } = makeCtx();
   stubThread(fb, [
@@ -921,7 +1134,9 @@ test('facebook_send_message needs a target and never guesses one', async () => {
       { conversation_id: CONVERSATION_ID, message: 'Hello?', apply: true },
       orphan.ctx,
     ),
-    /no recipient could be identified/,
+    // Only the newest messages are probed, so the refusal must not claim
+    // the whole thread was searched.
+    /no recipient could be identified from the newest 10 messages/,
   );
   assert.equal(posts(orphan.fb).length, 0);
 });
@@ -1072,6 +1287,135 @@ test('a blocked or deleted recipient is a terminal, non-retryable failure', asyn
   );
 });
 
+test('an ambiguous send points the caller at facebook_get_conversation, not a posts listing', async () => {
+  const { fb, journal, ctx } = makeCtx();
+  // Built exactly the way the transport builds it (`ambiguousError` in
+  // core/http.ts): the default verify tool is the posts listing, where a DM
+  // can never appear.
+  stubSend(
+    fb,
+    fbErr(
+      new GraphApiError('ambiguous write outcome (HTTP 502 on POST) — do NOT retry', {
+        code: 0,
+        httpStatus: 502,
+        action: ambiguousWriteAction({ detail: 'HTTP 502 on POST' }),
+      }),
+    ),
+  );
+
+  await assert.rejects(
+    sendApply({ recipient_id: PSID, message: 'Did this arrive?' }, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.retryable, false);
+      assert.equal(err.action?.nextTool, TOOL_GET);
+      assert.doesNotMatch(String(err.action?.operatorText), /facebook_list_posts/);
+      assert.match(String(err.action?.operatorText), /do not send it again/i);
+      assert.match(err.message, /HTTP 502 on POST/);
+      return true;
+    },
+  );
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('an ambiguous send carries exactly one verify instruction, naming the conversation', async () => {
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Is this in stock?' })]);
+  // What the transport raises on a lost send response; the api layer repoints
+  // it at the conversation before the tool layer sees it.
+  stubSend(
+    fb,
+    fbErr(
+      new GraphApiError('ambiguous write outcome (HTTP 502 on POST) — do NOT retry', {
+        code: 0,
+        httpStatus: 502,
+        action: ambiguousWriteAction({ detail: 'HTTP 502 on POST' }),
+      }),
+    ),
+  );
+
+  await assert.rejects(
+    sendApply({ conversation_id: CONVERSATION_ID, message: 'Yes, it is.' }, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      const text = String(err.action?.operatorText);
+      assert.equal(err.action?.nextTool, TOOL_GET);
+      // One instruction, not a generic "verify via" followed by a second,
+      // conversation-specific one saying the same thing.
+      assert.equal(
+        text.split(TOOL_GET).length - 1,
+        1,
+        `expected ${TOOL_GET} named once, got: ${text}`,
+      );
+      assert.ok(text.includes(`conversation ${CONVERSATION_ID}`), text);
+      assert.match(text, /HTTP 502 on POST/);
+      assert.match(text, /Do NOT retry/);
+      assert.match(text, /do not send it again/i);
+      return true;
+    },
+  );
+});
+
+test("a window refusal keeps Meta's userTitle / userMessage for the caller", async () => {
+  const { fb, ctx } = makeCtx();
+  stubSend(
+    fb,
+    fbErr(
+      new GraphApiError('(#10) This message is sent outside of allowed window.', {
+        code: 10,
+        subcode: 2018278,
+        httpStatus: 400,
+        fbtraceId: 'trace-1',
+        userTitle: 'Message not sent',
+        userMessage: 'This person has not messaged your Page in the last 24 hours.',
+      }),
+    ),
+  );
+
+  await assert.rejects(
+    sendApply({ recipient_id: PSID, message: 'Too late.' }, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /Message NOT sent/);
+      assert.equal(err.subcode, 2018278);
+      assert.equal(err.fbtraceId, 'trace-1');
+      assert.equal(err.userTitle, 'Message not sent');
+      assert.equal(
+        err.userMessage,
+        'This person has not messaged your Page in the last 24 hours.',
+      );
+      return true;
+    },
+  );
+});
+
+test("a recipient-unavailable refusal keeps Meta's userMessage for the caller", async () => {
+  const { fb, ctx } = makeCtx();
+  stubSend(
+    fb,
+    fbErr(
+      new GraphApiError("(#551) This person isn't available right now.", {
+        code: 551,
+        subcode: 1545041,
+        httpStatus: 400,
+        userMessage: 'The person blocked messages from this Page.',
+      }),
+    ),
+  );
+
+  await assert.rejects(
+    sendApply({ recipient_id: PSID, message: 'Hello?' }, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /recipient is unavailable/);
+      assert.equal(err.action?.category, 'not_found');
+      assert.equal(err.userMessage, 'The person blocked messages from this Page.');
+      return true;
+    },
+  );
+});
+
 test('an apply whose arguments drifted from the plan is refused, not sent', async () => {
   const { fb, journal, ctx } = makeCtx();
   stubThread(fb, [inboundNode({ agoMs: HOUR_MS, message: 'Question?' })]);
@@ -1098,4 +1442,357 @@ test('an apply whose arguments drifted from the plan is refused, not sent', asyn
   );
   assert.equal(posts(fb).length, 0, 'the swapped text must never be sent');
   assert.equal(journal.entries.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Path containment — a thread id must never address another Graph node
+// ---------------------------------------------------------------------------
+
+test('conversation_id refuses a value that would address another Graph node or edge', async () => {
+  // `/{conversation_id}/messages` is built by interpolation and
+  // `containPathname` sees only the joined path, so a `/` inside the id is a new
+  // segment: a thread read becomes a read of whatever node the caller named,
+  // under the same Page token. The fake answers ANY path, so an escape that got
+  // through would be recorded as a call.
+  for (const name of [TOOL_GET, TOOL_SEND]) {
+    const { fb, ctx } = makeCtx();
+    fb.on(() => true, fbOk({ id: CONVERSATION_ID, data: [] }));
+
+    for (const escaped of [
+      `${PAGE_ID}/accounts`,
+      'me/accounts',
+      `${CONVERSATION_ID}/messages?fields=from`,
+      '..',
+      '.',
+    ]) {
+      const args =
+        name === TOOL_SEND
+          ? { conversation_id: escaped, message: 'Hello.' }
+          : { conversation_id: escaped };
+      await assert.rejects(
+        () => tool(name).handler(args, ctx),
+        /bare Graph ID/,
+        `${name} must refuse conversation_id ${JSON.stringify(escaped)}`,
+      );
+    }
+    assert.equal(
+      fb.calls.length,
+      0,
+      `${name} let an escaped conversation id reach Graph`,
+    );
+  }
+});
+
+test('conversation_id still accepts the thread ids Graph actually mints', () => {
+  // Regression coverage: containment must not narrow Graph's ID space.
+  for (const id of [CONVERSATION_ID, 't_1234567890', '1234567890', 'act_123']) {
+    assert.equal(
+      tool(TOOL_GET).inputSchema.safeParse({ conversation_id: id }).success,
+      true,
+      `${TOOL_GET} must accept conversation_id ${JSON.stringify(id)}`,
+    );
+    assert.equal(
+      tool(TOOL_SEND).inputSchema.safeParse({ conversation_id: id, message: 'Hello.' })
+        .success,
+      true,
+      `${TOOL_SEND} must accept conversation_id ${JSON.stringify(id)}`,
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recipient binding and blank text (wave 11)
+// ---------------------------------------------------------------------------
+
+test('a recipient_id that is not in the named conversation is refused, not sent', async () => {
+  // conversation_id is what the window verdict and the preview's "in
+  // conversation ..." are drawn from, while recipient_id is who the POST goes
+  // to. When they disagree the preview vouches for one person's 24-hour window
+  // and a thread the message will never appear in, and the apply sends to
+  // somebody else entirely (CC-MSG-1 / recipient selection).
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Is this in stock?' })]);
+  stubSend(fb, fbOk({ message_id: 'mid.wrong', recipient_id: '9999' }));
+
+  await assert.rejects(
+    tool(TOOL_SEND).handler(
+      { conversation_id: CONVERSATION_ID, recipient_id: '9999', message: 'Yes, it is.' },
+      ctx,
+    ),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /Nothing was sent/);
+      assert.match(err.message, /not a participant/);
+      return true;
+    },
+  );
+  assert.equal(posts(fb).length, 0, 'the mismatched recipient must never be messaged');
+  assert.equal(journal.entries.length, 0);
+});
+
+test('a recipient_id that matches the conversation participant is still accepted', async () => {
+  // Regression coverage for the binding above: an explicit PSID that IS the
+  // person in the thread keeps working, window verdict included.
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Is this in stock?' })]);
+  stubSend(fb, fbOk({ message_id: 'mid.ok', recipient_id: PSID }));
+
+  const payload = await sendApplied(
+    { conversation_id: CONVERSATION_ID, recipient_id: PSID, message: 'Yes, it is.' },
+    ctx,
+  );
+  assert.equal(payload.status, 'applied');
+  assert.equal(record(journal.entries[0]?.metadata, 'metadata').windowStatus, 'open');
+});
+
+test('a whitespace-only message is refused before any request', async () => {
+  // `min(1)` counts characters, so "   " passed the schema and was previewed as
+  // a sendable 3-character private message to a real person.
+  for (const blank of ['   ', '\n\t ', ' 　']) {
+    const { fb, journal, ctx } = makeCtx();
+    stubSend(fb, fbOk({ message_id: 'mid.blank' }));
+    await assert.rejects(
+      tool(TOOL_SEND).handler({ recipient_id: PSID, message: blank }, ctx),
+      /Nothing was sent: the message is blank/,
+      `a message of ${JSON.stringify(blank)} must be refused`,
+    );
+    assert.equal(fb.calls.length, 0);
+    assert.equal(journal.entries.length, 0);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The window verdict must not rest on a message it could not read
+// ---------------------------------------------------------------------------
+
+/**
+ * The newest message is from the visitor but its `created_time` is unusable
+ * (here: zone-less, which `parseGraphTime` refuses by design), and behind it
+ * sits an older, well-dated inbound message 30h old. The dated one is only a
+ * LOWER bound on how recently the person wrote: the undated one may be minutes
+ * old, so "closed" is a claim this thread cannot support.
+ */
+function threadWithUndatedNewestInbound(): unknown[] {
+  return [
+    {
+      id: 'm_undated',
+      created_time: '2026-07-28T11:00:00',
+      from: { id: PSID, name: 'Visitor' },
+      to: { data: [{ id: PAGE_ID, name: PAGE_NAME }] },
+      message: 'Are you still there?',
+    },
+    inboundNode({ agoMs: STANDARD_MESSAGING_WINDOW_MS + 6 * HOUR_MS, message: 'Old' }),
+  ];
+}
+
+test('facebook_get_conversation does not declare the window closed past an undated inbound message', async () => {
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, threadWithUndatedNewestInbound());
+
+  const window = record(
+    body(await tool(TOOL_GET).handler({ conversation_id: CONVERSATION_ID }, ctx))
+      .messagingWindow,
+    'messagingWindow',
+  );
+  assert.equal(
+    window.status,
+    'unknown',
+    'an inbound message with no usable timestamp may be the one that keeps the window open',
+  );
+  assert.equal(
+    window.closesAt,
+    undefined,
+    'no closing time is minted from a lower bound',
+  );
+});
+
+test('facebook_send_message does not refuse locally past an undated inbound message', async () => {
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, threadWithUndatedNewestInbound());
+  stubSend(fb, fbOk({ message_id: 'mid.undated', recipient_id: PSID }));
+
+  const payload = await sendApplied(
+    { conversation_id: CONVERSATION_ID, message: 'Yes, here to help.' },
+    ctx,
+  );
+
+  assert.equal(payload.status, 'applied', 'Facebook, not a guess, decides this send');
+  assert.equal(posts(fb).length, 1);
+  assert.equal(record(journal.entries[0]?.metadata, 'metadata').windowStatus, 'unknown');
+});
+
+/**
+ * Graph put an entry the edge cannot read (here `null`) at the head of the
+ * thread; `fetchPage` drops it and says so in the page note. The dropped entry
+ * may be the visitor's reply from a minute ago, so the 30h-old inbound message
+ * behind it is only a lower bound — "closed" is not proven.
+ */
+function threadWithDroppedNewestRow(): unknown[] {
+  return [
+    null,
+    inboundNode({ agoMs: STANDARD_MESSAGING_WINDOW_MS + 6 * HOUR_MS, message: 'Old' }),
+  ];
+}
+
+test('facebook_get_conversation does not declare the window closed past a dropped unreadable row', async () => {
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, threadWithDroppedNewestRow());
+
+  const window = record(
+    body(await tool(TOOL_GET).handler({ conversation_id: CONVERSATION_ID }, ctx))
+      .messagingWindow,
+    'messagingWindow',
+  );
+  assert.equal(
+    window.status,
+    'unknown',
+    'a row Graph sent but the edge could not read may be the message that keeps the window open',
+  );
+  assert.equal(
+    window.closesAt,
+    undefined,
+    'no closing time is minted from a lower bound',
+  );
+});
+
+test('facebook_send_message does not refuse locally past a dropped unreadable row', async () => {
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, threadWithDroppedNewestRow());
+  stubSend(fb, fbOk({ message_id: 'mid.dropped', recipient_id: PSID }));
+
+  const payload = await sendApplied(
+    { conversation_id: CONVERSATION_ID, message: 'Yes, here to help.' },
+    ctx,
+  );
+
+  assert.equal(
+    payload.status,
+    'applied',
+    'Facebook, not an incomplete read, decides this send',
+  );
+  assert.equal(posts(fb).length, 1);
+  assert.equal(record(journal.entries[0]?.metadata, 'metadata').windowStatus, 'unknown');
+});
+
+test('an unattributed message dated inside 24h keeps a closed verdict unproven', async () => {
+  // `from` is missing on the newest message, so it may be the visitor's; it is
+  // 1h old. The only attributed inbound message is 30h old.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [
+    {
+      id: 'm_anon',
+      created_time: graphTime(NOW - HOUR_MS),
+      message: 'Hello?',
+    },
+    inboundNode({ agoMs: STANDARD_MESSAGING_WINDOW_MS + 6 * HOUR_MS, message: 'Old' }),
+  ]);
+
+  const window = record(
+    body(await tool(TOOL_GET).handler({ conversation_id: CONVERSATION_ID }, ctx))
+      .messagingWindow,
+    'messagingWindow',
+  );
+  assert.equal(window.status, 'unknown');
+});
+
+test('a closed verdict still stands when every possibly-inbound message is dated and old', async () => {
+  // Regression coverage: the Page's own undated message and an unattributed
+  // message older than 24h cannot reopen anything, so "closed" is still proven.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [
+    {
+      id: 'm_out_undated',
+      from: { id: PAGE_ID, name: PAGE_NAME },
+      to: { data: [{ id: PSID, name: 'Visitor' }] },
+      message: 'Ping',
+    },
+    { id: 'm_anon_old', created_time: graphTime(NOW - 40 * HOUR_MS), message: 'x' },
+    inboundNode({ agoMs: STANDARD_MESSAGING_WINDOW_MS + 6 * HOUR_MS, message: 'Old' }),
+  ]);
+
+  const window = record(
+    body(await tool(TOOL_GET).handler({ conversation_id: CONVERSATION_ID }, ctx))
+      .messagingWindow,
+    'messagingWindow',
+  );
+  assert.equal(window.status, 'closed');
+});
+
+test('a send cancelled before the POST was issued is journalled failed, not attempted', async () => {
+  // The caller cancels after the apply's window probe and before `perform`
+  // issues the POST. `fetch` refuses an already-aborted signal before a byte
+  // leaves the machine, and the transport rethrows that AbortError raw — so a
+  // classifier that reads only the error cannot tell it from a mid-flight abort
+  // and journals "may already be in the inbox" about a message nobody received.
+  const { fb, journal, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: HOUR_MS, message: 'Hi' })]);
+  stubSend(fb, fbOk({ message_id: 'mid.1', recipient_id: PSID }));
+  const args = { conversation_id: CONVERSATION_ID, message: 'On our way.' };
+  const preview = body(await tool(TOOL_SEND).handler(args, ctx));
+
+  const controller = new AbortController();
+  let postsSent = 0;
+  const cancellingCtx: WriteToolContext = {
+    ...ctx,
+    signal: controller.signal,
+    fbRequest: async <T>(req: Parameters<WriteToolContext['fbRequest']>[0]) => {
+      // Mirror fetch: an already-aborted signal rejects before anything is sent.
+      if (req.method !== 'GET' && req.signal?.aborted === true) {
+        throw Object.assign(new Error('This operation was aborted'), {
+          name: 'AbortError',
+        });
+      }
+      if (req.method !== 'GET') postsSent += 1;
+      const res = await fb.fn<T>(req);
+      // Cancel right after the apply's window probe, i.e. before the POST.
+      if (req.method === 'GET') controller.abort();
+      return res;
+    },
+  };
+
+  await assert.rejects(
+    tool(TOOL_SEND).handler(
+      { ...args, apply: true, plan_id: preview.planId },
+      cancellingCtx,
+    ),
+    /aborted/,
+  );
+
+  assert.equal(postsSent, 0, 'the POST never left the machine');
+  assert.equal(journal.entries.length, 1, 'exactly one journal entry');
+  assert.equal(
+    journal.entries.at(-1)?.outcome,
+    'failed',
+    'a send cancelled before it was issued cannot have been delivered',
+  );
+});
+
+test('a send cancelled while the POST was in flight stays attempted', async () => {
+  // The other half of the rule: once the POST is on the wire, an abort leaves
+  // delivery unknown, so the journal must still say "attempted".
+  const { journal, ctx } = makeCtx();
+  const controller = new AbortController();
+  const cancellingCtx: WriteToolContext = {
+    ...ctx,
+    signal: controller.signal,
+    fbRequest: (req: Parameters<WriteToolContext['fbRequest']>[0]) => {
+      if (req.method === 'GET') return ctx.fbRequest(req);
+      controller.abort();
+      return Promise.reject(
+        Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }),
+      );
+    },
+  };
+  const args = { recipient_id: PSID, message: 'Checking in.' };
+  const preview = body(await tool(TOOL_SEND).handler(args, cancellingCtx));
+
+  await assert.rejects(
+    tool(TOOL_SEND).handler(
+      { ...args, apply: true, plan_id: preview.planId },
+      cancellingCtx,
+    ),
+    /aborted/,
+  );
+
+  assert.equal(journal.entries.at(-1)?.outcome, 'attempted');
 });

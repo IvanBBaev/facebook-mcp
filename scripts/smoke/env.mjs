@@ -20,6 +20,14 @@
 /** The gate variable. Anything other than exactly "1" means "do not run". */
 export const SMOKE_GATE_VAR = 'FB_SMOKE';
 
+/**
+ * The server's out-of-band operator approval for an `irreversible` apply. Not a
+ * harness variable — the harness only forwards the value the operator already
+ * configured for the server — but the harness has to reason about it, because a
+ * smoke that creates an artifact and then deletes it cannot finish without one.
+ */
+export const CONFIRM_TOKEN_VAR = 'FB_CONFIRM_TOKEN';
+
 /** Profile keys the harness injects into the child server's environment. */
 export const TEST_PROFILE = 'smoketest';
 export const READ_PROFILE = 'smokeread';
@@ -141,10 +149,32 @@ export function resolveSmokeEnv({
     );
   }
 
+  // The test Page must be a Page nobody cares about: write smokes create
+  // artifacts on it and the sweeper then DELETES every marked artifact it finds
+  // there, including leftovers from runs it knows nothing about. Two Pages are
+  // provably cared about — the one the smokes read from, and FB_PAGE_ID, the
+  // default the operator's own server is configured with. Comparing only against
+  // the read Page covers the second one by accident (readPageId falls back to
+  // FB_PAGE_ID) and stops covering it the moment FB_SMOKE_PAGE_ID is set to a
+  // third Page — which is exactly what an operator reaches for when they want to
+  // read a Page with real content. So both are checked, and the message names
+  // which collision it is.
+  const defaultPageId = nonEmpty(env, 'FB_PAGE_ID');
+  let collision;
   if (testPageId !== undefined && readPageId !== undefined && testPageId === readPageId) {
+    collision = 'the read Page';
+  } else if (
+    testPageId !== undefined &&
+    defaultPageId !== undefined &&
+    testPageId === defaultPageId
+  ) {
+    collision = "FB_PAGE_ID, the server's default Page";
+  }
+  if (collision !== undefined) {
     problems.push(
-      `${SMOKE_ENV.testPageId} and the read Page are the same Page (${testPageId}) — the sweeper ` +
-        'deletes marked artifacts on the test Page, so it must never be a Page you care about',
+      `${SMOKE_ENV.testPageId} and ${collision} are the same Page (${testPageId}) — the ` +
+        'sweeper deletes marked artifacts on the test Page, so it must never be a Page you ' +
+        'care about',
     );
   }
 
@@ -167,11 +197,29 @@ export function resolveSmokeEnv({
     }
   }
 
+  let confirmTokenRequired = false;
   for (const smoke of smokes) {
     const missing = smoke.requires.filter((name) => nonEmpty(env, name) === undefined);
     if (missing.length > 0) {
       problems.push(`smoke "${smoke.id}" requires: ${missing.join(', ')}`);
+      confirmTokenRequired ||= missing.includes(CONFIRM_TOKEN_VAR);
     }
+  }
+  // A missing confirmation token is the single most common reason a first run
+  // refuses — every write smoke deletes what it created, and deleting is an
+  // `irreversible` apply — so it gets a sentence instead of a bare variable
+  // name in a list. Note that this IS a refusal: those smokes declared the
+  // variable in `requires`, and a smoke that cannot clean up after itself must
+  // not start. The warning further down covers the other case (a selection that
+  // creates nothing, where the token is optional).
+  if (confirmTokenRequired) {
+    problems.push(
+      `${CONFIRM_TOKEN_VAR} is the out-of-band approval the server demands before an ` +
+        'irreversible apply (deleting a post or a comment). The smokes listed above create an ' +
+        'artifact and then delete it, so without it they would refuse the cleanup and leave ' +
+        'every artifact on the test Page. Set it to the same value the server is configured ' +
+        'with, or narrow the run to smokes that do not need it (--list shows what each requires)',
+    );
   }
 
   if (problems.length > 0) {
@@ -186,15 +234,18 @@ export function resolveSmokeEnv({
 
   const sweepEnabled = testPageId !== undefined;
 
-  // Not a refusal: a run without an operator confirmation token is still useful
-  // (every reversible write is exercised end to end). It just cannot delete what
-  // it created, so say so up front rather than letting the sweep explain it at
-  // the end. See the "Confirmation" section of README.md.
-  if (sweepEnabled && nonEmpty(env, 'FB_CONFIRM_TOKEN') === undefined) {
+  // Reachable only when NO selected smoke listed the token in `requires` — a
+  // read-only selection, or `--sweep-only`. Such a run creates nothing, so the
+  // missing token is not a refusal (the loop above already refused for the
+  // smokes that do need it); it only stops the sweep from REMOVING what an
+  // earlier run left behind. Saying so here beats letting the sweep discover it
+  // at the end. See the "Confirmation" section of README.md.
+  if (sweepEnabled && nonEmpty(env, CONFIRM_TOKEN_VAR) === undefined) {
     warnings.push(
-      'FB_CONFIRM_TOKEN is not set — irreversible applies (deleting posts and comments) ' +
-        'will be denied, so the sweep will report every created artifact as a leak and the ' +
-        'run will exit 1. Set it to the same value the server is configured with.',
+      `${CONFIRM_TOKEN_VAR} is not set — deleting a post or a comment is an irreversible ` +
+        'apply and the server will deny it without the token, so the sweep can REPORT a ' +
+        'leftover from an earlier run but cannot remove it, and the run then exits 1. Set it ' +
+        'to the same value the server is configured with.',
     );
   }
 
@@ -213,8 +264,21 @@ export function resolveSmokeEnv({
       packages.add(name);
     }
   }
-  if (packages.size === 0) {
-    // `core` is a PROFILE token: it expands to the six default packages.
+  // An empty declaration has to NARROW, not widen. `core` looks like the obvious
+  // fallback and is the opposite of one: it is a reserved PROFILE token that
+  // wins the shared namespace and expands to the six default packages
+  // (`src/mcp/packages.ts` — `PROFILES.core = DEFAULT_PROFILE_PACKAGES`), i.e.
+  // the widest surface short of `ads`. There is no token that expands to the
+  // `core` PACKAGE alone — but that package is always-on and SURVIVES a deny
+  // (`src/mcp/registry.ts`: `selected.add(ALWAYS_ON)` runs after the deny
+  // filter), so "select the core profile, then deny everything" resolves to
+  // exactly one package. That is the minimal surface, and it keeps the
+  // invariant above true.
+  //
+  // Reachable on `--only core/identity` with no test Page configured: that
+  // smoke declares no packages because every tool it calls is in `core`.
+  const denyEverythingButCore = packages.size === 0;
+  if (denyEverythingButCore) {
     packages.add('core');
   }
 
@@ -224,7 +288,13 @@ export function resolveSmokeEnv({
     sweepEnabled,
     packages: [...packages],
     warnings,
-    childEnv: buildChildEnv({ env, readPageId, testPageId, packages: [...packages] }),
+    childEnv: buildChildEnv({
+      env,
+      readPageId,
+      testPageId,
+      packages: [...packages],
+      denyEverythingButCore,
+    }),
   };
 }
 
@@ -238,6 +308,11 @@ export function resolveSmokeEnv({
  *    plan mode nothing mutates unless a call passes `apply:true` AND a
  *    `plan_id` from a preview this harness itself inspected;
  *  - `FB_TOOL_PACKAGES` — only the packages the selected smokes declared;
+ *  - `FB_PACKAGES_DENY` / `FB_PACKAGES_READONLY` — forced, never inherited. The
+ *    harness owns the exposed tool surface: an operator's day-to-day
+ *    `FB_PACKAGES_DENY=posts` would otherwise silently remove a tool a selected
+ *    smoke declared. `deny=all` is also how the minimal fallback surface is
+ *    expressed, since `core` survives a deny (see `resolveSmokeEnv`);
  *  - `FB_PROFILE_SMOKETEST_*` / `FB_PROFILE_SMOKEREAD_*` — the two Pages, as
  *    named profiles. Raw Page IDs only resolve when they are already configured,
  *    and a named profile key is the only unambiguous way to address a Page.
@@ -247,7 +322,13 @@ export function resolveSmokeEnv({
  * apply, and the harness forwards the same value as `confirm_token` (client.mjs).
  * The harness never invents one — the approval has to come from a human.
  */
-export function buildChildEnv({ env, readPageId, testPageId, packages }) {
+export function buildChildEnv({
+  env,
+  readPageId,
+  testPageId,
+  packages,
+  denyEverythingButCore = false,
+}) {
   const child = {};
   for (const [key, value] of Object.entries(env)) {
     if (typeof value === 'string') {
@@ -258,6 +339,8 @@ export function buildChildEnv({ env, readPageId, testPageId, packages }) {
   child.FB_TRANSPORT = 'stdio';
   child.FB_WRITE_MODE = 'plan';
   child.FB_TOOL_PACKAGES = packages.join(',');
+  child.FB_PACKAGES_DENY = denyEverythingButCore ? 'all' : '';
+  child.FB_PACKAGES_READONLY = '';
   child.FB_LOG_LEVEL = nonEmpty(env, 'FB_LOG_LEVEL') ?? 'warn';
 
   if (testPageId !== undefined) {

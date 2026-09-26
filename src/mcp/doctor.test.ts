@@ -19,12 +19,13 @@ import {
   fbOk,
   type FakeFbRequest,
 } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, PROXY_ENV_HINT, classifyNetworkError } from '../core/index.js';
 import type {
   JsonRequest,
   Logger,
   PackageSpec,
   Settings,
+  StartupProblem,
   ToolAnnotations,
   ToolSpec,
 } from '../core/index.js';
@@ -44,12 +45,16 @@ import {
   METRIC_PROBE_WINDOW_DAYS,
   PACKAGE_PERMISSIONS,
   PROBED_PAGE_METRICS,
+  TOOL_PERMISSIONS,
   activeCredential,
   classifyAssetAccess,
+  doctorExitCode,
   renderDoctorReport,
   runDoctor,
+  summarizeDoctor,
   type AdAccountProbe,
   type DoctorDeps,
+  type DoctorReport,
   type MetricProbe,
   type PackageMatrixRow,
   type ProbedMetric,
@@ -192,6 +197,63 @@ test('classifies a valid non-expiring system-user token (neverExpiring)', async 
   assert.equal(report.token.actingUserId, '999');
 });
 
+test('an expiry Graph never stated is reported as unknown, never as "never" (wave 9)', async () => {
+  // Two answers that say NOTHING about when the token stops working: no
+  // `expires_at` at all, and one that is not a number. Both used to normalize
+  // to the same `expiresAt: undefined` that a literal `expires_at: 0` does, so
+  // the report printed the never-expiring line — a confident statement Graph
+  // never made — and the verdict had nothing to say.
+  for (const wire of [{}, { expires_at: 'soon' }]) {
+    const { fb, deps } = makeDeps();
+    withDebugToken(fb, {
+      type: 'SYSTEM_USER',
+      is_valid: true,
+      scopes: ['pages_show_list', 'pages_read_engagement'],
+      ...wire,
+    });
+
+    const report = await runDoctor(deps);
+    const label = JSON.stringify(wire);
+    assert.equal(report.token.valid, true);
+    assert.equal(
+      report.token.neverExpiring,
+      false,
+      `${label} must not read as never-expiring`,
+    );
+    assert.equal(report.token.expiryUnknown, true, `${label} must read as unknown`);
+
+    const text = renderDoctorReport(report);
+    assert.match(
+      text,
+      /token expiry: unknown — Graph's debug_token answer carried no usable expires_at/,
+    );
+    assert.doesNotMatch(text, /non-expiring token/);
+
+    // The doctor cannot tell the operator when this credential stops working,
+    // and that is something an operator needs to know about.
+    const finding = report.summary.findings.find((f) => f.area === 'token');
+    assert.ok(finding, `${label}: expected a token finding for the unknown expiry`);
+    assert.equal(finding.severity, 'warn');
+    assert.match(finding.detail, /expiry/);
+    assert.equal(report.summary.verdict, 'warn');
+  }
+
+  // Control: the literal `expires_at: 0` is the one wire fact that means
+  // "never", and it still reads that way — this is not a blanket demotion.
+  const control = makeDeps();
+  withDebugToken(control.fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 0,
+  });
+  const stated = await runDoctor(control.deps);
+  assert.equal(stated.token.neverExpiring, true);
+  assert.equal(stated.token.expiryUnknown, false);
+  assert.match(renderDoctorReport(stated), /non-expiring token/);
+  assert.equal(stated.summary.verdict, 'ok');
+});
+
 test('flags a token expiring within the warning window', async () => {
   const now = 10_000_000;
   const { fb, deps } = makeDeps({ nowMs: now });
@@ -229,11 +291,12 @@ test('reports "no token configured" without making a Graph call', async () => {
   assert.equal(report.token.valid, false);
   assert.match(String(report.token.error), /No access token configured/);
   assert.equal(fb.calls.length, 0);
-  // With no scopes granted, only the scope-free tools (whoami, usage) stay
-  // usable, so the mixed core package is `partial` and names its blocked tools.
+  // No token means no scope was ever observed — not "no scope granted": the
+  // row is unverified and names nothing as blocked (whoami and usage do not
+  // work without a token either, so `partial` claimed a usability nobody had).
   const core = row(report.matrix, 'core');
-  assert.equal(core.status, 'partial');
-  assert.deepEqual([...core.blockedTools], ['facebook_list_pages', 'facebook_get_page']);
+  assert.equal(core.status, 'unverified');
+  assert.deepEqual([...core.blockedTools], []);
 });
 
 test('runDoctor never throws on a debug_token failure; it redacts the error', async () => {
@@ -541,6 +604,26 @@ test('a valid token whose assets are gone diagnoses revoked, not malformed', asy
   assert.match(text, /Business settings/, 'the fix is re-granting, not re-issuing');
 });
 
+test('a grant Meta reports with no target_ids covers all assets, not none', async () => {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 0,
+    // No target_ids key at all: Meta's shape for "granted over every asset".
+    granular_scopes: [{ scope: 'pages_show_list' }, { scope: 'pages_read_engagement' }],
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.assetAccess, 'ok');
+  assert.notEqual(report.token.diagnosis, 'asset_access_revoked');
+
+  const text = renderDoctorReport(report);
+  assert.match(text, /granular:\s+pages_show_list -> \(all assets\)/);
+  assert.doesNotMatch(text, /ASSET ACCESS REVOKED/);
+});
+
 test('a token debug_token rejects diagnoses as malformed, not as revoked', async () => {
   const { fb, deps } = makeDeps();
   // Graph ANSWERED and refused the credential — the 400 is what makes "malformed"
@@ -561,6 +644,38 @@ test('a token debug_token rejects diagnoses as malformed, not as revoked', async
   assert.equal(report.token.assetAccess, 'not_reported');
   assert.deepEqual(report.token.granularScopes, []);
   assert.match(renderDoctorReport(report), /TOKEN MALFORMED OR INVALID/);
+});
+
+test("a 200 that reports the token invalid carries Graph's reason into the report", async () => {
+  const { fb, deps } = makeDeps();
+  // The far more common shape than the 400 above: Graph accepts the CALL and
+  // rejects the SUBJECT, so `debug_token` answers 200 with `is_valid: false` and
+  // the cause in the body. The doctor used to print `TOKEN MALFORMED OR INVALID`
+  // with an empty `error:` line — a verdict with no evidence, on the one command
+  // an operator runs precisely because they do not know what is wrong.
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbOk({
+      data: {
+        is_valid: false,
+        error: {
+          code: 190,
+          subcode: 463,
+          message: 'Error validating access token: Session has expired.',
+        },
+      },
+    }),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_malformed');
+  assert.equal(
+    report.token.error,
+    'Error validating access token: Session has expired. (code 190, subcode 463)',
+  );
+  const text = renderDoctorReport(report);
+  assert.match(text, /TOKEN MALFORMED OR INVALID/);
+  assert.match(text, /Session has expired\. \(code 190, subcode 463\)/);
 });
 
 test('a network failure does not convict the token — CC-NET-6, not a bad credential', async () => {
@@ -807,7 +922,26 @@ function makeMetricSetDeps(
     scopes: ['read_insights', 'pages_read_engagement'],
     expires_at: 0,
   });
+  // A user / system-user credential is not what Graph wants on a Page insights
+  // edge: the probe derives the Page token the tools would use, like they do.
+  onPageTokenDerivation(parts.fb, '1010');
   return parts;
+}
+
+/** The Page token the fake hands out for `pageId` on a derivation call. */
+function derivedPageToken(pageId: string): string {
+  return `PAGE-${pageId}-TOKEN-PLACEHOLDER`;
+}
+
+/** Program the `/{page}?fields=access_token` derivation for one Page. */
+function onPageTokenDerivation(fb: FakeFbRequest, pageId: string): void {
+  fb.on(
+    (req) =>
+      req.protocol === 'json' &&
+      req.path === `/${pageId}` &&
+      req.params?.fields === 'access_token',
+    fbOk({ access_token: derivedPageToken(pageId), id: pageId }),
+  );
 }
 
 /** Every insights call the probe made, in order. */
@@ -869,8 +1003,8 @@ test('metric-set probe: one batched call verifies the whole shipped set', async 
   assert.equal(call.params?.until, '2026-03-15');
   assert.equal(
     call.token,
-    undefined,
-    'the client resolves the credential — the doctor never handles the secret',
+    derivedPageToken('1010'),
+    'a Page insights edge is read with the Page token, the same credential the insights tools use',
   );
 
   assert.match(
@@ -1170,6 +1304,7 @@ test('metric-set probe: falls back to a profile Page, deterministically', async 
       },
     }),
   });
+  onPageTokenDerivation(fb, '3030');
   fb.on((req) => req.path === '/3030/insights', fbOk({ data: [] }));
 
   const set = (await runDoctor(deps)).metricSet;
@@ -1266,6 +1401,595 @@ test('PROBED_PAGE_METRICS agrees with the api layer it may not import', () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// Overall verdict (`doctor --strict`)
+// ---------------------------------------------------------------------------
+
+/**
+ * A healthy report, used as the base every rule test mutates. Returning the
+ * whole report (summary included) is deliberate: `summarizeDoctor` takes the
+ * report minus its own summary, and a `DoctorReport` satisfies that, so each
+ * test can override one slice and re-derive the verdict from the same input the
+ * real run would have produced.
+ */
+async function healthyReport(): Promise<DoctorReport> {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    // What Graph really says for a System-User token. A fixture that leaves
+    // the expiry unstated is not "healthy": the doctor cannot tell when that
+    // credential stops working, and says so.
+    expires_at: 0,
+  });
+  return runDoctor(deps);
+}
+
+test('a healthy configuration verdicts ok, and --strict keeps it green', async () => {
+  const report = await healthyReport();
+  assert.equal(report.summary.verdict, 'ok');
+  assert.deepEqual([...report.summary.findings], []);
+  assert.equal(doctorExitCode(report.summary.verdict, true), 0);
+  assert.match(renderDoctorReport(report), /Verdict\n {2}OK — nothing needs attention/);
+});
+
+test('a missing credential verdicts fail; only --strict turns that into an exit code', async () => {
+  const { deps } = makeDeps({ settings: makeSettings() });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'fail');
+  assert.ok(
+    report.summary.findings.some(
+      (f) => f.severity === 'fail' && /No credential is configured/.test(f.detail),
+    ),
+  );
+  assert.equal(doctorExitCode(report.summary.verdict, true), 2);
+  // The default is a REPORT: a wrapper that runs the doctor for its text must
+  // not start failing because the doctor found what it was asked to look for.
+  assert.equal(doctorExitCode(report.summary.verdict, false), 0);
+  assert.match(renderDoctorReport(report), /Verdict\n {2}FAIL —/);
+});
+
+test('an unresolvable package selection fails the verdict and says so first', async () => {
+  // The doctor is what an operator runs when something is wrong, and a selection
+  // that does not expand is a server that never starts. Judging a healthy token
+  // and a full package matrix in that state is a green report on an install that
+  // cannot answer a single request.
+  const base = await healthyReport();
+  const summary = summarizeDoctor({
+    ...base,
+    packageSelectionError:
+      'Unknown tool package/profile name(s) in FB_PACKAGES_DENY: "reeder". Valid names: ads, all, core.',
+  });
+
+  assert.equal(summary.verdict, 'fail');
+  assert.equal(doctorExitCode(summary.verdict, true), 2);
+  const finding = summary.findings.find((f) => f.area === 'configuration');
+  assert.ok(finding, 'expected a configuration finding');
+  assert.equal(finding.severity, 'fail');
+  // The variable to fix, carried through from the selection error.
+  assert.match(finding.detail, /FB_PACKAGES_DENY/);
+  // And the caveat that makes the rest of the report readable rather than wrong.
+  assert.match(finding.detail, /built over every package/);
+});
+
+test('the render names the startup blocker above the token block', async () => {
+  const base = await healthyReport();
+  const report = {
+    ...base,
+    packageSelectionError:
+      'Unknown tool package/profile name(s) in FB_TOOL_PACKAGES: "nope".',
+  };
+  const text = renderDoctorReport({ ...report, summary: summarizeDoctor(report) });
+
+  assert.match(text, /Configuration\n {2}packages: {5}WILL NOT START/);
+  // Order matters: everything under Token is contingent on the server starting.
+  assert.ok(
+    text.indexOf('WILL NOT START') < text.indexOf('\nToken\n'),
+    'the startup blocker must precede the token block',
+  );
+});
+
+test('a resolvable selection adds no configuration finding and no Configuration block', async () => {
+  const report = await healthyReport();
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'configuration'),
+    false,
+  );
+  assert.doesNotMatch(renderDoctorReport(report), /WILL NOT START/);
+});
+
+test('a startup error reaches the verdict as a failure, a startup warning as a warning (wave 9)', async () => {
+  // `loadSettings()` already judges the environment the doctor runs in: an
+  // error there is a server `assertStartupOk` refuses to start, a warning is
+  // what the real start logs first. The doctor was handed neither, so
+  // `doctor --strict` exited 0 on an install that will never answer a request.
+  const base = await healthyReport();
+  const blocker: StartupProblem = {
+    severity: 'error',
+    code: 'http-no-token',
+    field: 'FB_HTTP_TOKEN',
+    message: 'FB_TRANSPORT=http requires FB_HTTP_TOKEN to be set.',
+  };
+  const failed = summarizeDoctor({ ...base, startupProblems: [blocker] });
+  const failFinding = failed.findings.find((f) => f.area === 'configuration');
+  assert.ok(failFinding, 'expected a configuration finding for the startup error');
+  assert.equal(failFinding.severity, 'fail');
+  assert.match(failFinding.detail, /FB_HTTP_TOKEN/);
+  assert.equal(failed.verdict, 'fail');
+  assert.equal(doctorExitCode(failed.verdict, true), 2);
+
+  const soft: StartupProblem = {
+    severity: 'warning',
+    code: 'no-app-secret',
+    field: 'FB_APP_SECRET',
+    message: 'FB_APP_SECRET is not set; requests will not carry appsecret_proof.',
+  };
+  const warned = summarizeDoctor({ ...base, startupProblems: [soft] });
+  const warnFinding = warned.findings.find((f) => f.area === 'configuration');
+  assert.ok(warnFinding, 'expected a configuration finding for the startup warning');
+  assert.equal(warnFinding.severity, 'warn');
+  assert.match(warnFinding.detail, /FB_APP_SECRET/);
+  assert.equal(warned.verdict, 'warn');
+  assert.equal(doctorExitCode(warned.verdict, true), 1);
+
+  // Problems the doctor already judges in its own words stay single-voiced:
+  // no credential is the token block's failure, a page token bound to no page
+  // is the binding check, and no page at all is why the metric probe is quiet.
+  const alreadyJudged: StartupProblem[] = [
+    {
+      severity: 'error',
+      code: 'no-access-token',
+      message: 'No access token configured.',
+    },
+    {
+      severity: 'warning',
+      code: 'page-token-unbound',
+      message: 'FB_PAGE_TOKEN without FB_PAGE_ID.',
+    },
+    { severity: 'warning', code: 'no-page', message: 'No FB_PAGE_ID configured.' },
+  ];
+  const quiet = summarizeDoctor({ ...base, startupProblems: alreadyJudged });
+  assert.equal(
+    quiet.findings.some((f) => f.area === 'configuration'),
+    false,
+    'problems the doctor already reports elsewhere must not be echoed as configuration findings',
+  );
+
+  // `runDoctor` carries the problems into the report, so a real run renders
+  // the blocker the way the package blocker renders: before the token block.
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 0,
+  });
+  const report = await runDoctor({ ...deps, startupProblems: [blocker] });
+  assert.equal(report.summary.verdict, 'fail');
+  const text = renderDoctorReport(report);
+  assert.match(
+    text,
+    /Configuration\n {2}FB_HTTP_TOKEN: WILL NOT START — .*FB_HTTP_TOKEN/,
+  );
+  assert.ok(
+    text.indexOf('WILL NOT START') < text.indexOf('\nToken\n'),
+    'the startup blocker must precede the token block',
+  );
+});
+
+test('an unreachable debug_token verdicts unknown, never fail (CC-NET-6)', async () => {
+  const { fb, deps } = makeDeps();
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('network request failed: getaddrinfo ENOTFOUND', {
+        code: 0,
+        httpStatus: 0,
+        action: {
+          category: 'transient',
+          retryable: true,
+          operatorText: 'Network fault (DNS lookup failed).',
+        },
+      }),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'unknown');
+  assert.equal(doctorExitCode(report.summary.verdict, true), 1);
+  // No scopes were learned, so the matrix is NOT degraded — it is unverified,
+  // and it adds no warning of its own (that would be a permission verdict
+  // inferred from silence). Add a real warning from elsewhere to prove that
+  // `unknown` outranks it: "nothing was established" must not hide behind
+  // "degraded".
+  const withWarning = summarizeDoctor({
+    ...report,
+    credentialFile: {
+      ...report.credentialFile,
+      unreadable: true,
+      note: 'Could not read file protection: x',
+    },
+  });
+  assert.ok(withWarning.findings.some((f) => f.severity === 'warn'));
+  assert.equal(withWarning.verdict, 'unknown');
+  assert.equal(withWarning.findings[0]?.severity, 'unknown', 'worst finding sorts first');
+});
+
+test('Graph declining to answer is never a verdict on the token', async () => {
+  // An HTTP status on a `debug_token` failure was read as Facebook having ruled
+  // on the credential, but only a 4xx rejection is a ruling. A 5xx is Meta's own
+  // outage (or a proxy's 502), and a throttle is Graph refusing to look at all —
+  // in both cases nothing was learned, and "TOKEN MALFORMED" sends the operator
+  // off to rotate a healthy credential while the real fault sits elsewhere.
+  async function diagnose(err: GraphApiError): Promise<DoctorReport> {
+    const { fb, deps } = makeDeps();
+    fb.on((req) => req.path === '/debug_token', fbErr(err));
+    return runDoctor(deps);
+  }
+
+  const outage = await diagnose(
+    new GraphApiError('An unexpected error has occurred. Please retry your request.', {
+      code: 2,
+      httpStatus: 500,
+      type: 'OAuthException',
+      action: {
+        category: 'transient',
+        retryable: true,
+        operatorText: 'Safe to retry idempotent reads after a short backoff.',
+      },
+    }),
+  );
+  assert.equal(outage.token.diagnosis, 'token_check_failed');
+  assert.equal(outage.summary.verdict, 'unknown');
+  assert.doesNotMatch(
+    renderDoctorReport(outage),
+    /TOKEN MALFORMED/,
+    'a Meta outage reported as a dead credential costs an operator a rotation',
+  );
+
+  // Meta's throttles arrive as HTTP 400 with a body code (CC-NET-1), so status
+  // alone cannot tell "Graph judged this token" from "Graph would not look".
+  const throttled = await diagnose(
+    new GraphApiError('(#4) Application request limit reached', {
+      code: 4,
+      httpStatus: 400,
+      type: 'OAuthException',
+      action: {
+        category: 'rate_limit',
+        retryable: true,
+        operatorText: 'Back off and re-run the doctor later.',
+      },
+    }),
+  );
+  assert.equal(throttled.token.diagnosis, 'token_check_failed');
+  assert.equal(throttled.summary.verdict, 'unknown');
+
+  // The control: a real OAuth rejection must still convict, or the check is
+  // worthless in the other direction.
+  const rejected = await diagnose(
+    new GraphApiError('Error validating access token: session has expired', {
+      code: 190,
+      subcode: 463,
+      httpStatus: 401,
+      type: 'OAuthException',
+      action: {
+        category: 'auth',
+        retryable: false,
+        operatorText: 'Re-issue the credential and restart the server.',
+      },
+    }),
+  );
+  assert.equal(rejected.token.diagnosis, 'token_malformed');
+  assert.equal(rejected.summary.verdict, 'fail');
+});
+
+test('a partially-scoped package is a warning, not a failure', async () => {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: ['pages_show_list'] });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'warn');
+  assert.equal(doctorExitCode(report.summary.verdict, true), 1);
+  assert.match(renderDoctorReport(report), /\[WARN {3}\] packages: core: PARTIAL/);
+});
+
+test('every package blocked is one failure, not a pile of warnings', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [pkg('insights', ['facebook_page_insights'])],
+  });
+  // A stated, far-off expiry: this test counts findings by area, and a token
+  // whose expiry Graph never stated is a (correct) second finding.
+  withDebugToken(fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list'],
+    expires_at: 4_000_000_000,
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'fail');
+  assert.deepEqual(
+    report.summary.findings.map((f) => f.area),
+    ['packages'],
+  );
+  assert.match(String(report.summary.findings[0]?.detail), /read_insights/);
+});
+
+test('an expiring token warns even when everything else is healthy', async () => {
+  const { fb, deps } = makeDeps({ nowMs: 1_000_000 });
+  withDebugToken(fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: Math.floor((1_000_000 + 60_000) / 1000),
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'warn');
+  assert.ok(report.summary.findings.some((f) => /expires within 7 days/.test(f.detail)));
+});
+
+test('the credential-file rules warn only where an operator can act', async () => {
+  const base = await healthyReport();
+  const file = base.credentialFile;
+
+  const loose = summarizeDoctor({
+    ...base,
+    credentialFile: {
+      ...file,
+      exists: true,
+      posixPermissions: true,
+      ownerOnly: false,
+      mode: 0o644,
+      note: 'Mode 0644 grants group/other access.',
+    },
+  });
+  assert.equal(loose.verdict, 'warn');
+  assert.match(String(loose.findings[0]?.detail), /chmod 600/);
+
+  // Windows carries no POSIX bits, so there is no chmod to recommend. A finding
+  // nothing can clear would make --strict permanently red on that platform.
+  const win32 = summarizeDoctor({
+    ...base,
+    credentialFile: {
+      ...file,
+      exists: true,
+      posixPermissions: false,
+      ownerOnly: false,
+      mode: 0o666,
+      note: 'Windows ACLs are not checked.',
+    },
+  });
+  assert.equal(win32.verdict, 'ok');
+
+  // An absent file is the normal env-only setup; a file that could not be READ
+  // is a question left unanswered, and only that one is a finding.
+  assert.equal(summarizeDoctor({ ...base, credentialFile: file }).verdict, 'ok');
+  const unreadable = summarizeDoctor({
+    ...base,
+    credentialFile: {
+      ...file,
+      unreadable: true,
+      note: 'Could not read file protection: x',
+    },
+  });
+  assert.equal(unreadable.verdict, 'warn');
+});
+
+test('a metric name Graph refuses warns; a skipped or empty probe does not', async () => {
+  const base = await healthyReport();
+
+  const drifted = summarizeDoctor({
+    ...base,
+    metricSet: {
+      outcome: 'probed',
+      summary: 'probed 2 metric(s)',
+      requests: 3,
+      notes: [],
+      verdicts: [
+        { metric: 'page_impressions_unique', status: 'accepted', points: 7 },
+        { metric: 'page_posts_impressions', status: 'rejected', error: 'unsupported' },
+      ],
+    },
+  });
+  assert.equal(drifted.verdict, 'warn');
+  assert.match(String(drifted.findings[0]?.detail), /page_posts_impressions/);
+
+  // Running without a Page is a configuration, not a defect; an EMPTY window is
+  // data, not drift. Neither may hold back a --strict gate.
+  const quiet = summarizeDoctor({
+    ...base,
+    metricSet: {
+      outcome: 'probed',
+      summary: 'probed 1 metric(s)',
+      requests: 2,
+      notes: ['The Page had no activity in this window.'],
+      verdicts: [{ metric: 'page_impressions_unique', status: 'empty', points: 0 }],
+    },
+  });
+  assert.equal(quiet.verdict, 'ok');
+  assert.equal(base.metricSet.outcome, 'skipped');
+  assert.equal(base.summary.verdict, 'ok');
+});
+
+test('a metric name Graph never mentions holds the verdict back, as the notes say', async () => {
+  const base = await healthyReport();
+
+  // The SILENT drift case, which is the one this probe exists for: Graph answers
+  // 200 and simply omits the name. `metricSetNotes` already counts it under
+  // "ACTION: n of m ... did not check out", so a verdict derived from `rejected`
+  // alone contradicted the notes printed directly above it — and `--strict`
+  // waved a metric set that no longer matches the live API straight through.
+  const silent = summarizeDoctor({
+    ...base,
+    metricSet: {
+      outcome: 'probed',
+      summary: 'probed 2 metric(s)',
+      requests: 1,
+      notes: [
+        'ACTION: 1 of 2 shipped metric name(s) did not check out against the live API.',
+      ],
+      verdicts: [
+        { metric: 'page_media_view', status: 'accepted', points: 4 },
+        {
+          metric: 'page_follows',
+          status: 'unknown',
+          suggestion: 'Graph answered without a "page_follows" entry.',
+        },
+      ],
+    },
+  });
+
+  assert.equal(silent.verdict, 'unknown');
+  assert.equal(doctorExitCode(silent.verdict, true), 1);
+  const finding = silent.findings.find((f) => f.area === 'insights');
+  assert.ok(finding, 'expected an insights finding for the unverified name');
+  assert.equal(finding.severity, 'unknown');
+  assert.match(finding.detail, /page_follows/);
+});
+
+test('a metric-set probe that never reached the names is unverified, not degraded', async () => {
+  const base = await healthyReport();
+
+  // `outcome: 'failed'` means the call died before a single name was judged, and
+  // the report's own note says it "says nothing about whether they are still
+  // valid". Filing that under `warn` is exactly the "nothing was established
+  // hides behind degraded" case the severity ladder was written to prevent.
+  const failed = summarizeDoctor({
+    ...base,
+    metricSet: {
+      outcome: 'failed',
+      summary: 'metric set: probe failed ((#190/463) session has expired)',
+      requests: 1,
+      verdicts: [],
+      notes: ['The call never reached the metric names.'],
+    },
+  });
+
+  assert.equal(failed.verdict, 'unknown');
+  const finding = failed.findings.find((f) => f.area === 'insights');
+  assert.ok(finding, 'expected an insights finding for the probe that died');
+  assert.equal(finding.severity, 'unknown');
+});
+
+test('a probe that blew up is not "nothing needs attention"', async () => {
+  const { fb, deps } = makeDeps({
+    adAccountProbe: () => Promise.reject(new Error('connect ETIMEDOUT act_1')),
+  });
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+  });
+
+  // `available: false` is also what an UNWIRED probe reports, so the verdict had
+  // no way to tell "never checked" from "the check threw" and counted both as
+  // healthy — printing "ad account: failed (...)" above "OK — nothing needs
+  // attention" in the same report.
+  const report = await runDoctor(deps);
+  assert.match(report.adAccount.summary, /failed/);
+  assert.equal(report.summary.verdict, 'unknown');
+  const finding = report.summary.findings.find((f) => f.area === 'ad account');
+  assert.ok(finding, 'expected a finding for the probe that threw');
+  assert.equal(finding.severity, 'unknown');
+  assert.match(finding.detail, /ETIMEDOUT/);
+
+  // An absent probe stays green: not wiring one is a configuration, not a fault.
+  assert.equal((await healthyReport()).summary.verdict, 'ok');
+});
+
+test('a probe that answered "configured but unhealthy" is a warning, not "nothing needs attention" (wave 9)', async () => {
+  const base = await healthyReport();
+
+  // The exact situation the ad-account probe exists to surface (CC-ADS-6):
+  // FB_AD_ACCOUNT_ID is set, Graph answered, and the account cannot serve.
+  // Until now that was the same `available: false` an UNCONFIGURED account
+  // reports, so it printed above "OK — nothing needs attention" and --strict
+  // could not see it.
+  const degraded = summarizeDoctor({
+    ...base,
+    adAccount: {
+      available: false,
+      degraded: true,
+      summary: 'ad account act_1: Ad account is DISABLED: it cannot serve ads',
+      details: { statusLabel: 'DISABLED' },
+    },
+  });
+  const finding = degraded.findings.find((f) => f.area === 'ad account');
+  assert.ok(finding, 'expected a finding for the configured-but-unhealthy ad account');
+  assert.equal(finding.severity, 'warn');
+  assert.match(finding.detail, /DISABLED/);
+  assert.equal(degraded.verdict, 'warn');
+  assert.equal(doctorExitCode(degraded.verdict, true), 1);
+
+  // The same carrier on the metric probe: a Page that accepted the metrics and
+  // returned nothing is a Page the operator has to do something about.
+  const noData = summarizeDoctor({
+    ...base,
+    metricProbe: {
+      available: false,
+      degraded: true,
+      summary: 'metric probe: Page 1010 accepted the metrics and returned no data',
+    },
+  });
+  assert.equal(noData.findings.find((f) => f.area === 'metric probe')?.severity, 'warn');
+  assert.equal(noData.verdict, 'warn');
+
+  // A plain `available: false` — unconfigured, or no probe wired — stays
+  // silent: an unconfigured ad account on a non-ads install must not redden
+  // --strict.
+  const unconfigured = summarizeDoctor({
+    ...base,
+    adAccount: {
+      available: false,
+      summary: 'ad account: not configured (set FB_AD_ACCOUNT_ID to check it)',
+    },
+  });
+  assert.equal(
+    unconfigured.findings.some((f) => f.area === 'ad account'),
+    false,
+  );
+  assert.equal(unconfigured.verdict, 'ok');
+  assert.equal(doctorExitCode(unconfigured.verdict, true), 0);
+
+  // And `runDoctor` carries the flag from the probe's answer into the report,
+  // so the rule above sees it on a real run and the finding renders.
+  const { fb, deps } = makeDeps({
+    adAccountProbe: () =>
+      Promise.resolve({
+        available: false,
+        degraded: true,
+        summary: 'ad account act_1: Ad account is UNSETTLED: it cannot serve ads',
+      }),
+  });
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 0,
+  });
+  const report = await runDoctor(deps);
+  assert.equal(report.adAccount.degraded, true);
+  assert.equal(report.summary.verdict, 'warn');
+  assert.match(renderDoctorReport(report), /\[WARN {3}\] ad account: .*UNSETTLED/);
+});
+
+test('doctorExitCode maps every verdict, and 0 without --strict', () => {
+  for (const verdict of ['ok', 'warn', 'unknown', 'fail'] as const) {
+    assert.equal(
+      doctorExitCode(verdict, false),
+      0,
+      `${verdict} must not gate by default`,
+    );
+  }
+  assert.equal(doctorExitCode('ok', true), 0);
+  assert.equal(doctorExitCode('warn', true), 1);
+  assert.equal(doctorExitCode('unknown', true), 1);
+  assert.equal(doctorExitCode('fail', true), 2);
+});
+
 test('PACKAGE_PERMISSIONS covers every default-profile package', () => {
   for (const name of [
     'core',
@@ -1277,4 +2001,978 @@ test('PACKAGE_PERMISSIONS covers every default-profile package', () => {
   ] as const) {
     assert.ok(PACKAGE_PERMISSIONS[name], `expected a permission mapping for ${name}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The renderer must not be able to lose the report over one number
+// ---------------------------------------------------------------------------
+
+test('an unrenderable expiry costs one line of the report, not the whole report', async () => {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: [], expires_at: 1200 });
+  const report = await runDoctor(deps);
+
+  // `new Date(ms)` is an Invalid Date for a NaN or out-of-range epoch, and
+  // `toISOString()` on one throws `RangeError: Invalid time value`. That throw
+  // happens INSIDE the renderer, so an unreadable number does not cost the
+  // operator the expiry line — it costs them every other line as well, at the
+  // exact moment they ran the doctor to find out what was wrong.
+  for (const expiresAt of [Number.NaN, 1e300, Number.POSITIVE_INFINITY]) {
+    const broken: DoctorReport = {
+      ...report,
+      token: { ...report.token, neverExpiring: false, expiresAt },
+    };
+    const text = renderDoctorReport(broken);
+    // Everything the operator actually came for is still there.
+    assert.match(text, /diagnosis:/);
+    assert.match(text, /credential:/);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Page token <-> FB_PAGE_ID binding
+// ---------------------------------------------------------------------------
+
+/** A run where FB_PAGE_TOKEN is the only credential and Graph says it is Page 4040's. */
+async function pageTokenReport(defaultPageId?: string): Promise<DoctorReport> {
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({
+      pageToken: 'PAGE-TOKEN-PLACEHOLDER',
+      ...(defaultPageId !== undefined ? { defaultPageId } : {}),
+    }),
+    // A configured Page would send the metric-set probe to Graph; it is not
+    // what these tests judge, and an empty set skips it without a finding.
+    metricSet: [],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    profile_id: '4040',
+    // Stated on the wire, as a Page token issued through a System User is.
+    expires_at: 0,
+  });
+  return runDoctor(deps);
+}
+
+test('a Page token without FB_PAGE_ID names the Page to bind it to', async () => {
+  const report = await pageTokenReport();
+  assert.equal(report.token.credentialSource, 'FB_PAGE_TOKEN');
+  assert.equal(report.token.actingPageId, '4040');
+
+  const text = renderDoctorReport(report);
+  assert.match(
+    text,
+    /acting as:\s+page 4040\n\s+page binding:\s+this Page token belongs to Page 4040; set FB_PAGE_ID=4040 so Page-scoped tools can use it/,
+  );
+  // The structured answer: the token's Page, and no configured Page to hold it.
+  assert.deepEqual(report.token.pageBinding, { status: 'unbound', tokenPageId: '4040' });
+  // The settings layer warns about this at startup; the doctor's verdict agrees.
+  assert.equal(report.summary.verdict, 'warn');
+  assert.ok(
+    report.summary.findings.some(
+      (f) =>
+        f.severity === 'warn' && f.area === 'token' && /FB_PAGE_ID=4040/.test(f.detail),
+    ),
+    `expected a warn finding naming FB_PAGE_ID=4040, got ${JSON.stringify(report.summary.findings)}`,
+  );
+});
+
+test('a Page token whose FB_PAGE_ID names another Page is a warning, not a match', async () => {
+  const report = await pageTokenReport('5050');
+  const text = renderDoctorReport(report);
+  assert.match(
+    text,
+    /page binding:\s+this Page token belongs to Page 4040, but FB_PAGE_ID names 5050 — Page-scoped tools will call Page 5050 with a token for Page 4040; set FB_PAGE_ID=4040/,
+  );
+  assert.deepEqual(report.token.pageBinding, {
+    status: 'mismatch',
+    tokenPageId: '4040',
+    configuredPageId: '5050',
+  });
+  assert.equal(report.summary.verdict, 'warn');
+  const finding = report.summary.findings.find(
+    (f) =>
+      f.severity === 'warn' &&
+      f.area === 'token' &&
+      /belongs to Page 4040/.test(f.detail),
+  );
+  assert.ok(
+    finding,
+    `expected a mismatch warning, got ${JSON.stringify(report.summary.findings)}`,
+  );
+  assert.match(finding.detail, /FB_PAGE_ID names 5050/);
+  assert.match(finding.detail, /call Page 5050 with a token for Page 4040/);
+  assert.match(finding.detail, /FB_PAGE_ID=4040/);
+  assert.equal(doctorExitCode(report.summary.verdict, true), 1);
+});
+
+test('a Page token bound to its own FB_PAGE_ID adds nothing', async () => {
+  const report = await pageTokenReport('4040');
+  assert.deepEqual(report.token.pageBinding, { status: 'bound', tokenPageId: '4040' });
+  assert.equal(report.summary.verdict, 'ok');
+  assert.deepEqual([...report.summary.findings], []);
+  const text = renderDoctorReport(report);
+  assert.doesNotMatch(text, /page binding:/);
+  assert.doesNotMatch(text, /FB_PAGE_ID=/);
+});
+
+test('the binding is only judged for the credential that IS a Page token', async () => {
+  // A system token also carries FB_PAGE_TOKEN in the environment, but the
+  // shadowed credential is not the one acting — its Page is nobody's business.
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({
+      systemToken: 'SYSTEM-TOKEN-PLACEHOLDER',
+      pageToken: 'PAGE-TOKEN-PLACEHOLDER',
+    }),
+  });
+  withDebugToken(fb, { type: 'SYSTEM_USER', is_valid: true, scopes: [], user_id: '999' });
+  const report = await runDoctor(deps);
+  assert.equal(report.token.pageBinding, undefined);
+  assert.doesNotMatch(renderDoctorReport(report), /page binding:/);
+});
+
+test('a Page token Graph did not attribute to a Page has no binding to judge', async () => {
+  // No `profile_id` on the wire: the doctor must not claim a Page it never saw.
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({ pageToken: 'PAGE-TOKEN-PLACEHOLDER' }),
+  });
+  withDebugToken(fb, { type: 'PAGE', is_valid: true, scopes: [] });
+  const report = await runDoctor(deps);
+  assert.equal(report.token.pageBinding, undefined);
+  const text = renderDoctorReport(report);
+  assert.doesNotMatch(text, /page binding:/);
+  assert.doesNotMatch(text, /FB_PAGE_ID=/);
+});
+
+// ---------------------------------------------------------------------------
+// Wire-truth hunt: what the report says must be what the wire said
+// ---------------------------------------------------------------------------
+
+test('a Page token acts as the Page Graph attributed it to, not as its issuing user', async () => {
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({
+      pageToken: 'PAGE-TOKEN-PLACEHOLDER',
+      defaultPageId: '4040',
+    }),
+    metricSet: [],
+  });
+  // The real wire shape for a Page token: `debug_token` names BOTH the Page the
+  // token acts as (`profile_id`) and the user it was issued through (`user_id`).
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    profile_id: '4040',
+    user_id: '999',
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.actingPageId, '4040');
+  assert.equal(report.token.actingUserId, '999');
+  const text = renderDoctorReport(report);
+  assert.match(
+    text,
+    /acting as:\s+page 4040 \(issued to user 999\)/,
+    'a Page token that calls Graph as the Page must not be reported as acting as a user',
+  );
+
+  // Control: a user-shaped token still reports the user, so the fix is not a
+  // blanket preference for Pages.
+  const control = makeDeps();
+  withDebugToken(control.fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: [],
+    user_id: '999',
+  });
+  assert.match(
+    renderDoctorReport(await runDoctor(control.deps)),
+    /acting as:\s+user 999\n/,
+  );
+});
+
+test('TOKEN NOT CHECKED shows the proxy hint it sends the operator to, where it says it is', async () => {
+  const { fb, deps } = makeDeps();
+  // The shape `core/http` really throws when the connection never opened: the
+  // CC-NET-6 proxy self-diagnosis rides in `action.operatorText`, not in the
+  // message — a doctor that keeps only the message loses the one line the
+  // diagnosis explicitly tells the operator to read.
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError(
+        'network request failed: getaddrinfo ENOTFOUND graph.facebook.com',
+        {
+          code: 0,
+          httpStatus: 0,
+          action: classifyNetworkError({
+            phase: 'connect',
+            isWrite: false,
+            reason: 'getaddrinfo ENOTFOUND graph.facebook.com',
+          }),
+        },
+      ),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_check_failed');
+  assert.match(
+    String(report.token.error),
+    /HTTPS_PROXY/,
+    'the proxy hint has to survive into the structured error, not only the message',
+  );
+
+  const text = renderDoctorReport(report);
+  assert.match(text, /TOKEN NOT CHECKED/);
+  assert.ok(
+    text.includes(PROXY_ENV_HINT),
+    'the diagnosis promises a proxy hint; it must be on the page',
+  );
+  // The diagnosis points at the error line: it has to point where the line is.
+  const lines = text.split('\n');
+  const diagnosisAt = lines.findIndex((l) => l.includes('diagnosis:'));
+  const errorAt = lines.findIndex((l) => l.includes('  error:'));
+  assert.ok(diagnosisAt >= 0 && errorAt >= 0);
+  assert.ok(errorAt > diagnosisAt, 'the error line is rendered after the diagnosis');
+  assert.match(String(lines[diagnosisAt]), /error line below/);
+  assert.doesNotMatch(String(lines[diagnosisAt]), /error line above/);
+});
+
+test('an unreachable debug_token leaves the package matrix unverified, not blocked', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('core', CORE_TOOLS),
+      pkg('reader', ['facebook_list_posts', 'facebook_get_post']),
+    ],
+  });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError(
+        'network request failed: getaddrinfo ENOTFOUND graph.facebook.com',
+        {
+          code: 0,
+          httpStatus: 0,
+          action: classifyNetworkError({ phase: 'connect', isWrite: false }),
+        },
+      ),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_check_failed');
+  // No scope was ever observed, so no row may say one is missing: "BLOCKED —
+  // missing: pages_read_engagement" under a DNS fault sends the operator to
+  // Business settings to grant a permission the token most likely has.
+  for (const matrixRow of report.matrix) {
+    assert.equal(
+      matrixRow.status,
+      'unverified',
+      `${matrixRow.package} was judged from an empty default, not from the wire`,
+    );
+    assert.deepEqual(matrixRow.missingPermissions, []);
+    assert.deepEqual(matrixRow.blockedTools, []);
+  }
+  const text = renderDoctorReport(report);
+  assert.doesNotMatch(text, /missing: /);
+  assert.doesNotMatch(text, /\[BLOCKED\]|\[PARTIAL\]/);
+  assert.match(
+    text,
+    /\[NOT CHECKED\] reader\s+required: pages_read_engagement, pages_read_user_content — not checked \(the token's scopes were never learned; see Token above\)/,
+  );
+  // The token finding already says nothing was established; the packages must
+  // not add a second, invented layer of "missing" warnings under it.
+  assert.equal(
+    report.summary.findings.some((finding) => finding.area === 'packages'),
+    false,
+  );
+  assert.equal(report.summary.verdict, 'unknown');
+
+  // Control: with an answer on the wire the matrix is still judged for real.
+  const answered = makeDeps({ packages: [pkg('reader', ['facebook_list_posts'])] });
+  withDebugToken(answered.fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list'],
+  });
+  const judged = await runDoctor(answered.deps);
+  assert.equal(row(judged.matrix, 'reader').status, 'blocked');
+});
+
+// ---------------------------------------------------------------------------
+// Non-Error rejections (a library that rejects with a plain object)
+// ---------------------------------------------------------------------------
+
+/** Types a deliberately non-Error throwable so it can be thrown or rejected. */
+function notAnError(value: object): Error {
+  return value as Error;
+}
+
+test('a non-Error debug_token rejection keeps its text; a null-prototype one is still a report', async () => {
+  const plain = makeDeps();
+  plain.fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(notAnError({ message: 'library said no' })),
+  );
+  const report = await runDoctor(plain.deps);
+  assert.equal(report.token.valid, false);
+  assert.equal(report.token.error, 'library said no');
+
+  const bare = makeDeps();
+  bare.fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(notAnError(Object.create(null) as object)),
+  );
+  const bareReport = await runDoctor(bare.deps);
+  assert.equal(bareReport.token.valid, false);
+  assert.equal(bareReport.token.error, 'unknown error (no message)');
+});
+
+test('a non-Error rejection from a metric or ad-account probe keeps its text', async () => {
+  const { fb, deps } = makeDeps({
+    metricProbe: () => Promise.reject(notAnError({ message: 'probe said no' })),
+    adAccountProbe: () => Promise.reject(notAnError(Object.create(null) as object)),
+  });
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: [] });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.metricProbe.available, false);
+  assert.match(report.metricProbe.summary, /failed \(probe said no\)$/);
+  assert.equal(report.adAccount.available, false);
+  assert.match(
+    report.adAccount.summary,
+    /ad account: failed \(unknown error \(no message\)\)$/,
+  );
+});
+
+test('metric-set probe: a non-Error { message } failure keeps its text, a null-prototype one is reported', async () => {
+  const plain = makeMetricSetDeps();
+  onBatch(plain.fb, fbErr(notAnError({ message: 'socket reset' })));
+  const set = (await runDoctor(plain.deps)).metricSet;
+  assert.equal(set.outcome, 'failed');
+  assert.match(set.summary, /socket reset/);
+  assert.doesNotMatch(set.summary, /object Object/);
+
+  const bare = makeMetricSetDeps();
+  onBatch(bare.fb, fbErr(notAnError(Object.create(null) as object)));
+  const bareSet = (await runDoctor(bare.deps)).metricSet;
+  assert.equal(bareSet.outcome, 'failed');
+  assert.match(bareSet.summary, /unknown error \(no message\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 14: every shipped tool is mapped, and data-access expiry is judged
+// ---------------------------------------------------------------------------
+
+/**
+ * The concrete tool surface, loaded through a computed specifier for the same
+ * reason `annotations.test.ts` does: `src/mcp` may not statically import the
+ * tools layer, but this guard needs the real tool names.
+ */
+const TOOLS_BARREL = new URL('../tools/index.js', import.meta.url).href;
+
+async function loadShippedPackages(): Promise<readonly PackageSpec[]> {
+  const barrel = (await import(TOOLS_BARREL)) as Record<string, unknown>;
+  const specs: PackageSpec[] = [];
+  for (const [name, value] of Object.entries(barrel)) {
+    if (!/^create[A-Za-z0-9]*Package$/.test(name) || typeof value !== 'function')
+      continue;
+    const factory = value as (opts: {
+      serverVersion: string;
+      sdkVersion?: string;
+    }) => PackageSpec;
+    specs.push(factory({ serverVersion: '0.0.0-test', sdkVersion: '0.0.0-test' }));
+  }
+  assert.ok(specs.length > 0, 'no package factories found in src/tools/index.ts');
+  return specs;
+}
+
+test('TOOL_PERMISSIONS maps every shipped tool, so none inherits its whole package set (wave 14)', async () => {
+  const unmapped = (await loadShippedPackages())
+    .flatMap((spec) => spec.tools.map((tool) => tool.name))
+    .filter((name) => !Object.hasOwn(TOOL_PERMISSIONS, name))
+    .sort();
+  assert.deepEqual(unmapped, []);
+});
+
+test('block/unblock need only pages_manage_engagement and are not reported blocked without pages_read_user_content (wave 14)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('moderation', [
+        'facebook_hide_comment',
+        'facebook_block_user',
+        'facebook_unblock_user',
+        'facebook_list_comments',
+      ]),
+    ],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_manage_engagement'],
+  });
+
+  const moderation = row((await runDoctor(deps)).matrix, 'moderation');
+  assert.equal(moderation.status, 'partial');
+  // Only the read that genuinely needs pages_read_user_content is blocked.
+  assert.deepEqual([...moderation.blockedTools], ['facebook_list_comments']);
+});
+
+test('facebook_get_video_status is a read and is not blocked by a missing pages_manage_posts (wave 14)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('posts', [
+        'facebook_create_post',
+        'facebook_list_scheduled_posts',
+        'facebook_get_video_status',
+      ]),
+    ],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_read_engagement'],
+  });
+
+  const posts = row((await runDoctor(deps)).matrix, 'posts');
+  assert.equal(posts.status, 'partial');
+  assert.deepEqual([...posts.blockedTools], ['facebook_create_post']);
+});
+
+test('a never-expiring token whose DATA ACCESS lapses within the window warns (wave 14)', async () => {
+  const now = 1_000_000_000_000;
+  const { fb, deps } = makeDeps({ nowMs: now });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 0, // the token itself never expires...
+    data_access_expires_at: now / 1000 + 2 * 86_400, // ...but data access ends in 2 days
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.neverExpiring, true);
+  assert.equal(report.summary.verdict, 'warn');
+  assert.equal(report.token.dataAccessExpiringSoon, true);
+  assert.ok(
+    report.summary.findings.some(
+      (f) => f.severity === 'warn' && /data access/i.test(f.detail),
+    ),
+    'expected a data-access expiry finding',
+  );
+  assert.match(renderDoctorReport(report), /data access: {2}\S+ \(EXPIRING SOON/);
+});
+
+test('a data access that has already lapsed warns; one far away does not (wave 14)', async () => {
+  const now = 1_000_000_000_000;
+  const lapsed = makeDeps({ nowMs: now });
+  withDebugToken(lapsed.fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: now / 1000 + 50 * 86_400,
+    data_access_expires_at: now / 1000 - 86_400,
+  });
+  const lapsedReport = await runDoctor(lapsed.deps);
+  assert.equal(lapsedReport.summary.verdict, 'warn');
+  assert.equal(lapsedReport.token.dataAccessExpiringSoon, true);
+
+  const far = makeDeps({ nowMs: now });
+  withDebugToken(far.fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: now / 1000 + 50 * 86_400,
+    data_access_expires_at: now / 1000 + 60 * 86_400,
+  });
+  const farReport = await runDoctor(far.deps);
+  assert.equal(farReport.token.dataAccessExpiringSoon, false);
+  assert.equal(farReport.summary.verdict, 'ok');
+});
+
+// ---------------------------------------------------------------------------
+// Wave 15: permission tables agree with the tools, and an unchecked token is
+// not rendered as a checked one
+// ---------------------------------------------------------------------------
+
+test('facebook_list_comments is blocked without pages_read_engagement, as its description says (wave 15)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [pkg('moderation', ['facebook_list_comments', 'facebook_hide_comment'])],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_read_user_content', 'pages_manage_engagement'],
+  });
+
+  const moderation = row((await runDoctor(deps)).matrix, 'moderation');
+  assert.equal(moderation.status, 'partial');
+  assert.deepEqual([...moderation.blockedTools], ['facebook_list_comments']);
+  assert.ok(moderation.missingPermissions.includes('pages_read_engagement'));
+});
+
+test('a moderation row blocked only by pages_messaging names that permission as missing (wave 15)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('moderation', [
+        'facebook_list_comments',
+        'facebook_hide_comment',
+        'facebook_private_reply',
+      ]),
+    ],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: [
+      'pages_read_engagement',
+      'pages_read_user_content',
+      'pages_manage_engagement',
+    ],
+  });
+
+  const report = await runDoctor(deps);
+  const moderation = row(report.matrix, 'moderation');
+  assert.equal(moderation.status, 'partial');
+  assert.deepEqual([...moderation.blockedTools], ['facebook_private_reply']);
+  // The row used to read "missing: (none); blocked tools: facebook_private_reply",
+  // leaving the operator no permission to go and grant.
+  assert.deepEqual([...moderation.missingPermissions], ['pages_messaging']);
+  assert.match(
+    renderDoctorReport(report),
+    /\[PARTIAL\] moderation\s+missing: pages_messaging; blocked tools: facebook_private_reply/,
+  );
+});
+
+test("PACKAGE_PERMISSIONS is the union of its shipped tools' TOOL_PERMISSIONS (wave 15)", async () => {
+  const gaps: string[] = [];
+  for (const spec of await loadShippedPackages()) {
+    const required = new Set(
+      PACKAGE_PERMISSIONS[spec.name as keyof typeof PACKAGE_PERMISSIONS] ?? [],
+    );
+    for (const tool of spec.tools) {
+      for (const perm of TOOL_PERMISSIONS[tool.name] ?? []) {
+        if (!required.has(perm)) gaps.push(`${spec.name}: ${tool.name} needs ${perm}`);
+      }
+    }
+  }
+  assert.deepEqual(gaps.sort(), []);
+});
+
+test('TOOL_PERMISSIONS carries no stale entry for a tool that is not shipped (wave 15)', async () => {
+  const shipped = new Set(
+    (await loadShippedPackages()).flatMap((spec) => spec.tools.map((tool) => tool.name)),
+  );
+  const stale = Object.keys(TOOL_PERMISSIONS)
+    .filter((name) => !shipped.has(name))
+    .sort();
+  assert.deepEqual(stale, []);
+});
+
+test('an expiring token that is also missing a permission reports both findings (wave 15)', async () => {
+  const now = 1_000_000_000_000;
+  const { fb, deps } = makeDeps({
+    nowMs: now,
+    packages: [pkg('core', CORE_TOOLS), pkg('posts', ['facebook_create_post'])],
+  });
+  withDebugToken(fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: now / 1000 + 86_400,
+  });
+
+  const report = await runDoctor(deps);
+  assert.equal(report.summary.verdict, 'warn');
+  const details = report.summary.findings.map((f) => `${f.area}: ${f.detail}`);
+  assert.ok(details.some((d) => /^token: The token expires within 7 days/.test(d)));
+  assert.ok(details.some((d) => /^packages: posts: .*pages_manage_posts/.test(d)));
+});
+
+test('an unchecked token is rendered as unknown, not as invalid with no scopes (wave 15)', async () => {
+  const { fb, deps } = makeDeps();
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError(
+        'network request failed: getaddrinfo ENOTFOUND graph.facebook.com',
+        {
+          code: 0,
+          httpStatus: 0,
+          action: classifyNetworkError({ phase: 'connect', isWrite: false }),
+        },
+      ),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_check_failed');
+  const text = renderDoctorReport(report);
+  // debug_token never answered: "valid: no" / "scopes: (none)" / "not reported
+  // by Graph" each state something Graph was never asked.
+  assert.doesNotMatch(text, /^ {2}valid: +no$/m);
+  assert.doesNotMatch(text, /^ {2}scopes: +\(none\)$/m);
+  assert.doesNotMatch(text, /asset access: +not reported by Graph/);
+  assert.match(text, /^ {2}valid: +unknown \(not checked\)$/m);
+  assert.match(text, /^ {2}scopes: +unknown \(not checked\)$/m);
+  assert.match(text, /^ {2}granular: +unknown \(not checked\)$/m);
+  assert.match(text, /^ {2}asset access: +unknown \(not checked\)$/m);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 17: the moderation rows match the tools' own stated requirements
+// ---------------------------------------------------------------------------
+
+test('facebook_private_reply is usable with the documented set and no pages_manage_engagement (wave 17)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [pkg('moderation', ['facebook_get_comment', 'facebook_private_reply'])],
+  });
+  // Exactly what the tool description names: pages_messaging to send, and
+  // pages_read_engagement + pages_read_user_content for the pre-flight read.
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_messaging', 'pages_read_engagement', 'pages_read_user_content'],
+  });
+
+  const moderation = row((await runDoctor(deps)).matrix, 'moderation');
+  assert.deepEqual([...moderation.blockedTools], []);
+  assert.equal(moderation.status, 'usable');
+});
+
+test('facebook_private_reply is blocked without pages_read_engagement for its pre-flight comment read (wave 17)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [pkg('moderation', ['facebook_hide_comment', 'facebook_private_reply'])],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_messaging', 'pages_manage_engagement', 'pages_read_user_content'],
+  });
+
+  const moderation = row((await runDoctor(deps)).matrix, 'moderation');
+  assert.equal(moderation.status, 'partial');
+  assert.deepEqual([...moderation.blockedTools], ['facebook_private_reply']);
+});
+
+test('facebook_get_comment is blocked without pages_read_engagement, as its description says (wave 17)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [pkg('moderation', ['facebook_get_comment', 'facebook_hide_comment'])],
+  });
+  withDebugToken(fb, {
+    type: 'PAGE',
+    is_valid: true,
+    scopes: ['pages_read_user_content', 'pages_manage_engagement'],
+  });
+
+  const moderation = row((await runDoctor(deps)).matrix, 'moderation');
+  assert.equal(moderation.status, 'partial');
+  assert.deepEqual([...moderation.blockedTools], ['facebook_get_comment']);
+  assert.ok(moderation.missingPermissions.includes('pages_read_engagement'));
+});
+
+// ---------------------------------------------------------------------------
+// Wave 21 (lane E)
+// ---------------------------------------------------------------------------
+
+test('a metric Graph leaves out is not declared a dead name — Graph also omits a metric/period pair it does not serve (wave 21)', async () => {
+  const { fb, deps } = makeMetricSetDeps();
+  onBatch(
+    fb,
+    fbOk({
+      data: [insightRow('page_media_view', [1]), insightRow('page_follows', [])],
+    }),
+  );
+
+  const set = (await runDoctor(deps)).metricSet;
+  assert.deepEqual(
+    set.verdicts.map((v) => v.status),
+    ['accepted', 'empty', 'unknown'],
+  );
+  const silent = String(set.verdicts[2]?.suggestion);
+  // The api layer documents that Graph drops an unsupported metric/period pair
+  // from the answer instead of failing the call; the probe asks period=day only,
+  // so an absent entry does not prove the NAME is dead.
+  assert.match(silent, /period="day"/, 'the period the probe asked for is named');
+  assert.doesNotMatch(
+    silent,
+    /so the name is not valid/,
+    'an absent entry is not proof the name is invalid',
+  );
+  assert.doesNotMatch(
+    set.notes.join('\n'),
+    /does not support daily buckets also answers empty/,
+    'a metric without daily buckets is omitted (unknown), not answered empty',
+  );
+});
+
+test('a halted isolation pass does not tell the operator to fix names it never asked about (wave 21)', async () => {
+  const { fb, deps } = makeMetricSetDeps();
+  onBatch(fb, fbErr(metricRejection('page_media_view')));
+  onSingle(fb, 'page_media_view', fbErr(metricRejection('page_media_view')));
+  onSingle(
+    fb,
+    'page_follows',
+    fbErr(
+      new GraphApiError('User request limit reached', {
+        code: 17,
+        httpStatus: 429,
+        action: {
+          category: 'rate_limit',
+          retryable: true,
+          operatorText: 'Back off and re-run the doctor later.',
+        },
+      }),
+    ),
+  );
+
+  const set = (await runDoctor(deps)).metricSet;
+  assert.deepEqual(
+    set.verdicts.map((v) => v.status),
+    ['rejected', 'unknown', 'unknown'],
+  );
+  const notes = set.notes.join('\n');
+  assert.doesNotMatch(
+    notes,
+    /ACTION: 3 of 3/,
+    'two names were never judged; counting them as drift sends the operator to edit a correct list',
+  );
+  assert.match(notes, /ACTION: 1 of 3/);
+  assert.match(notes, /2 of 3 shipped metric name\(s\) were not probed/);
+});
+
+test('a debug_token call rejected under the app credential does not convict the token alone (wave 21)', async () => {
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({
+      accessToken: 'EAA-runtime',
+      appId: '123',
+      appSecret: 'APP-SECRET-PLACEHOLDER',
+    }),
+  });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('Invalid OAuth access token signature.', {
+        code: 190,
+        httpStatus: 400,
+        type: 'OAuthException',
+      }),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  // The call was authenticated with FB_APP_ID|FB_APP_SECRET, not with the token
+  // under test — Graph's refusal may be about either credential.
+  assert.equal(fb.lastRequest()?.token, '123|APP-SECRET-PLACEHOLDER');
+  assert.equal(report.token.diagnosis, 'token_malformed');
+  assert.equal(report.summary.verdict, 'fail');
+  const finding = report.summary.findings.find((f) => f.area === 'token');
+  assert.ok(finding);
+  assert.match(
+    finding.detail,
+    /FB_APP_SECRET/,
+    'the app credential is named as a suspect',
+  );
+  assert.doesNotMatch(
+    finding.detail,
+    /did not accept this token — re-issue it/,
+    'a wrong app secret must not send the operator off to rotate a healthy token',
+  );
+  assert.match(renderDoctorReport(report), /FB_APP_ID\|FB_APP_SECRET/);
+});
+
+test('a rejected debug_token call leaves the package matrix unverified, not blocked (wave 21)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('core', CORE_TOOLS),
+      pkg('reader', ['facebook_list_posts', 'facebook_get_post']),
+    ],
+  });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('Error validating access token: malformed access token', {
+        code: 190,
+        httpStatus: 400,
+        type: 'OAuthException',
+      }),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_malformed');
+  // Graph refused the CALL, so no scope list ever came back: "missing:
+  // pages_show_list" would be a permission verdict nobody observed.
+  for (const matrixRow of report.matrix) {
+    assert.equal(matrixRow.status, 'unverified', matrixRow.package);
+    assert.deepEqual(matrixRow.missingPermissions, []);
+  }
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'packages'),
+    false,
+    'the token finding carries the failure; no invented "missing" list under it',
+  );
+  assert.equal(report.summary.verdict, 'fail', 'still a failure — from the token');
+  const text = renderDoctorReport(report);
+  assert.doesNotMatch(text, /missing: /);
+  assert.match(text, /scopes:\s+unknown \(not checked\)/);
+});
+
+test('a 200 that rules the token invalid leaves the package matrix unverified, not blocked (wave 24)', async () => {
+  const { fb, deps } = makeDeps({
+    packages: [
+      pkg('core', CORE_TOOLS),
+      pkg('reader', ['facebook_list_posts', 'facebook_get_post']),
+    ],
+  });
+  // The common shape of a dead token: Graph answers the CALL with 200 and rules
+  // on the SUBJECT inside it, with no scope list. The wave-21 fix covered only
+  // the thrown 4xx, so this path still judged every package against the empty
+  // default and printed "BLOCKED — missing: pages_show_list, ..." for grants
+  // nobody observed; the operator went off to re-grant permissions when the one
+  // thing wrong was the token.
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbOk({
+      data: {
+        is_valid: false,
+        error: {
+          code: 190,
+          subcode: 463,
+          message: 'Error validating access token: Session has expired.',
+        },
+      },
+    }),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_malformed');
+  for (const matrixRow of report.matrix) {
+    assert.equal(matrixRow.status, 'unverified', matrixRow.package);
+    assert.deepEqual(matrixRow.missingPermissions, []);
+    assert.deepEqual(matrixRow.blockedTools, []);
+  }
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'packages'),
+    false,
+    'the token finding carries the failure; no invented "missing" list under it',
+  );
+  assert.equal(report.summary.verdict, 'fail', 'still a failure — from the token');
+  assert.doesNotMatch(renderDoctorReport(report), /missing: /);
+});
+
+test('no configured token leaves the package matrix unverified, not blocked (wave 26)', async () => {
+  const { deps } = makeDeps({
+    settings: makeSettings(),
+    packages: [
+      pkg('core', CORE_TOOLS),
+      pkg('reader', ['facebook_list_posts', 'facebook_get_post']),
+    ],
+  });
+  // With no credential at all, debug_token is never asked, so no scope was
+  // observed. Judging every package against the empty default printed
+  // "No loaded package can run under the granted scopes (missing:
+  // pages_show_list, ...)" — a permission verdict about a token that does not
+  // exist, sending the operator to re-grant permissions instead of setting one.
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'no_token');
+  for (const matrixRow of report.matrix) {
+    assert.equal(matrixRow.status, 'unverified', matrixRow.package);
+    assert.deepEqual(matrixRow.missingPermissions, []);
+    assert.deepEqual(matrixRow.blockedTools, []);
+  }
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'packages'),
+    false,
+    'the token finding carries the failure; no invented "missing" list under it',
+  );
+  assert.equal(report.summary.verdict, 'fail', 'still a failure — from the token');
+  assert.doesNotMatch(renderDoctorReport(report), /missing: /);
+});
+
+test('metric-set probe reads the Page insights edge with the Page token, not the user credential (wave 26)', async () => {
+  // Page insights want a Page access token. Sent bare, the request went out
+  // under FB_SYSTEM_TOKEN / FB_ACCESS_TOKEN (the transport's fallback), so a
+  // healthy install drew a refusal ("probe failed" -> an `unknown` finding) or
+  // Graph's silent empty answer (CC-AUTH-2) -> every metric judged `unknown`
+  // or `empty`, while the insights tools themselves derive and use the Page
+  // token and work fine.
+  const { fb, deps } = makeMetricSetDeps({
+    settings: makeSettings({
+      systemToken: 'SYSTEM-TOKEN-PLACEHOLDER',
+      defaultPageId: '1010',
+    }),
+  });
+  onBatch(fb, fbOk({ data: [insightRow('page_media_view', [1])] }));
+
+  const set = (await runDoctor(deps)).metricSet;
+  const [call] = insightsCalls(fb);
+  assert.ok(call);
+  assert.equal(call.token, derivedPageToken('1010'));
+  assert.equal(set.outcome, 'probed');
+  assert.equal(set.requests, 1, 'requests counts the insights calls');
+});
+
+test("metric-set probe uses a profile's own Page token and derives nothing for it (wave 26)", async () => {
+  const { fb, deps } = makeMetricSetDeps({
+    settings: makeSettings({
+      accessToken: 'ACCESS-TOKEN-PLACEHOLDER',
+      profiles: {
+        agency: { pageId: '3030', tokenOverride: 'AGENCY-PAGE-TOKEN-PLACEHOLDER' },
+      },
+    }),
+  });
+  fb.on((req) => req.path === '/3030/insights', fbOk({ data: [] }));
+
+  await runDoctor(deps);
+  const [call] = insightsCalls(fb);
+  assert.ok(call);
+  assert.equal(call.token, 'AGENCY-PAGE-TOKEN-PLACEHOLDER');
+  assert.equal(
+    fb.calls.some((req) => req.protocol === 'json' && req.path === '/3030'),
+    false,
+    'an override is used verbatim, never derived',
+  );
+});
+
+test('metric-set probe: a failed Page-token derivation is reported as such, and no insights call is made (wave 26)', async () => {
+  const { fb, deps } = makeMetricSetDeps({
+    settings: makeSettings({
+      accessToken: 'ACCESS-TOKEN-PLACEHOLDER',
+      defaultPageId: '4040',
+    }),
+  });
+  fb.on(
+    (req) => req.protocol === 'json' && req.path === '/4040',
+    fbErr(new Error('socket hang up')),
+  );
+
+  const set = (await runDoctor(deps)).metricSet;
+  assert.equal(set.outcome, 'failed');
+  assert.match(set.summary, /Page token for Page 4040/);
+  assert.match(set.summary, /socket hang up/);
+  assert.equal(insightsCalls(fb).length, 0);
+  assert.equal(set.requests, 0, 'no insights call was spent');
+});
+
+test('metric-set probe: an FB_PAGE_TOKEN install reads with that token and derives nothing (wave 26)', async () => {
+  const { fb, deps } = makeMetricSetDeps({
+    settings: makeSettings({
+      pageToken: 'PAGE-TOKEN-PLACEHOLDER',
+      defaultPageId: '1010',
+    }),
+  });
+  onBatch(fb, fbOk({ data: [insightRow('page_media_view', [1])] }));
+
+  await runDoctor(deps);
+  const [call] = insightsCalls(fb);
+  assert.ok(call);
+  assert.equal(call.token, 'PAGE-TOKEN-PLACEHOLDER');
+  assert.equal(
+    fb.calls.some((req) => req.protocol === 'json' && req.path === '/1010'),
+    false,
+    'with no base token there is nothing to derive from',
+  );
 });

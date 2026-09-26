@@ -7,11 +7,12 @@ import {
   fbErr,
   fbOk,
 } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { classifyNetworkError, GraphApiError } from '../core/index.js';
 import type {
   Clock,
   ErrorCategory,
   FbRequest,
+  FbResponse,
   JsonRequest,
   RuploadRequest,
 } from '../core/index.js';
@@ -52,6 +53,15 @@ const TOTAL = 12;
 const API_VERSION = 'v25.0';
 /** The rupload layout: api-name, then version, then id — version is SECOND. */
 const UPLOAD_PATH = `/video-upload/${API_VERSION}/${SESSION_ID}`;
+
+/**
+ * A Graph id as it reaches this module when the wire sent a JSON NUMBER.
+ * `JSON.parse` has already rounded it to the nearest double, so the low digits
+ * are gone before any code here gets a look at it. Written through `Number(...)`
+ * rather than as a literal so the rounding is the test's subject rather than a
+ * lint error about a lossy literal.
+ */
+const ROUNDED_WIRE_ID = Number('12345678901234567890');
 
 /** Deterministic file bytes; the pattern makes a mis-sliced chunk obvious. */
 function bytes(n: number): Uint8Array {
@@ -428,6 +438,24 @@ test('startVideoUpload reports a restart when the edge returns no session id', a
   );
 });
 
+test('startVideoUpload refuses a numeric upload_session_id rather than rounding one', async () => {
+  const { fb, deps, sessions } = harness();
+  // `fbRequest` CASTS the body, so an id arriving as a number is a fact about
+  // the wire, not an impossibility (CC-NET-2). `String(n)` would mint a
+  // plausible-looking session id that every chunk POST then uploads into, and
+  // the whole file would be spent against a session Meta never opened. Refusing
+  // here costs one round trip; discovering it after the transfer costs the file.
+  fb.on(isStart, fbOk({ upload_session_id: ROUNDED_WIRE_ID, video_id: VIDEO_ID }));
+
+  const err = asGraphError(
+    await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL }).catch(
+      (e: unknown) => e,
+    ),
+  );
+  assert.equal(err.action?.operatorText, SESSION_DESYNC_NOTE);
+  assert.equal(sessions.size(), 0, 'no session is opened around an id we cannot trust');
+});
+
 test('startVideoUpload falls back to one chunk step when end_offset is nonsense', async () => {
   const { fb, deps } = harness();
   fb.on(isStart, fbOk(startBody(0, { end_offset: 'not-a-number' })));
@@ -438,6 +466,42 @@ test('startVideoUpload falls back to one chunk step when end_offset is nonsense'
     chunkSize: MIN_CHUNK_SIZE,
   });
   assert.equal(session.endOffset, TOTAL, 'min(start + chunkSize, total)');
+});
+
+test('startVideoUpload refuses a first window that starts past the file end (CC-MEDIA-3)', async () => {
+  // The chunk loop already refuses an acknowledged offset past the file end,
+  // because a session that declared `total` bytes cannot hold more. The FIRST
+  // window deserves the same check: accepted as-is, it registers a session that
+  // is "already transferred", so transfer sends nothing and finish closes a
+  // video with none of the caller's bytes while reporting them as sent.
+  const { fb, deps, sessions } = harness();
+  fb.on(isStart, fbOk(startBody(TOTAL, { start_offset: String(TOTAL * 10) })));
+
+  const err = asGraphError(
+    await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL }).catch(
+      (e: unknown) => e,
+    ),
+  );
+  assert.equal(err.action?.operatorText, SESSION_DESYNC_NOTE);
+  assert.match(err.message, /past the 12-byte file end/);
+  assert.equal(
+    sessions.size(),
+    0,
+    'no session is registered around a window we cannot trust',
+  );
+});
+
+test('uploadVideo never finishes a video whose start window lies past the file end', async () => {
+  const { fb, deps } = harness();
+  fb.on(isStart, fbOk(startBody(TOTAL, { start_offset: String(TOTAL + 1) })));
+  fb.on(isFinish, fbOk({ id: VIDEO_ID, success: true }));
+
+  const err = await uploadVideo(deps, { pageId: PAGE_ID, data: bytes(TOTAL) }).catch(
+    (e: unknown) => e,
+  );
+
+  assert.ok(err instanceof GraphApiError, 'the upload must fail, not report success');
+  assert.equal(fb.calls.filter(isFinish).length, 0, 'finish is never sent');
 });
 
 // ---------------------------------------------------------------------------
@@ -679,6 +743,54 @@ test('retry exhaustion fails with a bounded resume error and marks the session f
   assert.equal(session?.startOffset, 0, 'no bytes were ever confirmed');
 });
 
+test('retry exhaustion names the video id the caller is told to check the status of', async () => {
+  // The operator text says "check the video status before re-uploading". The
+  // tools layer builds a fresh session registry per call, so once this error
+  // leaves the api layer the id `start` assigned is gone unless it rides on the
+  // error itself — and without it there is nothing to poll.
+  const { fb, deps } = harness({ maxResumeAttempts: 1 });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isProbe, fbOk(statusUploading(0)));
+  fb.on(isChunk, fbErr(graphErr('transient', 500)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.match(err.message, /could not be resumed/);
+  assert.match(
+    err.message,
+    new RegExp(`video '${VIDEO_ID}'`),
+    'the id is in the message',
+  );
+  assert.match(
+    err.action?.operatorText ?? '',
+    new RegExp(`video '${VIDEO_ID}'`),
+    'the status-check guidance names the video to check',
+  );
+});
+
+test('a stalled offset that exhausts the budget also names the video id', async () => {
+  const { fb, deps } = harness({ maxResumeAttempts: 0 });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isChunk, fbOk(chunkBody(0, 0)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.match(err.message, /stuck at 0 of 12/);
+  assert.match(err.message, new RegExp(`video '${VIDEO_ID}'`));
+});
+
 test('a non-resumable chunk failure propagates untouched and is never retried', async () => {
   const { fb, deps, sessions } = harness();
   fb.on(isStart, fbOk(startBody(TOTAL)));
@@ -699,6 +811,22 @@ test('a non-resumable chunk failure propagates untouched and is never retried', 
     'no offset probe for a permanent fault',
   );
   assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
+});
+
+test('a failure rejected as a plain { message } object keeps its reason on the session', async () => {
+  const { fb, deps, sessions } = harness();
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isChunk, fbErr({ message: 'socket hang up' } as unknown as Error));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  await transferVideoUpload(deps, {
+    uploadSessionId: SESSION_ID,
+    data: bytes(TOTAL),
+  }).catch(() => undefined);
+
+  const session = sessions.get(SESSION_ID);
+  assert.equal(session?.phase, 'failed');
+  assert.equal(session?.lastError, 'socket hang up');
 });
 
 test('an abort propagates immediately and leaves the session resumable (CC-MCP-2)', async () => {
@@ -786,6 +914,70 @@ test('a server offset that never advances exhausts the budget instead of looping
   assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
 });
 
+test('a server offset behind the local one is a rewind: the next chunk starts where Graph says (CC-MEDIA-2)', async () => {
+  const { fb, deps } = harness();
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  fb.on(isChunk, fbOk(chunkBody(8, 12)), 1);
+  // Graph did not keep [8, 12) and asks for [4, 8) again: its offset is the
+  // authoritative one, so the next chunk must start at 4, not at the local 8.
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  fb.on(isChunk, fbOk(chunkBody(8, 12)), 1);
+  fb.on(isChunk, fbOk(chunkBody(12, 12)), 1);
+  const data = bytes(TOTAL);
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const session = await transferVideoUpload(deps, { uploadSessionId: SESSION_ID, data });
+
+  const chunks = chunksOf(fb);
+  assert.deepEqual(
+    chunks.map((c) => c.fileOffset),
+    [0, 4, 8, 4, 8],
+    'the chunk after the rewind starts at the server offset, not the local one',
+  );
+  assert.deepEqual([...(chunks[3]?.chunk ?? [])], [...data.subarray(4, 8)]);
+  assert.equal(session.startOffset, TOTAL);
+  assert.equal(session.phase, 'transferred');
+  assert.equal(
+    session.resumes,
+    1,
+    'a rewind consumes one resume attempt, so the loop stays bounded',
+  );
+});
+
+test('a server offset past the file end is a desync, not a completed transfer (CC-MEDIA-3)', async () => {
+  const { fb, deps, sessions } = harness();
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  // A session that declared 12 bytes cannot have received 40: the server is
+  // describing some other file (or some other session). Calling that "done"
+  // would finish — and possibly publish — a video that is not this one.
+  fb.on(isChunk, fbOk(chunkBody(40, 40)), 1);
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.operatorText, SESSION_DESYNC_NOTE);
+  assert.match(err.message, /40/);
+  assert.equal(
+    chunksOf(fb).length,
+    2,
+    'nothing more is sent on a session that no longer describes this file',
+  );
+  const session = sessions.get(SESSION_ID);
+  assert.equal(session?.phase, 'failed');
+  assert.equal(
+    session?.startOffset,
+    4,
+    'the last confirmed offset is kept, not the impossible one',
+  );
+});
+
 test('a missing offset in the accept response assumes the sent window landed', async () => {
   const { fb, deps } = harness();
   fb.on(isStart, fbOk(startBody(4)));
@@ -803,6 +995,33 @@ test('a missing offset in the accept response assumes the sent window landed', a
     [0, 4],
     'without a declared window it falls back to the client chunk step, capped at the file end',
   );
+});
+
+test('a chunk answered 2xx with success:false and no offset is not counted as landed', async () => {
+  // The body explicitly refuses the chunk. Falling back to "the sent window
+  // landed" would advance past bytes the server declined and report the whole
+  // file transferred, inviting a finish on a video Graph never received.
+  const { fb, deps, sessions } = harness({ maxResumeAttempts: 1 });
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk({ success: false }));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = await transferVideoUpload(deps, {
+    uploadSessionId: SESSION_ID,
+    data: bytes(TOTAL),
+  }).catch((e: unknown) => e);
+
+  assert.ok(
+    err instanceof GraphApiError,
+    'a refused chunk must not end in a clean transfer',
+  );
+  assert.deepEqual(
+    chunksOf(fb).map((c) => c.fileOffset),
+    [0, 0],
+    'the refused window is re-sent, never skipped',
+  );
+  assert.equal(sessions.get(SESSION_ID)?.startOffset, 0);
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
 });
 
 test('a resume offset is also read from the file_offset response header', async () => {
@@ -835,6 +1054,79 @@ test('a resume waits on the injected clock with a scaled backoff', async () => {
 
   assert.deepEqual(clock.sleeps, [100, 200], 'linear scaling, no real timers');
   assert.equal(session.resumes, 2);
+});
+
+/** A retryable chunk fault whose transport attached a server-named wait (`Retry-After`). */
+function waitErr(retryAfterMs: number): GraphApiError {
+  return new GraphApiError('Service Unavailable', {
+    code: 2,
+    httpStatus: 503,
+    action: {
+      category: 'transient',
+      retryable: true,
+      operatorText: 'test',
+      retryAfterMs,
+    },
+  });
+}
+
+test('a chunk re-drive waits out the server-named Retry-After, not just the local backoff', async () => {
+  const { fb, deps, clock } = harness({ maxResumeAttempts: 3, resumeBackoffMs: 100 });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isProbe, fbOk(statusUploading(0)));
+  fb.on(isChunk, fbErr(waitErr(5_000)), 1);
+  fb.on(isChunk, fbOk(chunkBody(TOTAL)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const session = await transferVideoUpload(deps, {
+    uploadSessionId: SESSION_ID,
+    data: bytes(TOTAL),
+  });
+
+  assert.deepEqual(
+    clock.sleeps,
+    [5_000],
+    'the server said when to come back; re-driving after 100 ms hammers the same outage',
+  );
+  assert.equal(session.resumes, 1);
+});
+
+test('a server-named wait beyond the in-call cap surfaces at once with the wait attached', async () => {
+  const { fb, deps, clock, sessions } = harness({
+    maxResumeAttempts: 3,
+    resumeBackoffMs: 100,
+  });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isProbe, fbOk(statusUploading(0)));
+  fb.on(isChunk, fbErr(waitErr(120_000)), 1);
+  fb.on(isChunk, fbOk(chunkBody(TOTAL)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.equal(
+    chunksOf(fb).length,
+    1,
+    'no re-drive into the announced maintenance window',
+  );
+  assert.equal(fb.calls.filter(isProbe).length, 0, 'no offset probe either');
+  assert.deepEqual(clock.sleeps, [], 'a two-minute wait is not slept through in-call');
+  assert.equal(err.action?.retryAfterMs, 120_000, 'the caller is told how long to wait');
+  assert.equal(err.action?.category, 'transient');
+  assert.equal(err.action?.retryable, true);
+  assert.match(err.action?.operatorText ?? '', /v1/, 'names the video to check');
+  assert.equal(err.httpStatus, 503, 'Graph identity is kept');
+  const left = sessions.get(SESSION_ID);
+  assert.equal(left?.resumes, 0, 'no resume attempt was spent');
+  assert.equal(left?.phase, 'transferring', 'the session stays resumable');
 });
 
 test('a failing offset probe does not mask the upload fault', async () => {
@@ -1004,6 +1296,52 @@ test('finishVideoUpload closes the session and returns the video id', async () =
   assert.equal(session?.videoId, 'v9');
 });
 
+test('a second finish on an already finished session is refused without a wire call (CC-MEDIA-3)', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbOk({ success: true, video_id: 'v9' }));
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID, title: 'Launch' });
+  const err = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID, title: 'Launch' }).catch(
+      (e: unknown) => e,
+    ),
+  );
+
+  // `finish` is NOT idempotent: Graph can mint a second post for the same bytes.
+  assert.equal(
+    fb.calls.filter(isFinish).length,
+    1,
+    'upload_phase=finish went out exactly once',
+  );
+  assert.equal(err.action?.category, 'validation');
+  assert.match(err.message, /already finished/);
+  assert.match(err.message, /v9/, 'the refusal names the video the caller already has');
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finished');
+});
+
+test('a transfer on a finished session is refused and does not reopen it for a second finish', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbOk({ success: true }));
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.match(err.message, /already finished/);
+  assert.equal(
+    sessions.get(SESSION_ID)?.phase,
+    'finished',
+    'the phase is not rewound to transferred, which would let a second finish through',
+  );
+  assert.equal(fb.calls.length, 1, 'only the one finish ever reached the wire');
+});
+
 test('finishVideoUpload omits every field the caller did not set', async () => {
   const { fb, deps, sessions } = harness();
   seedCompleted(sessions);
@@ -1018,6 +1356,24 @@ test('finishVideoUpload omits every field the caller did not set', async () => {
   assert.equal(result.videoId, VIDEO_ID, 'falls back to the id start already assigned');
 });
 
+test('finishVideoUpload ignores a numeric video_id and keeps the id start assigned', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  // The rounded id names a video that is not this one. Handing it back would
+  // send the caller to poll — and eventually publish — somebody else's node,
+  // while the video they actually uploaded goes unwatched.
+  fb.on(isFinish, fbOk({ success: true, video_id: ROUNDED_WIRE_ID }));
+
+  const result = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+
+  assert.equal(
+    result.videoId,
+    VIDEO_ID,
+    'the string id from start outranks a rounded one',
+  );
+  assert.equal(sessions.get(SESSION_ID)?.videoId, VIDEO_ID);
+});
+
 test('finishVideoUpload surfaces a false success flag instead of assuming success', async () => {
   const { fb, deps } = harness();
   seedCompleted(deps.sessions);
@@ -1028,6 +1384,30 @@ test('finishVideoUpload surfaces a false success flag instead of assuming succes
   assert.equal(result.success, false, 'the wire verdict is reported, not overwritten');
   assert.equal(result.videoId, VIDEO_ID);
   assert.equal(result.note, CREATED_NOT_READY_NOTE);
+});
+
+test('finishVideoUpload treats a non-boolean success flag as a decline, not a confirmation', async () => {
+  // `success` is documented as "the edge's own flag when it sent one". A string
+  // "false", a `0` or a `null` IS the edge sending one — and sending a refusal.
+  // Coercing those to `true` reports `accepted: true` for a video Graph declined.
+  for (const flag of ['false', 0, null] as const) {
+    const { fb, deps } = harness();
+    seedCompleted(deps.sessions);
+    fb.on(isFinish, fbOk({ success: flag, video_id: VIDEO_ID }));
+
+    const result = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+
+    assert.equal(
+      result.success,
+      false,
+      `a present success of ${JSON.stringify(flag)} is a refusal, not a confirmation`,
+    );
+    assert.equal(
+      result.videoId,
+      VIDEO_ID,
+      'the id still comes back, so nothing is re-uploaded',
+    );
+  }
 });
 
 test('an error during finish marks the session failed and rethrows', async () => {
@@ -1049,6 +1429,122 @@ test('an error during finish marks the session failed and rethrows', async () =>
     TOTAL,
     'the session is kept so finish can be re-issued without re-uploading',
   );
+});
+
+test('a finish whose answer was lost names the video id so the caller can poll instead of re-uploading', async () => {
+  // A lost finish answer may have created (and published) the video. The
+  // transport's ambiguous action points at the feed, which does not answer
+  // "did THIS video get finished" — the video status does, and only the id
+  // `start` assigned can ask it. The tools layer's registry dies with the call.
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  const lost = new GraphApiError(
+    'ambiguous write outcome (network fault) — verify first',
+    {
+      code: 0,
+      httpStatus: 0,
+      action: {
+        category: 'ambiguous',
+        retryable: false,
+        nextTool: 'facebook_list_posts',
+        operatorText: 'Write outcome unknown — verify first.',
+      },
+    },
+  );
+  fb.on(isFinish, fbErr(lost));
+
+  const err = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.equal(err.message, lost.message, 'the transport line stays greppable');
+  assert.equal(err.httpStatus, 0);
+  assert.equal(err.code, 0);
+  assert.equal(err.action?.category, 'ambiguous', 'still a may-have-landed outcome');
+  assert.equal(err.action?.retryable, false);
+  assert.match(
+    err.action?.operatorText ?? '',
+    new RegExp(`video '${VIDEO_ID}'`),
+    'the guidance names the video that may now exist',
+  );
+  assert.equal(err.action?.nextTool, 'facebook_get_video_status');
+  assert.equal(err.cause, lost, 'the transport fault is kept as the cause');
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
+});
+
+test('a finish that failed after reaching the edge (5xx) also names the video id', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(graphErr('transient', 503)));
+
+  const err = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.equal(err.httpStatus, 503);
+  assert.match(err.action?.operatorText ?? '', new RegExp(`video '${VIDEO_ID}'`));
+});
+
+test('a finish that provably never left the host is not reported as maybe-landed', async () => {
+  // A connect-phase fault is classified by core as "the request provably never
+  // reached Facebook" (transient, retryable). Appending "the finish may have
+  // gone through" to that contradicts the transport and tells the caller a
+  // video may exist when none can.
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  const notSent = new GraphApiError('network request failed: connect ECONNREFUSED', {
+    code: 0,
+    httpStatus: 0,
+    action: classifyNetworkError({
+      phase: 'connect',
+      isWrite: true,
+      reason: 'connect ECONNREFUSED',
+    }),
+  });
+  fb.on(isFinish, fbErr(notSent));
+
+  const err = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+    (e: unknown) => e,
+  );
+
+  assert.equal(err, notSent, 'a provably-unsent fault propagates untouched');
+  assert.doesNotMatch(
+    asGraphError(err).action?.operatorText ?? '',
+    /may have gone through/,
+  );
+});
+
+test('a finish refused before the wire (auth, no HTTP status) is not reported as maybe-landed', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  const refused = graphErr('auth', 0);
+  fb.on(isFinish, fbErr(refused));
+
+  const err = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+    (e: unknown) => e,
+  );
+
+  assert.equal(err, refused);
+});
+
+test('an unclassified finish fault with no HTTP status still names the video id', async () => {
+  // Regression guard for the narrowed rule: no action at all means nothing is
+  // known about whether it was sent, so the video id guidance stays.
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(new GraphApiError('socket closed', { code: 0, httpStatus: 0 })));
+
+  const err = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+      (e: unknown) => e,
+    ),
+  );
+  assert.match(err.action?.operatorText ?? '', new RegExp(`video '${VIDEO_ID}'`));
+  assert.equal(err.action?.nextTool, 'facebook_get_video_status');
 });
 
 test('finishVideoUpload refuses an incomplete transfer without a wire call', async () => {
@@ -1081,6 +1577,32 @@ test('finishVideoUpload on an unknown session says restart the upload', async ()
 
   assert.equal(err.action?.operatorText, SESSION_LOST_NOTE);
   assert.equal(fb.calls.length, 0);
+});
+
+test('finish hands back the video id even if the session expires mid-call (CC-MEDIA-3)', async () => {
+  const h = harness({ ttlMs: 1_000 });
+  seedCompleted(h.sessions);
+  h.fb.on(isFinish, fbOk({ video_id: VIDEO_ID, success: true }));
+
+  // The session is live when `finish` starts and evicted by the time the edge
+  // answers: the call itself straddles the TTL boundary. The video is created,
+  // so telling the caller to restart the upload would duplicate it.
+  const deps: VideoUploadDeps = {
+    ...h.deps,
+    fbRequest: <T = unknown>(req: FbRequest): Promise<FbResponse<T>> => {
+      h.clock.advance(2_000);
+      return h.deps.fbRequest<T>(req);
+    },
+  };
+
+  const res = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+
+  assert.equal(res.videoId, VIDEO_ID);
+  assert.equal(res.uploadSessionId, SESSION_ID);
+  assert.equal(res.totalBytes, TOTAL);
+  assert.equal(res.success, true);
+  assert.equal(res.note, CREATED_NOT_READY_NOTE);
+  assert.equal(h.sessions.get(SESSION_ID), undefined, 'the record really was evicted');
 });
 
 test('finishVideoUpload reports a desync when no video id can be determined', async () => {
@@ -1293,12 +1815,63 @@ test('mapVideoStatus falls back to a generic message for an error with no detail
   assert.match(status.kind === 'error' ? status.message : '', /failed/);
 });
 
+test('mapVideoStatus maps an expired video to a terminal error, never to "poll again"', () => {
+  // `expired` is a dead end: Meta discarded the video. Reporting it as
+  // `processing` tells the caller to poll a node that will never become ready.
+  const status = mapVideoStatus(VIDEO_ID, {
+    id: VIDEO_ID,
+    status: { video_status: 'expired' },
+  });
+
+  assert.equal(status.kind, 'error');
+  assert.match(status.kind === 'error' ? status.message : '', /expired/);
+  assert.equal(status.note, STATUS_NOTES.error);
+});
+
 test('mapVideoStatus defaults an absent or unusable status to `processing`, never ready', () => {
   for (const raw of [{ id: VIDEO_ID }, {}, null, undefined, 'ready', 42, []]) {
     const status = mapVideoStatus(VIDEO_ID, raw);
     assert.equal(status.kind, 'processing', `raw=${JSON.stringify(raw)}`);
     assert.equal(status.note, STATUS_NOTES.unknown);
   }
+});
+
+test('mapVideoStatus never claims "still processing" for a status it does not recognize', () => {
+  // `STATUS_NOTES.unknown` exists for exactly this case. A status object that
+  // carries nothing this module understands — an empty one, or a video_status
+  // Meta added later — is not evidence of transcoding, so the note must not
+  // assert it.
+  for (const raw of [
+    { status: {} },
+    { status: { video_status: 'quarantined' } },
+    { status: { video_status: 'quarantined', uploading_phase: {} } },
+  ]) {
+    const status = mapVideoStatus(VIDEO_ID, raw);
+    assert.equal(status.kind, 'processing', `raw=${JSON.stringify(raw)}: poll again`);
+    assert.equal(status.note, STATUS_NOTES.unknown, `raw=${JSON.stringify(raw)}`);
+  }
+});
+
+test('mapVideoStatus keeps the processing note when the payload says it is processing', () => {
+  for (const raw of [
+    { status: { video_status: 'processing' } },
+    { status: { processing_phase: { status: 'in_progress' } } },
+    { status: { processing_phase: { status: 'not_started' } } },
+    { status: { uploading_phase: { status: 'complete' } } },
+  ]) {
+    const status = mapVideoStatus(VIDEO_ID, raw);
+    assert.equal(status.kind, 'processing', `raw=${JSON.stringify(raw)}`);
+    assert.equal(status.note, STATUS_NOTES.processing, `raw=${JSON.stringify(raw)}`);
+  }
+});
+
+test('mapVideoStatus reads the legacy `{ status: "ready" }` string shape as unknown, never ready (CC-NET-2)', () => {
+  // The old node shape carried `status` as a bare string. It is not the
+  // `{ video_status }` object the poller trusts, so it must not mint `ready`.
+  const status = mapVideoStatus(VIDEO_ID, { id: VIDEO_ID, status: 'ready' });
+
+  assert.equal(status.kind, 'processing');
+  assert.equal(status.note, STATUS_NOTES.unknown);
 });
 
 test('mapVideoStatus accepts a bare status object as well as a full node body', () => {
@@ -1379,4 +1952,150 @@ test('isResumableUploadError falls back to the HTTP status when no action was at
   assert.equal(isResumableUploadError(new Error('boom')), false);
   assert.equal(isResumableUploadError('boom'), false);
   assert.equal(isResumableUploadError(undefined), false);
+});
+
+// ---------------------------------------------------------------------------
+// Verify tools (C2): name a read only when the caller holds the id it needs
+// ---------------------------------------------------------------------------
+
+test('start names no verify tool: a lost start answer leaves the caller no id to verify with', async () => {
+  // Regression: `start` creates no post and hands back the only ids there are.
+  // A lost answer leaves nothing the caller can poll, and no listing shows an
+  // empty upload session, so the transport's guidance must stay neutral.
+  const { fb, deps } = harness();
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+
+  const start = fb.calls.find(isStart);
+  assert.ok(start !== undefined);
+  assert.equal(start.verifyTool, undefined);
+});
+
+test('transfer chunks name facebook_get_video_status as the verify tool once start assigned a video id', async () => {
+  const { fb, deps } = harness();
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  fb.on(isChunk, fbOk(chunkBody(8, 12)), 1);
+  fb.on(isChunk, fbOk(chunkBody(12)), 1);
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  await transferVideoUpload(deps, { uploadSessionId: SESSION_ID, data: bytes(TOTAL) });
+
+  const chunks = chunksOf(fb);
+  assert.equal(chunks.length, 3);
+  for (const chunk of chunks) {
+    assert.equal(
+      chunk.verifyTool,
+      'facebook_get_video_status',
+      `chunk at ${String(chunk.fileOffset)} names the status read`,
+    );
+  }
+});
+
+test('finish names facebook_get_video_status as the verify tool when start assigned a video id', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbOk({ success: true, video_id: VIDEO_ID }));
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+
+  assert.equal(jsonOf(fb.lastRequest()).verifyTool, 'facebook_get_video_status');
+});
+
+test('transfer and finish stay neutral when start assigned no video id', async () => {
+  // Regression: facebook_get_video_status needs the id; without one it is not a
+  // tool the caller can call, so no verify tool is named.
+  const { fb, deps } = harness();
+  fb.on(isStart, fbOk(startBody(TOTAL, { video_id: undefined })));
+  fb.on(isChunk, fbOk(chunkBody(TOTAL)));
+  fb.on(isFinish, fbOk({ success: true, id: VIDEO_ID }));
+
+  await uploadVideo(deps, { pageId: PAGE_ID, data: bytes(TOTAL) });
+
+  for (const call of fb.calls) {
+    assert.equal(call.verifyTool, undefined, `${call.method} ${call.path}`);
+  }
+});
+
+test('retry exhaustion hands the caller facebook_get_video_status as the structured next tool', async () => {
+  // The operator text sends the caller to the video status; the structured
+  // `nextTool` is what the error record surfaces for the model to act on.
+  const { fb, deps } = harness({ maxResumeAttempts: 1 });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isProbe, fbOk(statusUploading(0)));
+  fb.on(isChunk, fbErr(graphErr('transient', 500)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.nextTool, 'facebook_get_video_status');
+  assert.match(err.action?.operatorText ?? '', /facebook_get_video_status/);
+  assert.match(err.action?.operatorText ?? '', new RegExp(`video '${VIDEO_ID}'`));
+});
+
+test('a stalled offset that exhausts the budget also names facebook_get_video_status as the next tool', async () => {
+  const { fb, deps } = harness({ maxResumeAttempts: 0 });
+  fb.on(isStart, fbOk(startBody(TOTAL)));
+  fb.on(isChunk, fbOk(chunkBody(0, 0)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.nextTool, 'facebook_get_video_status');
+});
+
+test('retry exhaustion without a video id does not send the caller to a status check it cannot run', async () => {
+  const { fb, deps } = harness({ maxResumeAttempts: 0 });
+  fb.on(isStart, fbOk(startBody(TOTAL, { video_id: undefined })));
+  fb.on(isChunk, fbErr(graphErr('transient', 500)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.nextTool, undefined);
+  assert.doesNotMatch(
+    err.action?.operatorText ?? '',
+    /video status/,
+    'there is no video id to poll the status of',
+  );
+  assert.match(err.action?.operatorText ?? '', /no video id/);
+});
+
+test('a deferred resume without a video id does not send the caller to a status check it cannot run', async () => {
+  const { fb, deps } = harness({ maxResumeAttempts: 3 });
+  fb.on(isStart, fbOk(startBody(TOTAL, { video_id: undefined })));
+  fb.on(isChunk, fbErr(waitErr(120_000)));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.retryAfterMs, 120_000);
+  assert.equal(err.action?.nextTool, undefined);
+  assert.doesNotMatch(
+    err.action?.operatorText ?? '',
+    /video status/,
+    'there is no video id to poll the status of',
+  );
+  assert.match(err.action?.operatorText ?? '', /no video id/);
 });

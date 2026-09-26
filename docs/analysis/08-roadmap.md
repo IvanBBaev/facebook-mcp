@@ -39,7 +39,7 @@ Phase 5 = Wave 6).
 | Gate | Action | Source |
 |---|---|---|
 | G1 | Mint the real system-user token, or confirm the Page-token fallback path empirically | C1 |
-| G2 | Verify npm name availability (`facebook-mcp-ai`; fallback `@ivanbbaev/facebook-mcp`); check Meta brand terms; decision recorded in 02 | C8 |
+| G2 | Verify npm name availability (`facebook-mcp-ai`; fallback `@ivanbaev/facebook-mcp` — the npm scope is `@ivanbaev`, one `b`, unlike the GitHub user `IvanBBaev`); check Meta brand terms; decision recorded in 02 | C8 |
 | G3 | Decide the clock seam: injectable `now()`/`sleep()` through `core` | QA #6 |
 | G4 | Repo visibility decision (npm provenance requires public before first tag); license = MIT, LICENSE file at repo root | DevOps, PM |
 
@@ -95,7 +95,8 @@ real token end-to-end. npm name reserved (C8).
 
 **Entry:** Phase 0 gate green.
 
-- `api/pages.ts`, `api/posts-read.ts`, `api/insights.ts`; cursor pagination
+- `api/pages.ts` (shipped as `core/pages-registry.ts`), `api/posts-read.ts`,
+  `api/insights.ts`; cursor pagination
   helper with `fetchAll` + `truncated` (CC-PAGE-1/2/3/5, fast-check
   termination property).
 - Tools: `reader` + `insights` packages. Insights: doctor metric probe →
@@ -115,7 +116,8 @@ period-boundary behavior recorded (CC-INS-5 ✎).
 
 **Entry:** Phase 1 gate green; test Page exists and sweeper works.
 
-- `api/posts-write.ts`, `api/media.ts` (photo, multi-photo with child cleanup
+- `api/posts-write.ts`, `api/media.ts` (shipped as `api/media-photos.ts`,
+  `api/media-reels.ts`, `api/media-video.ts`) (photo, multi-photo with child cleanup
   — CC-MEDIA-10, resumable video with in-memory session state — CC-MEDIA-1/2/3,
   Reels state machine — CC-MEDIA-8/9), `facebook_get_video_status`
   (CC-MEDIA-7 — **shipped**: API function and tool both landed, in the
@@ -197,7 +199,8 @@ macOS + Windows; a non-author completes onboarding in ≤20 min (PM #3).
 
 **Entry:** Phase 4 shipped; spending limit set on the ad account.
 
-- `api/ads.ts`: campaign/adset/ad **read** + insights (sync with async
+- `api/ads.ts` (shipped as `api/ads-read.ts` + `api/ads-control.ts`):
+  campaign/adset/ad **read** + insights (sync with async
   fallback — CC-ADS-5) + status changes + budget changes (minor units —
   CC-ADS-3; irreversible-tier gating + `FB_ADS_BUDGET_CEILING` — CC-ADS-7).
   Create-chain, creative upload, custom audiences all deferred.
@@ -217,6 +220,13 @@ above ceiling; belt-and-braces protocol observed.
 - **+90 days:** adoption checkpoint (≥100 weekly downloads / ≥25 stars / ≥3
   non-author issues) — else pre-committed downgrade to personal tool, minimum
   maintained core = `core+reader+posts+insights` (PM #4/#7).
+
+  ✎ **Anchored 2026-08-31.** "Post-launch" was never given a date here, which
+  left the checkpoint unfalsifiable — a commitment nobody could hold the project
+  to. Launch is the first public release: `0.7.0`, on npm 2026-08-27 (see
+  [10 §1](10-v1-release-definition.md)). The checkpoint is therefore
+  **2026-11-25**, and `SUPPORT.md` now states that date rather than a relative
+  one.
 
 ## Deferred / future (unchanged decisions recorded in SUMMARY §D)
 

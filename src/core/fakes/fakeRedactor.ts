@@ -74,7 +74,19 @@ export function createFakeRedactor(config: RedactorConfig = {}): FakeRedactor {
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
       const safeKey = redactDeep(key, seen) as string;
-      out[safeKey] = redactDeep(val, seen);
+      // `__proto__` arrives as an OWN key off `JSON.parse`; a plain assignment
+      // would run the inherited setter and drop it, exactly as the real redactor
+      // used to. Mirrors `setOwn` in `src/core/redact.ts`.
+      if (safeKey === '__proto__') {
+        Object.defineProperty(out, safeKey, {
+          value: redactDeep(val, seen),
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      } else {
+        out[safeKey] = redactDeep(val, seen);
+      }
     }
     return out;
   };

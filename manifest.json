@@ -216,7 +216,7 @@
     "page_token": {
       "type": "string",
       "title": "Page access token",
-      "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured.",
+      "description": "Long-lived Page access token used as a fallback credential when no user or system-user token is configured. It belongs to exactly one Page, so set FB_PAGE_ID to that Page ID alongside it (the doctor / facebook_whoami reports it as the acting Page); a Page token without its Page ID is bound to nothing.",
       "required": false,
       "sensitive": true
     },
@@ -236,7 +236,7 @@
     "page_id": {
       "type": "string",
       "title": "Default Page ID",
-      "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument.",
+      "description": "Default Facebook Page ID, used when a tool call omits an explicit profile argument. Required when FB_PAGE_TOKEN is the only credential: it names the Page that token belongs to.",
       "required": false
     },
     "write_mode": {

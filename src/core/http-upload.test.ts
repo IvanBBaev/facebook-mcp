@@ -19,7 +19,12 @@ import type {
   Settings,
   UsageSnapshot,
 } from './index.js';
-import { createFakeClock, createFakeRedactor, type FakeRedactor } from './fakes/index.js';
+import {
+  createFakeClock,
+  createFakeRedactor,
+  type FakeClock,
+  type FakeRedactor,
+} from './fakes/index.js';
 import { withFetch, type FetchMock } from '../testing/index.js';
 
 // ---------------------------------------------------------------------------
@@ -81,10 +86,35 @@ function createTestLogger(): TestLogger {
   };
 }
 
+/**
+ * A fake clock whose `sleep` advances virtual time by itself and records every
+ * wait, so a test that is not ABOUT pacing still runs to completion while the
+ * waits it incurred stay assertable (`sleeps`). A test that is about pacing uses
+ * a plain `createFakeClock()` and ticks it by hand.
+ */
+interface AutoClock extends FakeClock {
+  readonly sleeps: readonly number[];
+}
+
+function createAutoClock(startMs = 0): AutoClock {
+  const inner = createFakeClock(startMs);
+  const sleeps: number[] = [];
+  return {
+    ...inner,
+    sleeps,
+    sleep: async (ms: number, signal?: AbortSignal): Promise<void> => {
+      sleeps.push(ms);
+      const done = inner.sleep(ms, signal);
+      inner.advance(ms);
+      await done;
+    },
+  };
+}
+
 function makeDeps(overrides: Partial<UploadHandlerDeps> = {}): UploadHandlerDeps {
   return {
     settings: makeSettings(),
-    clock: createFakeClock(),
+    clock: createAutoClock(),
     redactor: createFakeRedactor(),
     logger: createTestLogger(),
     ...overrides,
@@ -107,6 +137,45 @@ function rejectNextFetchWith(value: unknown): void {
       throw value;
     }
     return await inner(input, init);
+  };
+}
+
+/**
+ * Capture every `Response` the `withFetch` fake hands back, so a test can assert
+ * what the client did with the body (`bodyUsed`). Call this INSIDE a `withFetch`
+ * callback: the fake is the `fetch` being wrapped, and `withFetch` restores the
+ * previous global on exit, wrapper included.
+ */
+function captureResponses(): readonly Response[] {
+  const inner = globalThis.fetch;
+  const seen: Response[] = [];
+  globalThis.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+    const response = await inner(...args);
+    seen.push(response);
+    return response;
+  };
+  return seen;
+}
+
+/**
+ * Break the NEXT response's body read, leaving the response head intact.
+ * `fetch` settles on the HEAD; the body is still arriving over the same
+ * connection, so a cut between the two rejects at `response.text()` rather than
+ * at `fetch` (undici spells it `TypeError: terminated`). `withFetch` restores
+ * the previous global on exit, wrapper included.
+ */
+function breakNextBodyRead(message: string): void {
+  const inner = globalThis.fetch;
+  let pending = true;
+  globalThis.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+    const response = await inner(...args);
+    if (pending) {
+      pending = false;
+      Object.defineProperty(response, 'text', {
+        value: (): Promise<string> => Promise.reject(new Error(message)),
+      });
+    }
+    return response;
   };
 }
 
@@ -247,6 +316,55 @@ test('multipart: terminal 4xx maps to GraphApiError and is NOT retried', async (
   });
 });
 
+test('multipart: a 2xx carrying a Graph error envelope is the error, never data', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // Graph is known to ship `{error}` inside an HTTP 200 on some paths; the
+    // status line is not the verdict (the CC-NET-1 precedent in http.ts).
+    mock.enqueue({
+      status: 200,
+      json: {
+        error: { code: 100, type: 'OAuthException', message: 'Invalid parameter' },
+      },
+    });
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(
+      handler({
+        protocol: 'multipart',
+        host: 'graph',
+        method: 'POST',
+        path: '/me/photos',
+        files: [{ name: 'source', data: PHOTO_BYTES }],
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.equal(err.code, 100);
+        assert.equal(err.httpStatus, 200);
+        // Graph refused the write — a terminal application error, not ambiguous.
+        assert.notEqual(err.action?.category, 'ambiguous');
+        return true;
+      },
+    );
+    assert.equal(mock.requests.length, 1);
+  });
+});
+
+test('multipart: a 2xx whose `error` is not a Graph envelope still passes through as data', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 200, json: { id: '1', error: 'not an envelope' } });
+    const handler = createUploadHandler(makeDeps());
+
+    const res = await handler<{ id: string; error: string }>({
+      protocol: 'multipart',
+      host: 'graph',
+      method: 'POST',
+      path: '/me/photos',
+      files: [{ name: 'source', data: PHOTO_BYTES }],
+    });
+    assert.deepEqual(res.data, { id: '1', error: 'not an envelope' });
+  });
+});
+
 test('multipart: 5xx is an ambiguous write — NOT retried, verify first (C2)', async () => {
   await withFetch(async (mock: FetchMock) => {
     mock.enqueue({ status: 500, text: 'upstream boom' });
@@ -298,6 +416,29 @@ test('CC-NET-7: a multipart redirect is refused, never followed off the host', a
     // a status to refuse.
     assert.equal(mock.requests.length, 1);
     assert.equal(mock.lastRequest()?.redirect, 'manual');
+  });
+});
+
+test('CC-NET-7: a refused multipart redirect consumes its body, pinning no socket', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 302,
+      headers: { location: 'https://evil.example/steal' },
+      text: '<html>moved along, nothing to see</html>',
+    });
+    const seen = captureResponses();
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /refusing redirect/);
+      return true;
+    });
+    // `redirect: 'manual'` does NOT hand back an empty opaque-redirect response
+    // under Node/undici: the 3xx arrives with a real body, and a body left unread
+    // keeps its socket out of the pool. Every other exit here reads the body.
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.bodyUsed, true, 'the refused redirect body was left unread');
   });
 });
 
@@ -658,6 +799,186 @@ test('CC-MEDIA-2: a failing offset probe is classified, not surfaced raw', async
   });
 });
 
+test('CC-MEDIA-2: a probe Graph REFUSES is surfaced as the refusal, not as a transient resume', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const logger = createTestLogger();
+    const redactor: FakeRedactor = createFakeRedactor();
+    // The chunk POST 5xxs without an offset, so the handler probes — and the
+    // probe answers, with a refusal: the token expired or was revoked mid-upload.
+    // Graph quotes the credential back in its own message (C3).
+    mock.enqueue({ status: 500, text: 'no offset here' });
+    mock.enqueue({
+      status: 401,
+      json: {
+        error: {
+          code: 190,
+          type: 'OAuthException',
+          message: `Error validating access token: the session for ${TOKEN} was invalidated`,
+        },
+      },
+    });
+    const handler = createUploadHandler(makeDeps({ logger, redactor }));
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      // A revoked credential is PERMANENT. Parsed without looking at the status,
+      // the 401 body simply yields no offset, and the caller is handed the
+      // retryable `server offset unavailable to resume` instead: a resume that
+      // can never succeed, driven again and again, with the operator told the
+      // server lost its place rather than that their token is gone.
+      assert.doesNotMatch(err.message, /server offset unavailable/);
+      assert.equal(err.code, 190);
+      assert.equal(err.httpStatus, 401);
+      assert.equal(err.action?.category, 'auth');
+      assert.equal(err.action?.retryable, false);
+      assert.match(err.message, /Error validating access token/);
+      // Graph quoted the token back; the surfaced error must not (C3).
+      assert.ok(!err.message.includes(TOKEN));
+      assert.match(err.message, /\[REDACTED\]/);
+      return true;
+    });
+    assert.equal(mock.requests.length, 2, 'the chunk POST plus the refused probe');
+    // The Graph error names the cause but not where it came from, so the probe
+    // logs the status it refused on.
+    const probeLog = logger.entries.find((e) => e.msg === 'fbRequest.rupload.probe');
+    assert.ok(probeLog);
+    assert.equal(probeLog.level, 'warn');
+    assert.equal(probeLog.fields?.['status'], 401);
+  });
+});
+
+test('CC-MEDIA-2: a probe answering 5xx stays a retryable transient fault', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 500, text: 'no offset here' }); // chunk POST fails
+    mock.enqueue({ status: 503, text: 'upstream unavailable' }); // the probe is down too
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      // Reading the status must not promote a genuinely transient probe to a
+      // permanent failure: the verdict is the one it always was, now carrying
+      // the status that produced it instead of a bare 0.
+      assert.equal(err.action?.category, 'transient');
+      assert.equal(err.action?.retryable, true);
+      assert.equal(err.httpStatus, 503);
+      return true;
+    });
+    assert.equal(mock.requests.length, 2, 'the chunk POST plus the failed probe');
+  });
+});
+
+test('CC-MEDIA-2: a probe refused with a Retry-After surfaces that wait', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 500, text: 'no offset here' }); // chunk POST fails
+    mock.enqueue({ status: 503, headers: { 'retry-after': '120' }, text: 'maintenance' });
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'transient');
+      assert.equal(err.action?.retryAfterMs, 120_000);
+      return true;
+    });
+    assert.equal(mock.requests.length, 2, 'the chunk POST plus the refused probe');
+  });
+});
+
+test('CC-MEDIA-2: a 2xx probe still resumes, reading its offset from the body', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 500, text: 'no offset here' }); // chunk POST fails, no offset
+    mock.enqueue({ status: 200, json: { file_offset: 4 } }); // probe answers in the BODY
+    mock.enqueue({ json: { h: 'done' } }); // resumed tail succeeds
+    const handler = createUploadHandler(makeDeps());
+
+    const res: FbResponse<{ h: string }> = await handler(ruploadTo('/video-id'));
+
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.equal(mock.requests.length, 3);
+    const [, probe, resend] = mock.requests;
+    assert.ok(probe && resend);
+    assert.equal(probe.method, 'GET');
+    // A status check must not cost the body parse: bytes [4..10) are resent.
+    assert.equal(resend.headers['file_offset'], '4');
+    assert.equal(resend.body.kind, 'binary');
+    if (resend.body.kind === 'binary') {
+      assert.deepEqual(resend.body.bytes, new Uint8Array([14, 15, 16, 17, 18, 19]));
+    }
+  });
+});
+
+test('CC-NET-1: a 2xx probe whose body is a Graph error envelope is the refusal, never a missing offset', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const logger = createTestLogger();
+    const redactor: FakeRedactor = createFakeRedactor();
+    // The chunk POST 5xxs without an offset, so the handler probes. rupload
+    // answers the probe with HTTP 200 whose body is a strict Graph error
+    // envelope — the same 2xx-with-envelope shape the chunk POST already
+    // treats as a refusal (wave 7). The token is gone; the status lies.
+    mock.enqueue({ status: 500, text: 'no offset here' });
+    mock.enqueue({
+      status: 200,
+      json: {
+        error: {
+          code: 190,
+          type: 'OAuthException',
+          message: `Error validating access token: the session for ${TOKEN} was invalidated`,
+        },
+      },
+    });
+    const handler = createUploadHandler(makeDeps({ logger, redactor }));
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      // Read only for an offset, the envelope yields none and the caller is
+      // handed the retryable `server offset unavailable to resume`: a permanent
+      // refusal laundered into a resume that can never succeed.
+      assert.doesNotMatch(err.message, /server offset unavailable/);
+      assert.equal(err.code, 190);
+      assert.equal(err.httpStatus, 200);
+      assert.equal(err.action?.category, 'auth');
+      assert.equal(err.action?.retryable, false);
+      assert.match(err.message, /Error validating access token/);
+      assert.ok(!err.message.includes(TOKEN));
+      assert.match(err.message, /\[REDACTED\]/);
+      return true;
+    });
+    assert.equal(mock.requests.length, 2, 'the chunk POST plus the refused probe');
+    const probeLog = logger.entries.find((e) => e.msg === 'fbRequest.rupload.probe');
+    assert.ok(probeLog, 'the refusing probe is logged with the status that produced it');
+    assert.equal(probeLog.level, 'warn');
+    assert.equal(probeLog.fields?.['status'], 200);
+  });
+});
+
+test('CC-NET-7: a redirect answering the offset probe is refused, never read as an offset', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 500, text: 'no offset here' }); // chunk POST fails, no offset
+    mock.enqueue({
+      status: 302,
+      headers: { location: 'https://evil.example/offset' },
+      text: '<html>moved along, nothing to see</html>',
+    });
+    const seen = captureResponses();
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /refusing redirect/);
+      assert.equal(err.httpStatus, 302);
+      assert.equal(err.action?.retryable, false);
+      return true;
+    });
+    assert.equal(mock.requests.length, 2);
+    // The refused redirect body is consumed here as it is on the chunk POST, so
+    // the socket returns to the pool instead of being pinned.
+    assert.equal(
+      seen.at(-1)?.bodyUsed,
+      true,
+      'the refused redirect body was left unread',
+    );
+  });
+});
+
 test('rupload: 4xx terminal error is mapped and NOT resumed', async () => {
   await withFetch(async (mock: FetchMock) => {
     mock.enqueue({ status: 400, json: { error: { code: 190, message: 'bad token' } } });
@@ -678,6 +999,41 @@ test('rupload: 4xx terminal error is mapped and NOT resumed', async () => {
         return true;
       },
     );
+    assert.equal(mock.requests.length, 1);
+  });
+});
+
+test('rupload: a 2xx carrying a Graph error envelope is the error, never a landed chunk', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 200,
+      json: {
+        error: {
+          code: 190,
+          type: 'OAuthException',
+          message: 'Invalid OAuth access token',
+        },
+      },
+    });
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(
+      handler({
+        protocol: 'rupload',
+        host: 'rupload',
+        method: 'POST',
+        path: RUPLOAD_PATH,
+        fileOffset: 0,
+        chunk: CHUNK,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.equal(err.code, 190);
+        assert.equal(err.httpStatus, 200);
+        return true;
+      },
+    );
+    // Refused, not faulted: no offset probe, no resume.
     assert.equal(mock.requests.length, 1);
   });
 });
@@ -785,6 +1141,61 @@ test('CC-MEDIA-2: no offset in the response nor the probe is a transient fault',
   });
 });
 
+test('C2: a multipart response body lost after a 200 is ambiguous, never surfaced raw', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.on(() => true, { status: 200, json: { id: 'photo-1' } });
+    breakNextBodyRead('terminated');
+    const handler = createUploadHandler(makeDeps());
+
+    // The worst outcome this module can produce: the photo IS on the Page —
+    // Graph answered 200 — and only its id was lost on the way back. Read
+    // outside the fault classification above, that rejection escapes as a bare
+    // `TypeError`, which every layer above reads as "the upload failed" and
+    // which invites a retry that posts the photo twice. It is the same
+    // lost-response fault as a mid-flight reset on a multipart write, and it
+    // takes the same C2 verdict.
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action.retryable, false);
+      assert.match(err.message, /ambiguous upload outcome/);
+      assert.equal(err.httpStatus, 200);
+      return true;
+    });
+    assert.equal(
+      mock.requests.length,
+      1,
+      'an upload Graph already accepted must not re-send',
+    );
+  });
+});
+
+test('CC-MEDIA-2: a chunk response body lost after a 200 resumes from the server offset', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // The chunk POST answers 200, then its body dies mid-read. A chunk is
+    // offset-idempotent, so this is the same resumable transport fault as a
+    // mid-flight reset — not an unclassified crash. The probe settles what
+    // actually landed: here the server holds the whole 10-byte chunk, so there
+    // is no tail to resend and the caller is told, in a classified error, to
+    // move to the next window.
+    mock.on((r) => r.method === 'GET', { headers: { file_offset: '10' } });
+    mock.on((r) => r.method === 'POST', { status: 200, json: { h: 'done' } });
+    breakNextBodyRead('terminated');
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'transient');
+      assert.equal(err.action.retryable, true);
+      assert.match(err.message, /acknowledged the whole chunk/);
+      return true;
+    });
+    // The chunk POST, then the offset probe — never a blind replay of the chunk.
+    assert.equal(mock.requests.length, 2);
+    assert.equal(mock.requests[1]?.method, 'GET');
+  });
+});
+
 test('CC-NET-7: a rupload redirect is refused, never followed and never resumed', async () => {
   await withFetch(async (mock: FetchMock) => {
     mock.enqueue({ status: 307, headers: { location: 'https://evil.example/chunk' } });
@@ -800,6 +1211,62 @@ test('CC-NET-7: a rupload redirect is refused, never followed and never resumed'
     // A 3xx is terminal here: no offset probe, no tail resend.
     assert.equal(mock.requests.length, 1);
     assert.equal(mock.lastRequest()?.redirect, 'manual');
+  });
+});
+
+test('CC-NET-7: a refused rupload redirect consumes its body, pinning no socket', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 307,
+      headers: { location: 'https://evil.example/chunk' },
+      text: '<html>moved along, nothing to see</html>',
+    });
+    const seen = captureResponses();
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /refusing redirect/);
+      return true;
+    });
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.bodyUsed, true, 'the refused redirect body was left unread');
+  });
+});
+
+test('regression CC-NET-7/C3: a redirect back onto the allowlisted host is refused too, and the OAuth header travels nowhere', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    const redactor: FakeRedactor = createFakeRedactor();
+    // The Location is on rupload itself — a "safe" looking hop. It is still
+    // never followed: the credential rides in `Authorization: OAuth`, and
+    // an automatic re-send is exactly what `redirect: 'manual'` forbids.
+    mock.enqueue({
+      status: 308,
+      headers: { location: `https://${HOSTS.rupload}/elsewhere/${TOKEN}` },
+      text: '<html>permanent redirect</html>',
+    });
+    mock.fallback({ json: { h: 'never reached' } });
+    const handler = createUploadHandler(makeDeps({ redactor }));
+
+    await assert.rejects(handler(ruploadTo('/video-id')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /refusing redirect/);
+      assert.equal(err.httpStatus, 308);
+      assert.equal(err.action?.retryable, false);
+      // The surfaced text names the host symbolically; neither the Location
+      // nor the credential appears in it.
+      assert.ok(!err.message.includes(TOKEN));
+      assert.ok(!err.message.includes('/elsewhere/'));
+      return true;
+    });
+    // One request only: the original chunk POST, never the redirected one.
+    assert.equal(mock.requests.length, 1);
+    const only = mock.lastRequest();
+    assert.ok(only);
+    assert.equal(only.redirect, 'manual');
+    assert.ok(only.url.startsWith(`https://${HOSTS.rupload}/`));
+    assert.ok(!only.url.includes('/elsewhere/'));
+    assert.equal(only.headers['authorization'], `OAuth ${TOKEN}`);
   });
 });
 
@@ -939,10 +1406,77 @@ test('uploads decode an empty body as undefined and a non-JSON body verbatim', a
   });
 });
 
+test('CC-NET-2: a throwing onUsage sink cannot fail an upload whose bytes landed', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      json: { id: 'photo_1' },
+      headers: { 'x-app-usage': '{"call_count":5,"total_time":5,"total_cputime":5}' },
+    });
+    const logger = createTestLogger();
+    const handler = createUploadHandler(
+      makeDeps({
+        logger,
+        onUsage: () => {
+          throw new Error('usage sink exploded');
+        },
+      }),
+    );
+
+    // The sink is ADVISORY. The photo is already on Meta's side by the time the
+    // headers are parsed; a metrics handler that throws must not turn a landed
+    // write into a caller-visible failure it would then have to verify.
+    const res: FbResponse<{ id: string }> = await handler({
+      protocol: 'multipart',
+      host: 'graph',
+      method: 'POST',
+      path: '/me/photos',
+      files: [{ name: 'source', data: PHOTO_BYTES }],
+    });
+
+    assert.deepEqual(res.data, { id: 'photo_1' });
+    const warned = logger.entries.find((e) => /usage sink threw/.test(e.msg));
+    assert.ok(warned, 'a contained sink failure must still be visible in the log');
+    assert.equal(warned.level, 'warn');
+  });
+});
+
+test('CC-NET-2: a throwing onUsage sink is never reported as a failed offset probe', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 500, text: 'transient' }); // chunk POST fails, no offset
+    mock.enqueue({ headers: { file_offset: '6' } }); // the probe answers
+    mock.enqueue({ json: { h: 'done' } }); // the resent tail succeeds
+    const logger = createTestLogger();
+    let sinkCalls = 0;
+    const handler = createUploadHandler(
+      makeDeps({
+        logger,
+        onUsage: () => {
+          sinkCalls += 1;
+          // Throw on the OFFSET PROBE's response only. That `feedUsage` call sits
+          // inside the try that classifies probe failures as transport faults, so
+          // an unguarded sink turns into a transient `offset probe failed` — an
+          // error naming a cause that never happened, for a probe that answered.
+          if (sinkCalls === 2) throw new Error('usage sink exploded');
+        },
+      }),
+    );
+
+    const res: FbResponse<{ h: string }> = await handler(ruploadTo('/video-id'));
+
+    assert.deepEqual(res.data, { h: 'done' });
+    // The probe answered and the resume ran on its offset: three calls, not two.
+    assert.equal(mock.requests.length, 3);
+    assert.equal(sinkCalls, 3);
+    const warned = logger.entries.find((e) => /usage sink threw/.test(e.msg));
+    assert.ok(warned);
+    assert.equal(warned.level, 'warn');
+  });
+});
+
 test('the onUsage sink is fed by every upload response, the offset probe included', async () => {
   await withFetch(async (mock: FetchMock) => {
     const snapshots: UsageSnapshot[] = [];
-    const clock = createFakeClock(1_700);
+    const clock = createAutoClock(1_700);
     mock.enqueue({
       status: 500,
       text: 'transient',
@@ -973,7 +1507,8 @@ test('the onUsage sink is fed by every upload response, the offset probe include
     );
     assert.deepEqual(
       snapshots.map((s) => s.seenAt),
-      [1_700, 1_700, 1_700],
+      // The probe and the resend follow the paced 500 ms resend backoff.
+      [1_700, 2_200, 2_200],
     );
   });
 });
@@ -1114,4 +1649,566 @@ test('F07 createFbRequest delegates multipart to the F08 uploadHandler over a sh
     assert.equal(req.headers['authorization'], `Bearer ${TOKEN}`);
     assert.equal(req.body.kind, 'formData');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Connect-phase faults, strict offset parsing, and the server-requested wait
+// ---------------------------------------------------------------------------
+
+test('multipart: a connect-phase fault (upload provably never sent) is a retryable transient, not an ambiguous write', async () => {
+  for (const code of [
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'UND_ERR_CONNECT_TIMEOUT',
+  ]) {
+    await withFetch(async () => {
+      // undici's shape: a `TypeError: fetch failed` whose `cause` carries the code.
+      const thrown = new TypeError('fetch failed', {
+        cause: Object.assign(new Error(`connect ${code} graph.facebook.com`), { code }),
+      });
+      rejectNextFetchWith(thrown);
+      const handler = createUploadHandler(makeDeps());
+
+      await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        // No byte left the machine: telling the operator the photo "may have
+        // landed — verify first" is false, and makes the api layer report an
+        // orphan that cannot exist.
+        assert.notEqual(err.action?.category, 'ambiguous', code);
+        assert.equal(err.action?.category, 'transient', code);
+        assert.equal(err.action?.retryable, true, code);
+        assert.equal(err.httpStatus, 0);
+        assert.equal(err.cause, thrown);
+        return true;
+      });
+    });
+  }
+
+  // A fault after the connection was up (a reset) is still ambiguous (C2).
+  await withFetch(async () => {
+    rejectNextFetchWith(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      }),
+    );
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      return true;
+    });
+  });
+});
+
+test('upload network faults name the underlying cause, not only undici\'s generic "fetch failed"', async () => {
+  // undici rejects every transport fault as `TypeError: fetch failed` and puts
+  // the real reason on `cause`; a plain `{ message }` rejection must keep its text.
+  for (const [label, thrown, expected] of [
+    [
+      'undici cause',
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      }),
+      /read ECONNRESET/,
+    ],
+    ['plain object', { message: 'socket hang up' }, /socket hang up/],
+  ] as const) {
+    for (const req of [multipartTo('/me/photos'), ruploadTo(RUPLOAD_PATH)]) {
+      await withFetch(async () => {
+        // rupload follows a network fault with an offset probe; fault that
+        // too, so the probe's own failure text is what is asserted.
+        if (req.protocol === 'rupload') rejectNextFetchWith(thrown);
+        rejectNextFetchWith(thrown);
+        const handler = createUploadHandler(makeDeps());
+        await assert.rejects(handler(req), (err: unknown) => {
+          assert.ok(err instanceof GraphApiError, `${label} ${req.protocol}`);
+          assert.match(err.message, expected, `${label} ${req.protocol}`);
+          return true;
+        });
+      });
+    }
+  }
+});
+
+test('parseFileOffset: only a plain decimal offset is accepted — hex, exponent, signed or unsafe values never become a resume point', () => {
+  // `Number()` reads all of these as integers; none is an offset a server sent.
+  for (const raw of ['0x4', '1e1', '+4', '4.0', '0b100', '9007199254740993']) {
+    assert.equal(parseFileOffset({ file_offset: raw }), undefined, `header '${raw}'`);
+  }
+  // A malformed header still falls through to a valid body offset.
+  assert.equal(parseFileOffset({ file_offset: '0x4' }, JSON.stringify({ offset: 6 })), 6);
+  // A JSON number beyond 2^53 is not an exact byte position.
+  assert.equal(parseFileOffset({}, '{"file_offset": 1e300}'), undefined);
+  // Plain decimals keep working.
+  assert.equal(parseFileOffset({ file_offset: '0' }), 0);
+  assert.equal(parseFileOffset({ file_offset: '1048576' }), 1_048_576);
+});
+
+test('uploads surface the Retry-After wait the server asked for as retryAfterMs', async () => {
+  // rupload throttle (Graph code 4) with an hour-long Retry-After: the matrix
+  // default is 60s, and the caller must not be told to come back in a minute.
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 429,
+      headers: { 'retry-after': '3600' },
+      json: { error: { code: 4, message: 'Application request limit reached' } },
+    });
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(handler(ruploadTo(RUPLOAD_PATH)), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'rate_limit');
+      assert.equal(err.action?.retryAfterMs, 3_600_000);
+      return true;
+    });
+    assert.equal(mock.requests.length, 1);
+  });
+
+  // rupload 503 past the resume bound: a maintenance window with a named wait.
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 503, headers: { 'retry-after': '90' }, text: 'maintenance' });
+    const handler = createUploadHandler(makeDeps({ maxResumeAttempts: 0 }));
+    await assert.rejects(handler(ruploadTo(RUPLOAD_PATH)), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'transient');
+      assert.equal(err.action?.retryAfterMs, 90_000);
+      return true;
+    });
+  });
+
+  // multipart throttle: never retried here, so the header is the caller's only clue.
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 429,
+      headers: { 'retry-after': '600' },
+      json: { error: { code: 4, message: 'Application request limit reached' } },
+    });
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.retryAfterMs, 600_000);
+      return true;
+    });
+  });
+
+  // A Retry-After on a non-retryable refusal is not attached to it.
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 400,
+      headers: { 'retry-after': '600' },
+      json: { error: { code: 100, message: 'bad param' } },
+    });
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.retryAfterMs, undefined);
+      return true;
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 16 — connect-phase precedence and paced rupload 5xx resends
+// ---------------------------------------------------------------------------
+
+test('multipart: an error whose OWN code is a mid-flight reset stays ambiguous even when its cause names a connect-phase code', async () => {
+  await withFetch(async () => {
+    // The rejection the caller saw is a reset on an established connection; the
+    // connect-phase code sits only on a stale `cause` (e.g. an earlier dial on a
+    // pooled socket). The error's own code describes this failure, exactly as
+    // `isProvablyNotSent` in http.ts reads it for a JSON write.
+    const thrown = Object.assign(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), {
+          code: 'ECONNREFUSED',
+        }),
+      }),
+      { code: 'ECONNRESET' },
+    );
+    rejectNextFetchWith(thrown);
+    const handler = createUploadHandler(makeDeps());
+
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      // The photo may have landed: "never sent, safe to retry" invites a duplicate.
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.retryable, false);
+      assert.doesNotMatch(err.message, /never sent/);
+      return true;
+    });
+  });
+});
+
+/** Let the handler run until it parks on a sleep or settles (bounded). */
+async function settleOrPark(clock: FakeClock, settled: () => boolean): Promise<void> {
+  for (let i = 0; i < 50 && !settled() && clock.pendingSleeps() === 0; i += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+test('rupload: a 5xx resend waits a backoff first instead of hammering the server', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 503, headers: { file_offset: '3' } });
+    mock.enqueue({ json: { h: 'done' } });
+    const clock = createFakeClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    let done = false;
+    const pending = handler<{ h: string }>(ruploadTo(RUPLOAD_PATH)).finally(() => {
+      done = true;
+    });
+    await settleOrPark(clock, () => done);
+
+    // The resend has NOT gone out yet: the handler is waiting.
+    assert.equal(mock.requests.length, 1, 'resend fired with zero delay');
+    assert.equal(clock.pendingSleeps(), 1);
+
+    clock.advance(10_000);
+    const res = await pending;
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.equal(mock.requests.length, 2);
+    assert.equal(mock.requests[1]?.headers['file_offset'], '3');
+  });
+});
+
+test('rupload: a 5xx resend honors the Retry-After the server named', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 503, headers: { file_offset: '3', 'retry-after': '3' } });
+    mock.enqueue({ json: { h: 'done' } });
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    const res: FbResponse<{ h: string }> = await handler(ruploadTo(RUPLOAD_PATH));
+
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.deepEqual(clock.sleeps, [3_000]);
+  });
+});
+
+test('rupload: the resume budget is not burned in milliseconds — successive 5xx resends back off and grow', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    for (let i = 0; i < 3; i += 1) {
+      mock.enqueue({ status: 503, headers: { file_offset: '0' } });
+    }
+    mock.enqueue({ json: { h: 'done' } });
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    await handler(ruploadTo(RUPLOAD_PATH));
+
+    assert.equal(clock.sleeps.length, 3);
+    for (let i = 1; i < clock.sleeps.length; i += 1) {
+      assert.ok(
+        (clock.sleeps[i] ?? 0) > (clock.sleeps[i - 1] ?? 0),
+        `sleeps not growing: ${clock.sleeps.join(',')}`,
+      );
+    }
+  });
+});
+
+test('rupload: a Retry-After longer than the in-call backoff cap surfaces at once with that wait', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // An hour-long maintenance window: sleeping through it inside one chunk POST
+    // (holding a host slot) is wrong, and resending into it is pointless.
+    mock.enqueue({ status: 503, headers: { file_offset: '3', 'retry-after': '3600' } });
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    await assert.rejects(handler(ruploadTo(RUPLOAD_PATH)), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.retryable, true);
+      assert.equal(err.action?.retryAfterMs, 3_600_000);
+      return true;
+    });
+    assert.equal(mock.requests.length, 1, 'no resend into a named hour-long wait');
+    assert.deepEqual(clock.sleeps, []);
+  });
+});
+
+test('rupload: a resend after a network fault waits a backoff first instead of resending at once', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    let posts = 0;
+    // The FIRST chunk POST matches no rule (the fake rejects: a mid-flight
+    // fault); the probe answers offset 6; the resend succeeds.
+    mock.on((r) => r.method === 'GET', { headers: { file_offset: '6' } });
+    mock.on(
+      (r) => {
+        if (r.method !== 'POST') return false;
+        posts += 1;
+        return posts >= 2;
+      },
+      { json: { h: 'done' } },
+    );
+    const clock = createFakeClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    let done = false;
+    const pending = handler<{ h: string }>(ruploadTo(RUPLOAD_PATH)).finally(() => {
+      done = true;
+    });
+    await settleOrPark(clock, () => done);
+
+    // Neither the probe nor the resend has gone out: the handler is waiting.
+    assert.equal(mock.requests.length, 1, 'resend fired with zero delay');
+    assert.equal(clock.pendingSleeps(), 1);
+
+    clock.advance(10_000);
+    const res = await pending;
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.equal(mock.requests.length, 3);
+    assert.equal(mock.requests[1]?.method, 'GET');
+    assert.equal(mock.requests[2]?.headers['file_offset'], '6');
+  });
+});
+
+test('rupload: a resend after a lost response body waits a backoff first', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 200, json: { h: 'lost' } }); // body read breaks
+    mock.enqueue({ headers: { file_offset: '3' } }); // probe
+    mock.enqueue({ json: { h: 'done' } }); // resend
+    breakNextBodyRead('terminated');
+    const clock = createFakeClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    let done = false;
+    const pending = handler<{ h: string }>(ruploadTo(RUPLOAD_PATH)).finally(() => {
+      done = true;
+    });
+    await settleOrPark(clock, () => done);
+
+    assert.equal(mock.requests.length, 1, 'probe/resend fired with zero delay');
+    assert.equal(clock.pendingSleeps(), 1);
+
+    clock.advance(10_000);
+    const res = await pending;
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.equal(mock.requests.length, 3);
+    assert.equal(mock.requests[2]?.headers['file_offset'], '3');
+  });
+});
+
+test('rupload: a flapping link does not burn the resume budget in milliseconds — network-fault resends back off and grow', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    let posts = 0;
+    mock.on((r) => r.method === 'GET', { headers: { file_offset: '0' } });
+    mock.on(
+      (r) => {
+        if (r.method !== 'POST') return false;
+        posts += 1;
+        return posts >= 4;
+      },
+      { json: { h: 'done' } },
+    );
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    const res: FbResponse<{ h: string }> = await handler(ruploadTo(RUPLOAD_PATH));
+
+    assert.deepEqual(res.data, { h: 'done' });
+    assert.equal(clock.sleeps.length, 3);
+    for (let i = 1; i < clock.sleeps.length; i += 1) {
+      assert.ok(
+        (clock.sleeps[i] ?? 0) > (clock.sleeps[i - 1] ?? 0),
+        `sleeps not growing: ${clock.sleeps.join(',')}`,
+      );
+    }
+  });
+});
+
+test('rupload: an abort during the network-fault resend wait rejects with AbortError and sends nothing more', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    // Nothing programmed: every request rejects as a network fault.
+    const clock = createFakeClock();
+    const controller = new AbortController();
+    const handler = createUploadHandler(makeDeps({ clock }));
+
+    let done = false;
+    const pending = handler({
+      ...ruploadTo(RUPLOAD_PATH),
+      signal: controller.signal,
+    }).finally(() => {
+      done = true;
+    });
+    await settleOrPark(clock, () => done);
+    assert.equal(clock.pendingSleeps(), 1, 'no resend wait to abort');
+
+    controller.abort();
+    await assert.rejects(pending, (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(!(err instanceof GraphApiError));
+      assert.equal(err.name, 'AbortError');
+      return true;
+    });
+    assert.equal(mock.requests.length, 1, 'no probe or resend after the abort');
+  });
+});
+
+test('regression: a multipart write never waits and never resends — not on a connect-phase fault, not on a 5xx naming a Retry-After', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    rejectNextFetchWith(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+      }),
+    );
+    // The rejection above bypasses the fake's request log, so count attempts here.
+    let attempts = 0;
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
+      attempts += 1;
+      return await inner(...args);
+    };
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.retryable, true);
+      return true;
+    });
+    assert.deepEqual(clock.sleeps, []);
+    assert.equal(attempts, 1);
+    assert.equal(mock.requests.length, 0);
+  });
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 503, text: 'busy', headers: { 'retry-after': '2' } });
+    const clock = createAutoClock();
+    const handler = createUploadHandler(makeDeps({ clock }));
+    await assert.rejects(handler(multipartTo('/me/photos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      return true;
+    });
+    assert.deepEqual(clock.sleeps, []);
+    assert.equal(mock.requests.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave 17 — an ambiguous upload names no post-listing verify tool
+// ---------------------------------------------------------------------------
+
+test('an ambiguous upload does not point a reel or video caller at facebook_list_posts', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 502, text: 'upstream boom' });
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(handler(multipartTo('/p1/videos')), (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.nextTool, undefined);
+      assert.doesNotMatch(
+        err.action?.operatorText ?? '',
+        /facebook_list_posts/,
+        'a video or reel never shows on the posts listing',
+      );
+      return true;
+    });
+  });
+});
+
+test('an ambiguous upload names the verify tool the api layer passed', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 502, text: 'upstream boom' });
+    const handler = createUploadHandler(makeDeps());
+    await assert.rejects(
+      handler({ ...multipartTo('/p1/videos'), verifyTool: 'facebook_get_video_status' }),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.equal(err.action?.nextTool, 'facebook_get_video_status');
+        assert.match(
+          err.action?.operatorText ?? '',
+          /verify via facebook_get_video_status first/,
+        );
+        return true;
+      },
+    );
+  });
+});
+
+test('C2: a transient Graph code on a multipart write is ambiguous at any HTTP status, never retryable', async () => {
+  // Code 1 / code 2 (and a code Graph flags `is_transient`) are Graph's own
+  // 5xx-class faults shipped as HTTP 400 or inside a 200. Surfaced with the
+  // matrix's `retryable: true`, a photo that may already be on the Page is an
+  // invitation to upload it twice.
+  const cases = [
+    {
+      label: 'code 1 at 400',
+      status: 400,
+      error: { code: 1, message: 'An unknown error occurred', type: 'OAuthException' },
+    },
+    {
+      label: 'code 2 at 200',
+      status: 200,
+      error: {
+        code: 2,
+        message: 'Service temporarily unavailable',
+        type: 'OAuthException',
+      },
+    },
+    {
+      label: 'is_transient at 400',
+      status: 400,
+      error: {
+        code: 999999,
+        message: 'Temporary failure',
+        type: 'OAuthException',
+        is_transient: true,
+      },
+    },
+  ] as const;
+  for (const { label, status, error } of cases) {
+    await withFetch(async (mock: FetchMock) => {
+      mock.enqueue({ status, json: { error } });
+      const handler = createUploadHandler(makeDeps());
+      await assert.rejects(
+        handler({ ...multipartTo('/p1/photos'), verifyTool: 'facebook_list_photos' }),
+        (err: unknown) => {
+          assert.ok(err instanceof GraphApiError, label);
+          assert.equal(err.action?.category, 'ambiguous', label);
+          assert.equal(err.action?.retryable, false, label);
+          assert.equal(err.action?.nextTool, 'facebook_list_photos', label);
+          assert.equal(err.httpStatus, status, label);
+          return true;
+        },
+      );
+      assert.equal(mock.requests.length, 1, label);
+    });
+  }
+});
+
+test('uploads surface the regain-access ETA a business-use-case throttle names in its usage header', async () => {
+  // The 80000-80099 envelope carries no ETA; the X-Business-Use-Case-Usage
+  // header (MINUTES) is the only statement of the wait. Dropped, the caller of
+  // a photo upload blocked for 25 minutes was told to come back in 60s.
+  const header = JSON.stringify({
+    '111': [
+      {
+        type: 'pages',
+        call_count: 100,
+        total_cputime: 30,
+        total_time: 40,
+        estimated_time_to_regain_access: 25,
+      },
+    ],
+  });
+  for (const [label, req] of [
+    ['multipart', multipartTo('/me/photos')],
+    ['rupload', ruploadTo(RUPLOAD_PATH)],
+  ] as const) {
+    await withFetch(async (mock: FetchMock) => {
+      mock.enqueue({
+        status: 400,
+        headers: { 'x-business-use-case-usage': header },
+        json: {
+          error: { code: 80001, type: 'OAuthException', message: 'too many calls' },
+        },
+      });
+      const handler = createUploadHandler(makeDeps());
+      await assert.rejects(handler(req), (err: unknown) => {
+        assert.ok(err instanceof GraphApiError, label);
+        assert.equal(err.action?.category, 'rate_limit', label);
+        assert.equal(err.action?.retryAfterMs, 25 * 60_000, label);
+        return true;
+      });
+      assert.equal(mock.requests.length, 1, label);
+    });
+  }
 });

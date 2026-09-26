@@ -2,7 +2,7 @@
 // Project the metadata SSOT (`scripts/metadata.config.mjs`) onto every artifact
 // that repeats it (task R01).
 //
-// Nine files describe the same server to nine different consumers. Left to hand
+// Seven files describe the same server to seven different consumers. Left to hand
 // editing they drift, and the drift is only discovered by whoever installs the
 // stale one. So exactly one of them is written by a human — the SSOT — and this
 // script derives the rest:

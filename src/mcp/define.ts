@@ -42,9 +42,22 @@ export interface ToolDefinition<Schema extends z.AnyZodObject> {
   readonly outputSchema?: z.ZodTypeAny;
   /** The full MCP annotation quadruple — all four hints explicit (doc 06). */
   readonly annotations: ToolAnnotations;
-  /** Write blast-radius tier; absent ⇒ a read-only tool. */
+  /**
+   * Write blast-radius tier; absent ⇒ a read-only tool. Declare the WORST tier
+   * any call to this tool can reach — see {@link ToolSpec.writeTier}: only the
+   * presence of this field gates anything, the gate takes its actual tier from
+   * the handler, and the value here is what the generated README publishes.
+   */
   readonly writeTier?: WriteTier;
-  /** Whitelisted field names safe to log for this tool (redaction-audited). */
+  /**
+   * The argument names whose values this tool may put in its per-call log line
+   * (04 §"Log hygiene"). The bootstrap logs the tool name plus the values of
+   * exactly these keys — redacted, and scalars only; anything else is logged as
+   * a type tag. Omitting the field means the call logs NOTHING, which is the
+   * right answer whenever the safe-to-log subset has not been reasoned about:
+   * there is no default key set and the argument object is never logged whole.
+   * When present it must name at least one non-blank argument.
+   */
   readonly logFields?: readonly string[];
   /** Receives the strict-parsed, typed input plus the capability context. */
   readonly handler: (input: z.infer<Schema>, ctx: ToolContext) => Promise<ToolResult>;
@@ -61,9 +74,10 @@ export interface ToolDefinition<Schema extends z.AnyZodObject> {
  *  - omits `title`/`outputSchema`/`writeTier`/`logFields` when absent (clean
  *    heterogeneous specs), leaving `package` unset for the registry to stamp.
  *
- * @throws Error if `name`/`description` are empty, or if `writeTier` and
+ * @throws Error if `name`/`description` are empty, if `writeTier` and
  *   `annotations.readOnlyHint` disagree (a write-tier tool cannot be read-only,
- *   and a read-only tool must not carry a tier).
+ *   and a read-only tool must not carry a tier), or if `logFields` is present
+ *   but names nothing loggable (an empty array, or a blank argument name).
  */
 export function defineTool<Schema extends z.AnyZodObject>(
   def: ToolDefinition<Schema>,
@@ -85,6 +99,25 @@ export function defineTool<Schema extends z.AnyZodObject>(
       )} disagrees with writeTier=${def.writeTier ?? 'absent'}; a read-only tool ` +
         `must have writeTier absent and a write tool must set a tier.`,
     );
+  }
+
+  // An allowlist that names nothing — `[]`, or entries that are all blank — is
+  // the "documented control that enforces nothing" failure in miniature: the
+  // spec reads as if log hygiene had been reasoned about while the dispatcher
+  // logs exactly as much as it would with the field absent. Refuse it at
+  // authoring time, which is module load, long before a client can connect.
+  if (def.logFields !== undefined) {
+    if (def.logFields.length === 0) {
+      throw new Error(
+        `defineTool(${def.name}): \`logFields\` must name at least one argument ` +
+          `when present; omit it entirely to log nothing.`,
+      );
+    }
+    if (def.logFields.some((field) => field.trim().length === 0)) {
+      throw new Error(
+        `defineTool(${def.name}): \`logFields\` must not contain a blank argument name.`,
+      );
+    }
   }
 
   const strictSchema = def.inputSchema.strict();

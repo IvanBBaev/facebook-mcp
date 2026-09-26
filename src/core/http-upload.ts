@@ -31,15 +31,21 @@
 // exported pure helpers the later video state machine (V05) drives rupload with.
 
 import {
+  bodyIsGraphErrorEnvelope,
+  businessUseCaseEtaMs,
   computeAppSecretProof,
   containPathname,
   extractResponseHeaders,
   createHostSemaphores,
+  describeFault,
   graphErrorFromResponse,
+  isProvablyNotSent,
+  parseRetryAfterMs,
   parseUsageHeaders,
   resolveHostBase,
   type HostSemaphores,
 } from './http.js';
+import { classifyNetworkError } from './errors.js';
 import { GraphApiError } from './types.js';
 import type {
   Clock,
@@ -83,6 +89,24 @@ export interface UploadHandlerDeps {
 }
 
 const DEFAULT_MAX_RESUME_ATTEMPTS = 5;
+/** First rupload 5xx resend backoff; doubles per resume up to the cap below. */
+const RESEND_BACKOFF_BASE_MS = 500;
+/** Cap on the computed (not server-named) resend backoff. */
+const RESEND_BACKOFF_CAP_MS = 8_000;
+/**
+ * Longest server-named wait (`Retry-After`) a chunk POST sleeps through before
+ * resending. A longer one surfaces immediately with the wait attached, so the
+ * caller schedules the retry instead of this call holding a host slot.
+ */
+const MAX_RESEND_WAIT_MS = 30_000;
+
+/**
+ * Exponential backoff before the `resume`-th (1-based) rupload resend — after a
+ * 5xx, a network fault, or a lost response body alike.
+ */
+function resendBackoffMs(resume: number): number {
+  return Math.min(RESEND_BACKOFF_BASE_MS * 2 ** (resume - 1), RESEND_BACKOFF_CAP_MS);
+}
 const OCTET_STREAM = 'application/octet-stream';
 
 // ---------------------------------------------------------------------------
@@ -142,13 +166,23 @@ export function planRuploadChunks(
 const OFFSET_HEADER_KEYS = ['file_offset', 'offset', 'upload-offset'] as const;
 const OFFSET_BODY_KEYS = ['file_offset', 'offset', 'start_offset'] as const;
 
+/**
+ * An offset is an exact byte position: a non-negative SAFE integer, and on the
+ * wire a plain run of decimal digits. `Number()` alone is far looser — it reads
+ * `0x4`, `1e1`, `+4`, `4.0` and `0b100` as integers, and rounds digits past 2^53
+ * to a neighbouring value — so each of those would become a resume point the
+ * server never named, and the tail resent from it would be the wrong bytes.
+ * Anything else is "no offset", which routes the caller to the probe instead.
+ */
 function toOffset(raw: unknown): number | undefined {
   if (typeof raw === 'number') {
-    return Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+    return Number.isSafeInteger(raw) && raw >= 0 ? raw : undefined;
   }
-  if (typeof raw === 'string' && raw.trim().length > 0) {
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : undefined;
+  if (typeof raw === 'string') {
+    const text = raw.trim();
+    if (!/^\d+$/.test(text)) return undefined;
+    const n = Number(text);
+    return Number.isSafeInteger(n) ? n : undefined;
   }
   return undefined;
 }
@@ -276,12 +310,6 @@ function parseBody(text: string): unknown {
   return text.length === 0 ? undefined : (safeJsonParse(text) ?? text);
 }
 
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err;
-  return 'unknown error';
-}
-
 // ---------------------------------------------------------------------------
 // Error construction (F07's ambiguousError / networkError are private — mirror them)
 // ---------------------------------------------------------------------------
@@ -291,13 +319,17 @@ function ambiguousUploadError(
   status: number,
   detail: string,
   redactor: Redactor,
-  cause?: unknown,
+  cause: unknown,
+  verifyTool: string | undefined,
 ): GraphApiError {
   const action: ErrorAction = {
     category: 'ambiguous',
     retryable: false,
     operatorText:
-      'unknown outcome — the write may have landed; do NOT retry, verify first (e.g. facebook_list_posts)',
+      verifyTool !== undefined
+        ? `unknown outcome — the write may have landed; do NOT retry, verify via ${verifyTool} first`
+        : 'unknown outcome — the write may have landed; do NOT retry, re-read the upload target (or the listing it belongs to) first',
+    ...(verifyTool !== undefined ? { nextTool: verifyTool } : {}),
   };
   return new GraphApiError(
     redactor.redactString(
@@ -343,6 +375,89 @@ function restartUploadError(detail: string, redactor: Redactor): GraphApiError {
   });
 }
 
+/**
+ * The connect-phase code on a fetch rejection when it provably never reached the
+ * wire, else `undefined`. The verdict is {@link isProvablyNotSent}, shared with
+ * the JSON client so both transports read one fault the same way: the error's
+ * OWN string code decides, and its `cause` is consulted only when it has none.
+ * A rejection whose own code is a mid-flight reset (`ECONNRESET`) is therefore
+ * ambiguous even when a stale `cause` names a connect-phase code — it was the
+ * reset the caller saw, and the write may have landed. The code string is read
+ * with the same precedence, only to name the fault in the message.
+ */
+function connectPhaseCode(err: unknown): string | undefined {
+  if (!isProvablyNotSent(err)) return undefined;
+  const rec = asRecord(err);
+  const own = rec?.['code'];
+  if (typeof own === 'string') return own;
+  const viaCause = asRecord(rec?.['cause'])?.['code'];
+  return typeof viaCause === 'string' ? viaCause : undefined;
+}
+
+/**
+ * A multipart POST that provably never left this machine (DNS / connect
+ * failure). It is NOT the C2 ambiguous write: no byte reached Meta, so nothing
+ * can have landed, and "verify first" would send the operator hunting for a
+ * photo that does not exist (and make the api layer report a possible orphan).
+ * Classified the way F07 classifies the same fault on a JSON write — a
+ * retryable transient with the proxy self-diagnosis hint (CC-NET-6).
+ */
+function notSentUploadError(
+  code: string,
+  err: unknown,
+  redactor: Redactor,
+): GraphApiError {
+  const detail = `${code}: ${describeFault(err)}`;
+  return new GraphApiError(
+    redactor.redactString(`multipart upload never sent (connect-phase fault ${detail})`),
+    {
+      code: 0,
+      httpStatus: 0,
+      action: classifyNetworkError({
+        phase: 'connect',
+        isWrite: true,
+        reason: redactor.redactString(detail),
+      }),
+      cause: err,
+    },
+  );
+}
+
+/**
+ * The terminal error for an upload response, carrying the wait the server asked
+ * for. `graphErrorFromResponse` alone knows only the envelope (a throttle ETA or
+ * the matrix default), so a `Retry-After` header — the one instruction on a 429
+ * or a 503 that says when to come back — was dropped, and a caller holding an
+ * hour-long block was told to return in a minute. A business-use-case throttle's
+ * regain-access ETA (its usage header) is dropped the same way and is read here
+ * too. Attached only to a retryable verdict, and only when it is the longer
+ * wait (RFC 9110: a minimum).
+ */
+function uploadErrorFromResponse(
+  status: number,
+  bodyText: string,
+  headers: FbResponseHeaders,
+  nowMs: number,
+  redactor: Redactor,
+): GraphApiError {
+  const err = graphErrorFromResponse(status, bodyText, redactor);
+  const action = err.action;
+  const retryAfterMs = parseRetryAfterMs(headers['retry-after'], nowMs);
+  // A business-use-case throttle names its wait in the usage header instead
+  // of the envelope; the longer of the two header waits is the one to surface.
+  const bucEtaMs = businessUseCaseEtaMs(err.code, headers);
+  const headerMs =
+    retryAfterMs === undefined || bucEtaMs === undefined
+      ? (retryAfterMs ?? bucEtaMs)
+      : Math.max(retryAfterMs, bucEtaMs);
+  if (action === undefined || !action.retryable || headerMs === undefined) return err;
+  if (action.retryAfterMs !== undefined && action.retryAfterMs >= headerMs) return err;
+  return graphErrorFromResponse(status, bodyText, redactor, {
+    category: action.category,
+    retryAfterMs: headerMs,
+  });
+}
+
 function offAllowlistError(host: string, status: number): GraphApiError {
   const action: ErrorAction = {
     category: 'unknown',
@@ -362,6 +477,22 @@ function isRedirect(response: Response): boolean {
   );
 }
 
+/**
+ * Consume and discard the body of a response we are refusing, so its connection
+ * is released rather than pinned. `redirect: 'manual'` does NOT hand back an
+ * empty opaque-redirect response under Node/undici: it hands back a normal
+ * response carrying the origin's 3xx body, and a body left unread keeps its
+ * socket out of the pool (measured on Node 22: five refused redirects in a row
+ * open five sockets and release none, against one reused socket when the body
+ * is read). Every other exit in this module reads the body; this one does too.
+ *
+ * The read is advisory. A body that fails mid-read must not replace the refusal
+ * the caller has to see, so the rejection is swallowed.
+ */
+async function discardBody(response: Response): Promise<void> {
+  await response.text().catch(() => undefined);
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -379,8 +510,19 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
   const maxResumeAttempts = deps.maxResumeAttempts ?? DEFAULT_MAX_RESUME_ATTEMPTS;
 
   const feedUsage = (headers: FbResponseHeaders): void => {
-    if (deps.onUsage !== undefined) {
+    if (deps.onUsage === undefined) return;
+    try {
       deps.onUsage(parseUsageHeaders(headers, clock.now()));
+    } catch (err) {
+      // The sink is ADVISORY — it exists so a caller can back off proactively.
+      // A sink that throws must never fail an upload whose bytes are already on
+      // Meta's side, and must never be reported as the transport fault it is
+      // not: inside `probeServerOffset` this call sits within the try that
+      // classifies network faults, so an unguarded throw here would surface as
+      // a transient "offset probe failed" for a probe that in fact succeeded.
+      logger.warn('usage sink threw — the response is unaffected', {
+        reason: redactor.redactString(describeFault(err)),
+      });
     }
   };
 
@@ -458,13 +600,16 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       } catch (err) {
         if (req.signal?.aborted === true) throw err;
         if (err instanceof GraphApiError) throw err;
+        const notSent = connectPhaseCode(err);
+        if (notSent !== undefined) throw notSentUploadError(notSent, err, redactor);
         // A multipart write whose response is lost is ambiguous (C2): the upload
         // may have landed. Never auto-retried — surface for verify-first.
         throw ambiguousUploadError(
           0,
-          `network fault: ${errorMessage(err)}`,
+          `network fault: ${describeFault(err)}`,
           redactor,
           err,
+          req.verifyTool,
         );
       }
 
@@ -472,19 +617,45 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       feedUsage(responseHeaders);
 
       if (isRedirect(response)) {
+        await discardBody(response);
         throw offAllowlistError(req.host, response.status);
       }
-      if (response.ok) {
-        const text = await response.text();
+      // The body is read INSIDE the C2 fault classification, not after it.
+      // `fetch` settles on the response HEAD while the body is still arriving
+      // over the same connection, so a cut between the two rejects HERE and not
+      // from `doFetch` (undici spells it `TypeError: terminated`). Read after the
+      // classification, that rejection escaped as a bare `TypeError` on the
+      // WORST possible outcome this module has: a 200 whose body was lost means
+      // the photo or video IS on the Page and only its id went missing. Every
+      // layer above reads an unclassified error as "it did not happen", and the
+      // retry that invites uploads it a second time. A lost multipart response
+      // is ambiguous whether it was lost before the head or after it.
+      let bodyText: string;
+      try {
+        bodyText = await response.text();
+      } catch (err) {
+        if (req.signal?.aborted === true) throw err;
+        throw ambiguousUploadError(
+          response.status,
+          `response body lost after HTTP ${response.status}: ${describeFault(err)}`,
+          redactor,
+          err,
+          req.verifyTool,
+        );
+      }
+
+      // A 2xx whose body is a Graph error envelope is the error, never the
+      // data (CC-NET-1, the `http.ts` precedent) — fall through to the
+      // terminal `graphErrorFromResponse` below with the REAL status.
+      if (response.ok && !bodyIsGraphErrorEnvelope(bodyText)) {
         return {
-          data: parseBody(text) as T,
+          data: parseBody(bodyText) as T,
           headers: responseHeaders,
           status: response.status,
         };
       }
 
       const status = response.status;
-      const bodyText = await response.text();
       // 5xx on a multipart write is ambiguous (the mutation may have landed, C2);
       // 4xx is a terminal application error. Neither is auto-retried.
       if (status >= 500 && status <= 599) {
@@ -493,9 +664,29 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
           `HTTP ${status} on multipart POST`,
           redactor,
           bodyText,
+          req.verifyTool,
         );
       }
-      throw graphErrorFromResponse(status, bodyText, redactor);
+      const err = uploadErrorFromResponse(
+        status,
+        bodyText,
+        responseHeaders,
+        clock.now(),
+        redactor,
+      );
+      if (err.action?.category === 'transient') {
+        // Code 1/2 (or `is_transient`) is Graph's own server-side fault at a
+        // 4xx or 2xx status: on a one-shot write it is as ambiguous as a 5xx,
+        // so the matrix's `retryable: true` must not invite a duplicate (C2).
+        throw ambiguousUploadError(
+          status,
+          `HTTP ${status}, transient Graph code on multipart POST`,
+          redactor,
+          bodyText,
+          req.verifyTool,
+        );
+      }
+      throw err;
     } finally {
       release();
     }
@@ -540,6 +731,28 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
     // unknown failure: no category, no retry verdict, no operator text. It is
     // the same transport fault that sent us here, so it is classified the same
     // way — an abort and an already-classified error still pass through.
+    //
+    // A probe that ANSWERS can still be a refusal, and its STATUS is the only
+    // thing that tells the two apart. A 401/403/400 body carries no
+    // `file_offset` for the same trivial reason an empty 200 carries none, so
+    // parsing one without reading the status collapses "your token was revoked
+    // mid-upload" onto `undefined` — which `tailFrom` then reports as the
+    // retryable `server offset unavailable to resume`. That launders a
+    // PERMANENT auth failure into a transient one: the caller re-drives a
+    // resume that cannot ever succeed, and the operator is told the server lost
+    // its place instead of that their credential is gone. Every non-2xx is
+    // therefore surfaced as the error it actually is — and so is a 2xx whose
+    // body is a strict Graph envelope (CC-NET-1) — through the same
+    // `graphErrorFromResponse` the terminal chunk failure uses — the F06 matrix
+    // decides auth/permission/validation (permanent) against throttle/5xx
+    // (retryable), and the redacted Graph message names the cause, since Graph
+    // quotes the credential back in its own error text (C3). A 3xx is the
+    // CC-NET-7 refusal the chunk POST gives it, never an offset source; its
+    // body is consumed so the socket is released rather than pinned.
+    //
+    // The surfaced Graph error names the cause but not the call it came from —
+    // the probe is invisible to every layer above — so the refusal is logged
+    // here with the status that produced it.
     const probeServerOffset = async (): Promise<number | undefined> => {
       try {
         const probe = await doFetch(
@@ -552,14 +765,38 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
         );
         const probeHeaders = extractResponseHeaders(probe);
         feedUsage(probeHeaders);
+        if (isRedirect(probe)) {
+          await discardBody(probe);
+          throw offAllowlistError(req.host, probe.status);
+        }
         const text = await probe.text();
+        // A 2xx carrying a strict Graph error envelope is a refusal too
+        // (CC-NET-1): the status lies and the body is the verdict, exactly as
+        // the chunk POST reads it. Parsed only for an offset, that envelope
+        // would yield none and the caller would be handed the retryable
+        // `server offset unavailable to resume` — a revoked token laundered
+        // into a resume that can never succeed.
+        if (!probe.ok || bodyIsGraphErrorEnvelope(text)) {
+          logger.warn('fbRequest.rupload.probe', {
+            host: req.host,
+            path: req.path,
+            status: probe.status,
+          });
+          throw uploadErrorFromResponse(
+            probe.status,
+            text,
+            probeHeaders,
+            clock.now(),
+            redactor,
+          );
+        }
         return parseFileOffset(probeHeaders, text);
       } catch (err) {
         if (req.signal?.aborted === true) throw err;
         if (err instanceof GraphApiError) throw err;
         throw transientUploadError(
           0,
-          `offset probe failed: ${errorMessage(err)}`,
+          `offset probe failed: ${describeFault(err)}`,
           redactor,
           err,
         );
@@ -599,6 +836,19 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       };
     };
 
+    // Resume after a transport fault (a lost POST or a lost response body):
+    // wait the same growing backoff the 5xx branch uses, THEN probe, so the
+    // offset read is the settled one. Resent back-to-back, a flapping link
+    // burns the whole resume budget in milliseconds and never outlasts a blip.
+    // No `Retry-After` exists here — there was no response to name one. An
+    // abort during the wait rejects with the signal's AbortError, unwrapped.
+    const pacedProbeResume = async (
+      resume: number,
+    ): Promise<{ offset: number; body: Uint8Array }> => {
+      await clock.sleep(resendBackoffMs(resume), req.signal);
+      return tailFrom(await probeServerOffset());
+    };
+
     logger.debug('fbRequest.rupload', {
       host: req.host,
       path: req.path,
@@ -630,13 +880,13 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
           if (resumes >= maxResumeAttempts) {
             throw transientUploadError(
               0,
-              `network fault: ${errorMessage(err)}`,
+              `network fault: ${describeFault(err)}`,
               redactor,
               err,
             );
           }
           resumes += 1;
-          const resumed = tailFrom(await probeServerOffset());
+          const resumed = await pacedProbeResume(resumes);
           offset = resumed.offset;
           body = resumed.body;
           logger.warn('fbRequest.rupload.resume', {
@@ -653,26 +903,95 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
         feedUsage(responseHeaders);
 
         if (isRedirect(response)) {
+          await discardBody(response);
           throw offAllowlistError(req.host, response.status);
         }
-        if (response.ok) {
-          const text = await response.text();
+        // The body is read INSIDE the resume handling, not after it. `fetch`
+        // settles on the response HEAD while the body is still arriving over the
+        // same connection, so a cut between the two rejects HERE rather than
+        // from `doFetch` — and on a multi-megabyte video that window is wide.
+        // Read after the resume handling, that rejection escaped as a bare
+        // `TypeError`: an unclassified crash that abandons an upload session the
+        // server is still holding bytes for. A chunk is offset-idempotent, so
+        // this is the same resumable transport fault as a mid-flight reset and
+        // it takes the same route — ask the server where it actually is, then
+        // resend only the unacknowledged tail (CC-MEDIA-2). When the server
+        // reports the whole chunk (the likely answer after a 200), `tailFrom`
+        // says so as a classified transient and the caller moves to the next
+        // window instead of restarting.
+        let bodyText: string;
+        try {
+          bodyText = await response.text();
+        } catch (err) {
+          if (req.signal?.aborted === true) throw err;
+          if (resumes >= maxResumeAttempts) {
+            throw transientUploadError(
+              0,
+              `response body lost after HTTP ${response.status}: ${describeFault(err)}`,
+              redactor,
+              err,
+            );
+          }
+          resumes += 1;
+          const resumed = await pacedProbeResume(resumes);
+          offset = resumed.offset;
+          body = resumed.body;
+          logger.warn('fbRequest.rupload.resume', {
+            host: req.host,
+            path: req.path,
+            reason: 'body',
+            offset,
+            resumes,
+          });
+          continue;
+        }
+
+        // Same rule as multipart: an envelope inside a 2xx is a refused chunk,
+        // not a landed one (CC-NET-1).
+        if (response.ok && !bodyIsGraphErrorEnvelope(bodyText)) {
           return {
-            data: parseBody(text) as T,
+            data: parseBody(bodyText) as T,
             headers: responseHeaders,
             status: response.status,
           };
         }
 
         const status = response.status;
-        const bodyText = await response.text();
         // Chunk POSTs bypass the generic throttle/5xx retry matrix. A 5xx is a
         // resumable transport fault: re-read the offset and resend the tail.
-        if (status >= 500 && status <= 599 && resumes < maxResumeAttempts) {
+        //
+        // The resend is PACED. Fired back-to-back, the whole resume budget burns
+        // in milliseconds, so a 503 that clears in a second or two is never
+        // outlasted and the server is hammered with the same bytes meanwhile.
+        // Each resend waits a growing backoff, or the server's `Retry-After`
+        // when it names a longer one (RFC 9110: a minimum). A named wait beyond
+        // what one chunk POST may reasonably hold a host slot for surfaces at
+        // once, carrying that wait, instead of being slept through or ignored.
+        const retryAfterMs = parseRetryAfterMs(
+          responseHeaders['retry-after'],
+          clock.now(),
+        );
+        const withinWaitCap =
+          retryAfterMs === undefined || retryAfterMs <= MAX_RESEND_WAIT_MS;
+        if (
+          status >= 500 &&
+          status <= 599 &&
+          resumes < maxResumeAttempts &&
+          withinWaitCap
+        ) {
           resumes += 1;
-          const serverOffset =
-            parseFileOffset(responseHeaders, bodyText) ?? (await probeServerOffset());
-          const resumed = tailFrom(serverOffset);
+          const waitMs = Math.max(retryAfterMs ?? 0, resendBackoffMs(resumes));
+          const headerOffset = parseFileOffset(responseHeaders, bodyText);
+          let resumed: { offset: number; body: Uint8Array };
+          if (headerOffset !== undefined) {
+            // A desynced offset fails fast — no point waiting to refuse.
+            resumed = tailFrom(headerOffset);
+            await clock.sleep(waitMs, req.signal);
+          } else {
+            // Probe AFTER the wait, so the offset read is the settled one.
+            await clock.sleep(waitMs, req.signal);
+            resumed = tailFrom(await probeServerOffset());
+          }
           offset = resumed.offset;
           body = resumed.body;
           logger.warn('fbRequest.rupload.resume', {
@@ -686,7 +1005,13 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
           continue;
         }
         // Terminal application error (4xx incl. throttle), or resume bound hit.
-        throw graphErrorFromResponse(status, bodyText, redactor);
+        throw uploadErrorFromResponse(
+          status,
+          bodyText,
+          responseHeaders,
+          clock.now(),
+          redactor,
+        );
       }
     } finally {
       release();

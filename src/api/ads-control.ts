@@ -34,7 +34,13 @@
 // (CC-ADS-7).
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
-import type { FbRequestFn, JsonRequest, ParamValue, WriteTier } from '../core/index.js';
+import type {
+  ErrorAction,
+  FbRequestFn,
+  JsonRequest,
+  ParamValue,
+  WriteTier,
+} from '../core/index.js';
 import type { AdLevel, AdRecord } from './ads-read.js';
 
 // ---------------------------------------------------------------------------
@@ -55,6 +61,56 @@ export const BUDGET_LEVELS: ReadonlySet<AdLevel> = new Set<AdLevel>([
   'adset',
 ]);
 
+/**
+ * Ad-account currencies Meta counts in WHOLE units (offset 1 in Meta's currency
+ * table, marketing-api/currencies), plus the ISO 4217 exponent-0 currencies.
+ *
+ * Meta takes every budget in the account currency's smallest unit AS META
+ * DEFINES IT, and for these that unit IS the currency: `daily_budget=1000` on a
+ * JPY account is 1000 JPY, not 10.00. That is not the same list as ISO 4217:
+ * COP, CRC, HUF, IDR and TWD have two ISO decimals but a Meta offset of 1, so
+ * `daily_budget=1000` on a TWD account is 1000 TWD, not 10.00. Calling such an amount "minor units" states the money at
+ * a hundredth of its size in the one line an operator confirms before a
+ * spend-tier write, so the preview names the currency in whole units instead.
+ * The amount on the wire is untouched either way — this is what the number is
+ * CALLED, never what is sent.
+ */
+export const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
+  'BIF',
+  'CLP',
+  'COP',
+  'CRC',
+  'DJF',
+  'GNF',
+  'HUF',
+  'IDR',
+  'ISK',
+  'JPY',
+  'KMF',
+  'KRW',
+  'PYG',
+  'RWF',
+  'TWD',
+  'UGX',
+  'VND',
+  'VUV',
+  'XAF',
+  'XOF',
+  'XPF',
+]);
+
+/**
+ * Ad-account currencies whose ISO 4217 minor unit is a THOUSANDTH but that Meta
+ * counts in HUNDREDTHS (offset 100 in Meta's currency table). `daily_budget=2500`
+ * on a BHD account is 25.00 BHD; calling it "2500 minor units of BHD" reads as
+ * 2.500 BHD (2500 fils) to anyone who knows the currency — a tenfold
+ * understatement — so the preview names the hundredths and the major amount.
+ */
+export const HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
+  'BHD',
+  'JOD',
+]);
+
 /** Emitted whenever a resume is planned: ACTIVE is a request, not a promise. */
 export const RESUME_NOT_DELIVERY_NOTE =
   'Setting status=ACTIVE only clears the pause on THIS object. It will still not deliver if a parent campaign/ad set is paused, if review has not passed, or if the schedule has ended — re-read effective_status after applying.';
@@ -67,13 +123,28 @@ export const BUDGET_OVERWRITE_NOTE =
 export const CBO_CONFLICT_NOTE =
   'Budgets live either on the campaign (campaign budget optimisation) or on its ad sets, never both. If this account uses campaign budgets, an ad-set budget write is rejected by Graph — set it on the campaign instead.';
 
-/** Emitted when a lifetime budget is set on an object with no end time. */
+/**
+ * Emitted when a lifetime budget is set on an object whose read shows no end
+ * time. The key is per level (`end_time` on an ad set, `stop_time` on a
+ * campaign), so the note names both rather than blame "the ad set" for a
+ * campaign's missing `stop_time`.
+ */
 export const LIFETIME_NEEDS_END_NOTE =
-  'A lifetime budget requires an end time on the ad set. This object has none, so Graph will reject the change until an end time is set (which this server cannot do in the 1.1 scope).';
+  'A lifetime budget requires an end time (`end_time` on an ad set, `stop_time` on a campaign). This object has none, so Graph will reject the change until an end time is set (which this server cannot do in the 1.1 scope).';
+
+/**
+ * Emitted when a lifetime budget is planned on an object whose read did not
+ * include an end-time field, so its presence could not be checked.
+ */
+export const LIFETIME_END_UNVERIFIED_NOTE =
+  'A lifetime budget requires an end time (`end_time` on an ad set, `stop_time` on a campaign). It could not be checked: no `level` was given, so the object was read with the common field set, which carries neither. Pass level=campaign|adset to have the preview verify it; if the object has no end time, Graph rejects the write.';
 
 // ---------------------------------------------------------------------------
 // 2. Errors
 // ---------------------------------------------------------------------------
+
+/** The read that shows an ads object's current status and budgets. */
+const AD_OBJECT_READ_TOOL = 'facebook_get_ad_object';
 
 function validationError(message: string): GraphApiError {
   return new GraphApiError(message, {
@@ -84,22 +155,66 @@ function validationError(message: string): GraphApiError {
 }
 
 /**
+ * Graph's stock text for a write against an object that is gone, archived or
+ * invisible to this token: "Unsupported post request. Object with ID '...' does
+ * not exist, cannot be loaded due to missing permissions, or does not support
+ * this operation." A bare code 100 that does NOT read like this is a genuine
+ * parameter fault and keeps its own words.
+ */
+const OBJECT_GONE_MESSAGE_RE =
+  /unsupported (?:post|get) request|does not exist|cannot be loaded|does not support this operation/i;
+
+/**
  * Re-map the write's Graph failure when it is the "object is gone or archived"
  * case (CC-ADS-4). Graph answers a status/budget write on a deleted or archived
  * object with a bare code 100, whose stock text ("Unsupported post request")
  * sends a model looking for a bad parameter that does not exist.
+ *
+ * The bare-100/no-subcode shape alone does NOT establish that case — Graph
+ * spends the same code on real parameter faults ("Param daily_budget must be a
+ * positive integer"). Re-diagnosing those as "the object may be DELETED or
+ * ARCHIVED" would assert a cause nothing here established and send the model to
+ * re-read a live object instead of fixing its request, so the message has to
+ * look like the gone/archived answer too.
  */
 export function mapUpdateError(err: unknown, objectId: string): unknown {
   if (!(err instanceof GraphApiError)) return err;
-  if (err.code !== 100 || err.subcode !== undefined) return err;
+  if (err.code !== 100) return err;
+  // Graph's real wire shape for this refusal is 100 WITH error_subcode 33 —
+  // the subcode itself names "object does not exist / cannot be loaded / does
+  // not support this operation". Left to the generic 100/33 row, the model is
+  // told to "treat it as already gone", which is false for an archived object.
+  // Any other subcode keeps its own, more specific diagnosis.
+  if (err.subcode === 33) {
+    // fall through to the re-map
+  } else if (err.subcode !== undefined || !OBJECT_GONE_MESSAGE_RE.test(err.message)) {
+    return err;
+  }
+  // The model reads the action as flat fields beside the message. Keeping the
+  // bare-100 validation action would pair "the object may be gone or archived —
+  // re-read it" with "fix the arguments" and no next tool, the very wrong turn
+  // this re-map exists to prevent. Keep the core retry facts, restate the rest.
+  const action: ErrorAction = {
+    ...(err.action ?? { retryable: false }),
+    category: 'not_found',
+    nextTool: AD_OBJECT_READ_TOOL,
+    operatorText:
+      `The ads object ${objectId} may be DELETED or ARCHIVED, not on this ad account, or this token may lack permission to edit it (ads_management on the ad account) (code 100). ` +
+      `Do not retry unchanged — re-read it with ${AD_OBJECT_READ_TOOL}; an archived object cannot be edited, and if the re-read shows it live, the token needs ads_management and an ad account role that allows editing.`,
+  };
   return new GraphApiError(
-    `${err.message} The object ${objectId} may be DELETED or ARCHIVED (archived objects are read-only), or it may not exist on this ad account. Nothing was changed. Re-read it with facebook_get_ad_object — if it is archived, it cannot be edited or resumed through the API.`,
+    `${err.message} The object ${objectId} may be DELETED or ARCHIVED (archived objects are read-only), it may not exist on this ad account, or this token may lack permission to edit it (ads_management on the ad account). Nothing was changed. Re-read it with facebook_get_ad_object — if it is archived, it cannot be edited or resumed through the API; if it reads as live, grant the token ads_management and an ad account role that allows editing.`,
     {
       code: err.code,
+      ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
       ...(err.type !== undefined ? { type: err.type } : {}),
       ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
       httpStatus: err.httpStatus,
-      ...(err.action !== undefined ? { action: err.action } : {}),
+      action,
+      // Graph's human-readable refusal rides on the top-level error only — the
+      // error record the model sees does not render `cause`.
+      ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+      ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
       cause: err,
     },
   );
@@ -136,9 +251,11 @@ export function validateBudgetMinor(field: string, value: number): number {
   }
   if (!Number.isInteger(value)) {
     throw validationError(
-      `\`${field}\` must be a whole number of MINOR currency units (cents), not ${String(
-        value,
-      )}. For example 1000 means 10.00, not 1000.00 — there is no float budget.`,
+      `\`${field}\` must be a whole number of MINOR currency units, not ${String(value)}. ` +
+        'A minor unit is the unit Meta counts for the AD ACCOUNT currency (its currency ' +
+        'offset), not always the ISO subunit: for USD, 1000 means 10.00, not 1000.00; in a ' +
+        'zero-decimal currency such as JPY or TWD, the same 1000 means 1000. Either way ' +
+        'there is no float budget.',
     );
   }
   if (value < 0) {
@@ -208,15 +325,136 @@ function currentString(record: AdRecord, key: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/**
+ * A wire status field (`status`, `effective_status`) normalized for comparison.
+ *
+ * Both arrive as an unvalidated cast off a Graph body — the declared `string`
+ * was a hope, not a check — and every comparison this file makes against them
+ * is a safety decision: the CC-ADS-4 refusal that stops an archived object from
+ * being resumed, and the notice that tells an operator a spend-tier confirm
+ * would change nothing. Meta documents these upper-case and sends them
+ * upper-case today, so an exact-case membership test looked fine; it fails open.
+ * One `"archived"` or `" ARCHIVED "` from a future API version, a partner proxy
+ * or an edge that answers in its own casing, and the guard simply does not
+ * fire — the plan is built, the spend gate is armed, and the operator confirms
+ * a write Graph refuses anyway. {@link resolveSettableStatus} already folds the
+ * OPERATOR's input this way; the wire deserves the same distrust. An empty or
+ * blank value is Graph saying nothing, so it reads back as absent rather than
+ * as a status named `''`.
+ */
+function normalizedStatus(record: AdRecord, key: string): string | undefined {
+  const raw = currentString(record, key);
+  if (raw === undefined) return undefined;
+  const folded = raw.trim().toUpperCase();
+  return folded === '' ? undefined : folded;
+}
+
+/**
+ * The wire key that carries an object's end date. It differs by level: an ad
+ * set has `end_time`; a campaign has `stop_time` (the merge of its ad sets' end
+ * times), and `end_time` is not a campaign field at all — so reading `end_time`
+ * off a campaign told a campaign that HAS a stop date "this object has none".
+ */
+const END_TIME_KEYS: Readonly<Record<AdLevel, readonly string[]>> = {
+  campaign: ['stop_time'],
+  adset: ['end_time'],
+  ad: ['end_time'],
+};
+
+/**
+ * Whether the object a lifetime budget is planned for has an end date.
+ *
+ * `end_time === undefined` once meant "Graph did not mention one" — but Graph
+ * answers a field it was ASKED for and that is unset with `null`, and null is
+ * not undefined; anything that is not a non-blank string is no end time. The
+ * other half of that truth: a read that never ASKED for the key cannot vouch
+ * that it is missing. With no `level`, `getAdObject` reads the common field
+ * set, which carries neither `end_time` nor `stop_time`, so "this object has
+ * none" would be a claim about a field nobody read — that case is `unverified`
+ * unless the record happens to carry one of the keys anyway.
+ */
+function lifetimeEndState(
+  record: AdRecord,
+  level: AdLevel | undefined,
+): 'present' | 'missing' | 'unverified' {
+  const keys =
+    level !== undefined ? END_TIME_KEYS[level] : (['end_time', 'stop_time'] as const);
+  const present = keys.some((key) => {
+    const value = currentString(record, key)?.trim();
+    return value !== undefined && value !== '';
+  });
+  if (present) return 'present';
+  return level !== undefined ? 'missing' : 'unverified';
+}
+
 function currentMinor(record: AdRecord, key: string): number | undefined {
   const value: unknown = record[`${key}_minor`];
   return typeof value === 'number' ? value : undefined;
 }
 
+/**
+ * Name an amount the way the account's currency actually works. A currency with
+ * no subunit ({@link ZERO_DECIMAL_CURRENCIES}) is stated in whole units, because
+ * "N minor units of JPY" reads as N/100 to anyone who knows the term.
+ */
 function formatMinor(value: number, currency: string | undefined): string {
-  return currency !== undefined
-    ? `${String(value)} minor units of ${currency}`
-    : `${String(value)} minor units`;
+  if (currency === undefined) return `${String(value)} minor units`;
+  const code = currency.trim().toUpperCase();
+  if (ZERO_DECIMAL_CURRENCIES.has(code)) {
+    return `${String(value)} ${currency} (whole units)`;
+  }
+  if (HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES.has(code)) {
+    return `${String(value)} hundredths of ${currency} (${hundredthsAsMajor(value)} ${currency})`;
+  }
+  return `${String(value)} minor units of ${currency}`;
+}
+
+/** An integer count of hundredths as a two-decimal major amount, without float math. */
+function hundredthsAsMajor(value: number): string {
+  const whole = Math.trunc(value / 100);
+  const cents = value % 100;
+  return `${String(whole)}.${String(cents).padStart(2, '0')}`;
+}
+
+/** The warning a three-decimal currency Meta counts in hundredths gets beside every budget change. */
+function hundredthOffsetNote(argName: string, value: number, currency: string): string {
+  return (
+    `${currency}'s ISO minor unit is 1/1000, but Meta counts ${currency} budgets in ` +
+    `1/100: \`${argName}\` of ${String(value)} is ${hundredthsAsMajor(value)} ${currency}, ` +
+    `not ${String(value)} thousandths. The number is sent to Graph exactly as given.`
+  );
+}
+
+/**
+ * The warning a budget write gets when the object runs on the OTHER budget
+ * kind. Graph reads the unused kind back as `"0"` (or omits it), so the preview
+ * line alone says "daily_budget: 0 -> N" — adding a budget to an object that
+ * has none — while the object is spending against a lifetime budget, and Meta
+ * does not switch a published campaign or ad set between budget kinds.
+ */
+function budgetKindNote(
+  field: string,
+  otherField: string,
+  otherCurrent: number,
+  currency: string | undefined,
+): string {
+  return (
+    `This object runs on a ${otherField} of ${formatMinor(otherCurrent, currency)}, not a ` +
+    `${field}: the current ${field} shown in the preview (0 or unknown) is the unused ` +
+    `budget kind, not a missing budget. ` +
+    `Meta does not switch a published campaign or ad set between daily and lifetime ` +
+    `budgets, so expect Graph to reject this write — change \`${otherField}_minor\` ` +
+    `instead, or change the budget kind in Ads Manager.`
+  );
+}
+
+/** The warning a zero-decimal account gets beside every budget change. */
+function zeroDecimalNote(argName: string, value: number, currency: string): string {
+  return (
+    `${currency} has no minor unit on a Meta ad account: \`${argName}\` of ${String(value)} is ` +
+    `${String(value)} ${currency}, not one hundredth of it. The number is sent to ` +
+    `Graph exactly as given — confirm the amount in whole ${currency}.`
+  );
 }
 
 /**
@@ -286,14 +524,24 @@ export function planAdObjectUpdate(
   }
 
   // CC-ADS-4 — archived/deleted objects are read-only, refused before the wire.
-  const effective = currentString(ctx.current, 'effective_status');
-  const configured = currentString(ctx.current, 'status');
-  const blocking = [effective, configured].find(
-    (value) => value !== undefined && READ_ONLY_STATUSES.has(value),
-  );
+  const effective = normalizedStatus(ctx.current, 'effective_status');
+  const configured = normalizedStatus(ctx.current, 'status');
+  // DELETED wins over ARCHIVED: its next step differs (deletion is final).
+  const blocking = [effective, configured].includes('DELETED')
+    ? 'DELETED'
+    : [effective, configured].find(
+        (value) => value !== undefined && READ_ONLY_STATUSES.has(value),
+      );
   if (blocking !== undefined) {
+    // Meta cannot restore a deleted campaign, ad set or ad; only archived ones
+    // can be brought back. Advising a restore for DELETED names a step that
+    // does not exist.
+    const nextStep =
+      blocking === 'DELETED'
+        ? 'Deletion is permanent and it cannot be restored — create or duplicate a replacement in Ads Manager instead.'
+        : 'Restore (unarchive) it in Ads Manager first.';
     throw validationError(
-      `${req.objectId} is ${blocking} and is read-only: archived and deleted ads objects cannot be edited or resumed through the API. Nothing was changed. Restore it in Ads Manager first.`,
+      `${req.objectId} is ${blocking} and is read-only: archived and deleted ads objects cannot be edited or resumed through the API. Nothing was changed. ${nextStep}`,
     );
   }
 
@@ -361,9 +609,28 @@ export function planAdObjectUpdate(
       to: requested,
     });
     warnings.push(BUDGET_OVERWRITE_NOTE);
+    if (
+      ctx.currency !== undefined &&
+      ZERO_DECIMAL_CURRENCIES.has(ctx.currency.trim().toUpperCase())
+    ) {
+      warnings.push(zeroDecimalNote(argName, requested, ctx.currency));
+    }
+    if (
+      ctx.currency !== undefined &&
+      HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES.has(ctx.currency.trim().toUpperCase())
+    ) {
+      warnings.push(hundredthOffsetNote(argName, requested, ctx.currency));
+    }
+    const otherField = field === 'daily_budget' ? 'lifetime_budget' : 'daily_budget';
+    const otherCurrent = currentMinor(ctx.current, otherField);
+    if (otherCurrent !== undefined && otherCurrent > 0 && (current ?? 0) === 0) {
+      warnings.push(budgetKindNote(field, otherField, otherCurrent, ctx.currency));
+    }
     if (req.level === 'adset') warnings.push(CBO_CONFLICT_NOTE);
-    if (field === 'lifetime_budget' && ctx.current.end_time === undefined) {
-      warnings.push(LIFETIME_NEEDS_END_NOTE);
+    if (field === 'lifetime_budget') {
+      const endState = lifetimeEndState(ctx.current, req.level);
+      if (endState === 'missing') warnings.push(LIFETIME_NEEDS_END_NOTE);
+      else if (endState === 'unverified') warnings.push(LIFETIME_END_UNVERIFIED_NOTE);
     }
     if (current === undefined || requested > current) {
       // Unknown current value is treated as a raise: assume the costlier reading.
@@ -431,6 +698,11 @@ export function updateAdObjectRequest(
     host: 'graph',
     path: `/${objectId}`,
     body: params,
+    // `/<object-id>` does not say what the id is, so the transport cannot infer
+    // the read that shows whether a lost write landed. Name it here: the ambiguous
+    // (C2) guidance then sends the model to the ad-object read, the one tool that
+    // shows the object's status and budgets.
+    verifyTool: AD_OBJECT_READ_TOOL,
     ...(signal !== undefined ? { signal } : {}),
   };
 }
@@ -439,15 +711,36 @@ export interface AdUpdateOutcome {
   readonly objectId: string;
   /** Graph's `success` flag when it sent one. */
   readonly success: boolean;
+  /**
+   * The changes Facebook CONFIRMED. Empty when `success` is false — this list
+   * is what the write gate journals and shows the model, so filling it in from
+   * the plan on a refused write is the server reporting a budget move that
+   * never happened. What was ASKED for survives in the gate's own metadata
+   * (`changedFields`) and in the echoed params, so nothing is lost by staying
+   * honest here.
+   */
   readonly applied: readonly AdUpdateChange[];
+}
+
+/**
+ * Whether a 2xx update answer confirms the write: an empty body, a bare `true`,
+ * or a record whose `success` is absent or exactly `true`. Anything else — a
+ * bare `false`/`null`/`0`, or a present flag that is not `true` — is a refusal.
+ */
+function confirmsAdUpdate(body: unknown): boolean {
+  if (body === undefined || body === true) return true;
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  const flag: unknown = (body as Record<string, unknown>).success;
+  return flag === undefined || flag === true;
 }
 
 /**
  * Perform the planned update. Only ever called by the write gate AFTER an
  * explicit apply — never during a dry run.
  *
- * @throws the mapped Graph error; a bare 100 becomes the "gone or archived"
- *   explanation (CC-ADS-4).
+ * @throws the mapped Graph error; a bare 100 that reads like Graph's
+ *   nonexistent-object answer becomes the "gone or archived" explanation
+ *   (CC-ADS-4). Any other failure keeps its own words.
  */
 export async function applyAdObjectUpdate(
   fbRequest: FbRequestFn,
@@ -458,14 +751,26 @@ export async function applyAdObjectUpdate(
     const res = await fbRequest<unknown>(
       updateAdObjectRequest(plan.objectId, plan.params, signal),
     );
-    const body: Record<string, unknown> =
-      typeof res.data === 'object' && res.data !== null
-        ? (res.data as Record<string, unknown>)
-        : {};
     // Graph answers `{ "success": true }`; a 2xx without the flag is still a
-    // success on this edge, so absence is not treated as failure.
-    const success = body.success !== false;
-    return { objectId: plan.objectId, success, applied: plan.changes };
+    // success on this edge, so absence is not treated as failure. A flag that is
+    // PRESENT but is not that boolean (`"false"`, `0`, `null`) is Facebook
+    // saying no: `!== false` read every one of those as done and handed back an
+    // `applied` change list the account never took. A bare non-record body
+    // (`false`, `null`, `0`) is a refusal too — collapsing it to `{}` made the
+    // missing flag read as "absent, so fine" — so only an empty body or a bare
+    // `true` confirms without a record (the comments/posts `confirmsWrite` rule).
+    const success = confirmsAdUpdate(res.data);
+    // The boolean was fixed; the change list was not. `applied: plan.changes`
+    // is the list we ASKED for, and handing it back beside `success: false`
+    // says "here is what changed" about an account that changed nothing — the
+    // one lie a spend-tier tool cannot afford to tell. On a refusal the
+    // confirmed set is empty, and it is the gate's metadata, not this field,
+    // that records what was attempted.
+    return {
+      objectId: plan.objectId,
+      success,
+      applied: success ? plan.changes : [],
+    };
   } catch (err) {
     throw mapUpdateError(err, plan.objectId);
   }

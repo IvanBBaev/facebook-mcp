@@ -168,6 +168,62 @@ test('reshapeInsights carries period, totals and exact boundaries once per metri
   ]);
 });
 
+test('reshapeInsights never sums overlapping windows: a rolling or lifetime total is the latest point', () => {
+  // Graph answers `week`, `days_28` and `lifetime` with ONE POINT PER DAY, each
+  // point already covering a 7-day / 28-day / all-time window that overlaps the
+  // previous one. Adding 30 such points counts every view up to 28 times: a
+  // Page with a steady 100 views per 28 days read "total: 3000", and that was
+  // the headline number in aggregate mode.
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'days_28', days(30, 100)),
+      series('page_follows', 'week', [
+        [end('2026-07-01'), 5],
+        [end('2026-07-02'), 6],
+        [end('2026-07-03'), 7],
+      ]),
+      // A lifetime breakdown: the latest day's keys still add up (fans by
+      // country on the last day ARE the fan count), earlier days do not.
+      series('page_fans_country', 'lifetime', [
+        [end('2026-07-01'), { BG: 40, DE: 10 }],
+        [end('2026-07-02'), { BG: 41, DE: 10 }],
+      ]),
+      // Calendar months are disjoint, so their sum is a real total.
+      series('page_media_view', 'month', [
+        [end('2026-06-30'), 300],
+        [end('2026-07-31'), 200],
+      ]),
+    ),
+  );
+
+  assert.deepEqual(
+    out.metrics.map((m) => [m.metric, m.period, m.points, m.total, m.totalIsLatest]),
+    [
+      ['page_media_view', 'days_28', 30, 100, true],
+      ['page_follows', 'week', 3, 7, true],
+      ['page_fans_country', 'lifetime', 4, 51, true],
+      ['page_media_view', 'month', 2, 500, undefined],
+    ],
+  );
+});
+
+test('an overlapping-window total takes the newest date, whatever order Graph sent the points in', () => {
+  // Regression coverage: Graph documents oldest-first, but "latest" must mean
+  // the newest END, not the last array element — a reversed body would
+  // otherwise quietly hand the model the oldest window as the current total.
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'week', [
+        [end('2026-07-03'), 30],
+        [end('2026-07-01'), 10],
+        [end('2026-07-02'), 20],
+      ]),
+    ),
+  );
+  assert.equal(out.metrics[0]?.total, 30);
+  assert.equal(out.metrics[0]?.totalIsLatest, true);
+});
+
 test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
   const out = reshapeInsights(
     insightsBody(
@@ -348,6 +404,40 @@ test('checkWindow rejects a malformed date as a validation error', () => {
   throwsGraph(() => checkWindow({ until: '2026-13-45', nowMs: NOW }));
 });
 
+test('checkWindow rejects a calendar date that does not exist instead of rolling it over', () => {
+  // V8 parses "2026-02-29T00:00:00Z" as March 1st (and "04-31" as May 1st), so a
+  // NaN check alone lets an impossible day through: the caller is then told the
+  // window starts on a date that does not exist while Graph reads from the next
+  // one. A real leap day stays legal.
+  for (const [since, until] of [
+    ['2026-02-29', '2026-03-10'],
+    ['2026-02-30', '2026-03-10'],
+    ['2026-04-31', '2026-05-10'],
+    ['2026-06-00', '2026-06-10'],
+  ] as const) {
+    const err = throwsGraph(() => checkWindow({ since, until, nowMs: NOW }));
+    assert.equal(err.action?.category, 'validation', since);
+    assert.match(err.message, /not a real date/, since);
+  }
+  const err = throwsGraph(() =>
+    checkWindow({ since: '2026-02-01', until: '2026-02-29', nowMs: NOW }),
+  );
+  assert.match(err.message, /`until`.*not a real date/);
+  assert.deepEqual(
+    checkWindow({ since: '2024-02-29', until: '2024-03-01', nowMs: NOW }),
+    { since: '2024-02-29', until: '2024-03-01', days: 2 },
+  );
+});
+
+test('fetchInsights refuses an impossible since date before touching the network', async () => {
+  const fake = createFakeFbRequest();
+  const err = await rejectsGraph(
+    fetchInsights(fake.fn, pageRequest({ since: '2026-02-29', until: '2026-03-10' })),
+  );
+  assert.match(err.message, /not a real date/);
+  assert.equal(fake.calls.length, 0);
+});
+
 test('checkWindow rejects a reversed window', () => {
   const err = throwsGraph(() =>
     checkWindow({ since: '2026-07-10', until: '2026-07-01', nowMs: NOW }),
@@ -375,6 +465,24 @@ test('checkWindow enforces the documented day ceiling with actionable text', () 
   assert.equal(edge.days, 3);
   throwsGraph(() =>
     checkWindow({ since: '2026-07-01', until: '2026-07-04', nowMs: NOW, maxDays: 3 }),
+  );
+});
+
+test("checkWindow names the ceiling as this server's, not a false Graph maximum", () => {
+  const err = throwsGraph(() =>
+    checkWindow({ since: '2026-01-01', until: '2026-07-01', nowMs: NOW }),
+  );
+  assert.doesNotMatch(err.message, /Graph serves at most/, 'Graph allows up to 93 days');
+  assert.match(err.message, /this server reads at most 90 days/);
+});
+
+test('checkWindow does not blame an `until` the caller never passed', () => {
+  const today = new Date(NOW).toISOString().slice(0, 10);
+  const err = throwsGraph(() => checkWindow({ since: '2099-01-01', nowMs: NOW }));
+  assert.doesNotMatch(err.message, /is after `until`/);
+  assert.match(
+    err.message,
+    new RegExp(`is after today \\(${today}, the default \`until\`\\)`),
   );
 });
 
@@ -563,6 +671,46 @@ test('fetchInsights aggregate mode returns totals only, with no per-point rows',
   assert.equal(
     result.notes.some((note) => note.includes('Row cap reached')),
     false,
+  );
+});
+
+test('fetchInsights explains a rolling-window total, and only then', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk(insightsBody(series('page_media_view', 'days_28', days(30, 100)))),
+  );
+
+  const rolling = await fetchInsights(
+    fake.fn,
+    pageRequest({ metrics: ['page_media_view'], period: 'days_28', aggregate: true }),
+  );
+  assert.deepEqual(
+    rolling.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
+    [['page_media_view', 30, 100]],
+  );
+  // The note is matched by wording rather than imported as a constant on
+  // purpose: reverting the fix must fail THIS assertion, not the module load.
+  assert.equal(
+    rolling.notes.filter((note) => /latest point|not a sum/i.test(note)).length,
+    1,
+    `expected exactly one rolling-window note in ${JSON.stringify(rolling.notes)}`,
+  );
+
+  const daily = createFakeFbRequest();
+  daily.on(
+    () => true,
+    fbOk(insightsBody(series('page_media_view', 'day', days(30, 100)))),
+  );
+  const summed = await fetchInsights(
+    daily.fn,
+    pageRequest({ metrics: ['page_media_view'], aggregate: true }),
+  );
+  assert.equal(summed.metrics[0]?.total, 3000, 'a daily series is still a real sum');
+  assert.equal(
+    summed.notes.some((note) => /latest point|not a sum/i.test(note)),
+    false,
+    'a disjoint period carries no rolling-window note',
   );
 });
 
@@ -792,6 +940,43 @@ test('a series with data carries no user-token hint', async () => {
   const result = await fetchInsights(fake.fn, pageRequest());
 
   assert.ok(!result.notes.includes(INSIGHTS_TOKEN_EMPTY_HINT));
+});
+
+test('a zero-entry body is explained like an empty series (CC-AUTH-2, CC-INS-2)', async () => {
+  // "Silent empty data" has two possible wire shapes and doc 09 pins neither:
+  // entries whose `values` array is empty (covered by the tests above), and a
+  // body carrying no entries at all. The explanation must not depend on which
+  // one Graph chose — a below-floor Page and a user-token read are the same
+  // failure either way.
+  const cases: readonly { readonly request: InsightsRequest; readonly note: string }[] = [
+    { request: pageRequest(), note: PAGE_ELIGIBILITY_NOTE },
+    {
+      request: {
+        scope: 'post',
+        objectId: POST_ID,
+        metrics: ['post_media_view'],
+        nowMs: NOW,
+      },
+      note: POST_EMPTY_NOTE,
+    },
+    { request: reelRequest(), note: REEL_EMPTY_NOTE },
+  ];
+
+  for (const { request, note } of cases) {
+    const fake = createFakeFbRequest();
+    fake.on(() => true, fbOk(insightsBody()));
+
+    const result = await fetchInsights(fake.fn, request);
+
+    assert.ok(
+      result.notes.includes(note),
+      `${request.scope}: the scope explanation is missing`,
+    );
+    assert.ok(
+      result.notes.includes(INSIGHTS_TOKEN_EMPTY_HINT),
+      `${request.scope}: the user-token trap is missing`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1040,8 +1225,336 @@ test('the reel scope shares the reshape contract: rows, cap and aggregate', asyn
   const totals = await fetchInsights(fake.fn, reelRequest({ aggregate: true }));
   assert.equal(totals.mode, 'aggregate');
   assert.equal(totals.rows, undefined);
+  // Forty `lifetime` points are forty cumulative snapshots of the same
+  // counter, so the honest total is the newest one — not 40 × 3 = 120.
   assert.deepEqual(
-    totals.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
-    [['post_video_view_time', 40, 120]],
+    totals.metrics.map((metric) => [
+      metric.metric,
+      metric.points,
+      metric.total,
+      metric.totalIsLatest,
+    ]),
+    [['post_video_view_time', 40, 3, true]],
   );
+});
+
+test('a metric Graph echoes back in another casing is not reported as unavailable', async () => {
+  const fake = createFakeFbRequest();
+  // The request side is folded to canonical snake_case; the REPLY side was
+  // compared verbatim. An entry whose `name` comes back cased or padded
+  // differently therefore misses the match, and the caller is handed the
+  // metric's own rows together with a note swearing the name is not valid for
+  // this object — the numbers and the denial in the same payload.
+  fake.on(() => true, fbOk(insightsBody(series(' Page_Media_View ', 'day', days(2, 7)))));
+
+  const result = await fetchInsights(fake.fn, pageRequest());
+
+  assert.deepEqual(result.unavailableMetrics, []);
+  assert.equal(
+    result.notes.some((note) => note.startsWith('Graph returned no entry')),
+    false,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Wave 12 — what the caller is told about a rejection, a cap and a boundary
+// ---------------------------------------------------------------------------
+
+test("an enriched metric error keeps Graph's user-facing title and message", async () => {
+  // The server surfaces `userTitle` / `userMessage` to the caller as their own
+  // fields (the only human-readable reason on many Graph refusals). Rebuilding
+  // the error with the suggestions attached must carry them over, not drop them.
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbErr(
+      new GraphApiError('(#100) The value must be a valid insights metric', {
+        code: 100,
+        httpStatus: 400,
+        userTitle: 'Invalid metric',
+        userMessage: 'page_vieuws_total is not a metric this Page supports.',
+      }),
+    ),
+  );
+
+  const err = await rejectsGraph(
+    fetchInsights(fake.fn, pageRequest({ metrics: ['page_vieuws_total'] })),
+  );
+
+  assert.match(err.message, /NO metric was read/, 'the error was enriched');
+  assert.equal(err.userTitle, 'Invalid metric');
+  assert.equal(err.userMessage, 'page_vieuws_total is not a metric this Page supports.');
+});
+
+test('a row cap that cuts across metrics names which series lost rows', async () => {
+  // Rows are emitted metric by metric in Graph's order, so the cap keeps the
+  // first metrics whole and drops the tail metrics entirely. Without naming
+  // them, a partially kept series reads as a complete one ending early, and a
+  // fully cut metric looks like it simply had no rows.
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk(
+      insightsBody(
+        series('page_media_view', 'day', days(5, 1)),
+        series('page_post_engagements', 'day', days(5, 2)),
+        series('page_follows', 'day', days(5, 3)),
+      ),
+    ),
+  );
+
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({
+      metrics: ['page_media_view', 'page_post_engagements', 'page_follows'],
+      maxRows: 7,
+    }),
+  );
+
+  assert.equal(result.rows?.length, 7);
+  const note = result.notes.find((entry) => entry.includes('Row cap reached'));
+  assert.ok(note, 'a truncation note is emitted');
+  assert.match(note, /kept the first 7 of 15 data points and dropped 8/);
+  assert.match(note, /page_post_engagements \(kept 2 of 5\)/);
+  assert.match(note, /page_follows \(kept 0 of 5\)/);
+  assert.doesNotMatch(note, /page_media_view \(/, 'a fully kept series is not listed');
+});
+
+test('firstEnd / lastEnd are the real window boundaries whatever order Graph sent', () => {
+  // `total` already picks the newest point by value; the boundaries were taken
+  // by array position, so a newest-first body reported firstEnd AFTER lastEnd.
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'day', [
+        [end('2026-07-03'), 3],
+        [end('2026-07-01'), 1],
+        [end('2026-07-02'), 2],
+      ]),
+    ),
+  );
+  assert.equal(out.metrics[0]?.firstEnd, end('2026-07-01'));
+  assert.equal(out.metrics[0]?.lastEnd, end('2026-07-03'));
+});
+
+// ---------------------------------------------------------------------------
+// Wave 20 — metric index, unsupported period, empty breakdown map
+// ---------------------------------------------------------------------------
+
+test("a Graph metric[N] rejection names the metric at N in the list actually sent, not the caller's", async () => {
+  // The caller's list is ['page_fans', 'page_media_view', 'page_vieuws'].
+  // `page_fans` is dropped before the call, so Graph sees
+  // 'page_media_view,page_vieuws' and its `metric[1]` is `page_vieuws`. Read
+  // against the caller's own list, index 1 is the VALID `page_media_view` —
+  // which is the name that must survive the re-read.
+  const fake = createFakeFbRequest();
+  fake.on(
+    (req) =>
+      req.protocol === 'json' && req.params?.metric === 'page_media_view,page_vieuws',
+    fbErr(
+      new GraphApiError('(#100) metric[1] must be one of the following values: a, b', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+  fake.on(
+    (req) => req.protocol === 'json' && req.params?.metric === 'page_media_view',
+    fbOk(insightsBody(series('page_media_view', 'day', days(1, 3)))),
+  );
+
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({ metrics: ['page_fans', 'page_media_view', 'page_vieuws'] }),
+  );
+
+  assert.equal(paramsOf(fake.calls[0]).metric, 'page_media_view,page_vieuws');
+  assert.equal(paramsOf(fake.lastRequest()).metric, 'page_media_view');
+  const rejected = result.rejectedMetrics ?? [];
+  assert.deepEqual(
+    rejected.map((entry) => entry.metric),
+    ['page_vieuws'],
+  );
+  assert.match(
+    rejected[0]?.reason ?? '',
+    /metric\[1\] of the list sent \("page_media_view,page_vieuws"\)/,
+    'the sent list is quoted',
+  );
+  assert.deepEqual(
+    result.rows?.map((row) => row.metric),
+    ['page_media_view'],
+  );
+});
+
+test('a metric Graph omits or leaves empty is not blamed on its name alone when the period may be the cause', async () => {
+  // Graph omits (or empties) a metric/period pair it does not serve instead of
+  // failing the call; the tool description promises the notes say so.
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk(
+      insightsBody(
+        series('page_media_view', 'week', days(2, 7)),
+        series('page_daily_follows', 'week', []),
+      ),
+    ),
+  );
+
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({
+      period: 'week',
+      metrics: ['page_media_view', 'page_daily_follows', 'page_views_total'],
+    }),
+  );
+
+  const invalidNote = result.notes.find((note) =>
+    note.startsWith('Graph returned no entry'),
+  );
+  assert.ok(invalidNote);
+  assert.match(invalidNote, /period "week"/);
+  const emptyNote = result.notes.find((note) => note.startsWith('Valid but empty'));
+  assert.ok(emptyNote);
+  assert.match(emptyNote, /period "week"/);
+});
+
+test('an overlapping total whose newest point is an empty breakdown map is 0, not an older window', () => {
+  // `{}` is a point Graph DID return — a breakdown with no keys, i.e. zero.
+  // Skipping it made the previous window's 5 the "latest" 28-day total.
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_actions_post_reactions_total', 'days_28', [
+        [end('2026-07-01'), { like: 5 }],
+        [end('2026-07-02'), {}],
+      ]),
+    ),
+  );
+  assert.equal(out.metrics[0]?.total, 0);
+  assert.equal(out.metrics[0]?.totalIsLatest, true);
+  assert.equal(out.metrics[0]?.lastEnd, end('2026-07-02'));
+  assert.equal(out.metrics[0]?.points, 1, 'the empty map adds no row');
+});
+
+// ---------------------------------------------------------------------------
+// Wave 26 — a located metric rejection, and a metric read on the wrong edge
+// ---------------------------------------------------------------------------
+
+/** Match a request by the comma-joined metric list it sent. */
+function sentMetrics(list: string): (req: FbRequest) => boolean {
+  return (req) => req.protocol === 'json' && req.params?.metric === list;
+}
+
+test('a metric[N] rejection drops that one name and still answers the rest', async () => {
+  // Graph names the offending entry, so the other names are provably fine:
+  // failing the whole read threw away numbers a second GET returns.
+  const fake = createFakeFbRequest();
+  fake.on(
+    sentMetrics('page_media_view,page_vieuws'),
+    fbErr(
+      new GraphApiError('(#100) metric[1] must be one of the following values: a, b', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+  fake.on(
+    sentMetrics('page_media_view'),
+    fbOk(insightsBody(series('page_media_view', 'day', days(2, 4)))),
+  );
+
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({ metrics: ['page_media_view', 'page_vieuws'] }),
+  );
+
+  assert.equal(fake.calls.length, 2);
+  assert.deepEqual(
+    result.rows?.map((row) => [row.metric, row.value]),
+    [
+      ['page_media_view', 4],
+      ['page_media_view', 4],
+    ],
+  );
+  assert.deepEqual(
+    result.rejectedMetrics?.map((entry) => entry.metric),
+    ['page_vieuws'],
+  );
+  assert.deepEqual(result.unavailableMetrics, [], 'rejected is not also unavailable');
+  const note = result.notes.find((n) => n.includes('page_vieuws'));
+  assert.ok(note, 'a note names the rejected metric');
+  assert.match(note, /rejected/i);
+});
+
+test('a located rejection of every name still fails, naming each rejected name', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    sentMetrics('page_vieuws,page_clikcs'),
+    fbErr(
+      new GraphApiError('(#100) metric[0] must be one of the following values: a', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+  fake.on(
+    sentMetrics('page_clikcs'),
+    fbErr(
+      new GraphApiError('(#100) metric[0] must be one of the following values: a', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+
+  const err = await rejectsGraph(
+    fetchInsights(fake.fn, pageRequest({ metrics: ['page_vieuws', 'page_clikcs'] })),
+  );
+  assert.equal(fake.calls.length, 2);
+  assert.match(err.message, /NO metric was read/);
+  assert.match(err.message, /metric\[0\] is "page_clikcs"/);
+  assert.match(err.message, /"page_vieuws"/, 'the name dropped earlier is named too');
+});
+
+test('a Page metric rejected on the post edge is named as a Page metric, not a typo', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbErr(
+      new GraphApiError('(#100) The value must be a valid insights metric', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+
+  const err = await rejectsGraph(
+    fetchInsights(fake.fn, {
+      scope: 'post',
+      objectId: POST_ID,
+      metrics: ['page_media_view'],
+      nowMs: NOW,
+    }),
+  );
+  assert.match(err.message, /"page_media_view" is a Page-level metric/);
+  assert.match(err.message, /facebook_page_insights/);
+  assert.doesNotMatch(err.message, /either a typo or unsupported/);
+});
+
+test('a post metric rejected on the Page edge is named as a post metric', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbErr(
+      new GraphApiError('(#100) The value must be a valid insights metric', {
+        code: 100,
+        httpStatus: 400,
+      }),
+    ),
+  );
+
+  const err = await rejectsGraph(
+    fetchInsights(fake.fn, pageRequest({ metrics: ['post_clicks'] })),
+  );
+  assert.match(err.message, /"post_clicks" is a post-level metric/);
+  assert.match(err.message, /facebook_post_insights/);
+  assert.doesNotMatch(err.message, /either a typo or unsupported/);
 });

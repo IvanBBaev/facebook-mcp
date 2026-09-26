@@ -404,7 +404,14 @@ registerSmoke({
     const posts = ctx.unwrap(listed.posts) ?? [];
     ctx.assert(Array.isArray(posts), `posts is not an array: ${typeof posts}`);
     if (posts.length === 0) {
-      ctx.log.step('the read Page has no published posts — nothing to list comments on');
+      ctx.log.step('the read Page has no published posts');
+      ctx.notExercised(
+        'facebook_list_comments was never called: with no post to list comments on, ' +
+          "nothing checked that a STRANGER's comment text reaches the model inside " +
+          'the taint envelope (B1 / CC-MOD-8) and never as a bare `message` / ' +
+          '`authorName` field. This smoke is the only place that check runs against ' +
+          'text the operator did not write.',
+      );
       return;
     }
 
@@ -455,7 +462,14 @@ registerSmoke({
 
     ctx.log.step(
       `none of the ${Math.min(posts.length, READ_PROBE_POSTS)} newest read-Page post(s) ` +
-        'carries a comment — the envelope assertion was not exercised against visitor text',
+        'carries a comment',
+    );
+    ctx.notExercised(
+      'the listing shape was checked but the taint contract was not: no visitor-authored ' +
+        'comment body existed to prove that untrusted text arrives inside the envelope ' +
+        '(B1 / CC-MOD-8), that `message` / `authorName` never leak alongside it, and ' +
+        'that the moderatable id still travels OUTSIDE the envelope. This smoke is the ' +
+        "only place a stranger's text is checked at all.",
     );
   },
 });

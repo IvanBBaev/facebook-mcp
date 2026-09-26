@@ -2,10 +2,12 @@
 //
 // These tests drive the EXPORTED `buildServer` builder over a real in-process
 // MCP session: a low-level `Server` wired to an SDK `Client` through
-// `InMemoryTransport.createLinkedPair()`. They never call `main()` (which would
-// open a real transport and read the process environment) and never touch the
-// network — every collaborator is an in-memory fake, so the test-runner's
-// fetch-fence is never provoked.
+// `InMemoryTransport.createLinkedPair()`. They never call `main()` in-process
+// (which would open a real transport and read the process environment) and never
+// touch the network: every collaborator is an in-memory fake, so the
+// test-runner's fetch-fence is never provoked. The one exception is the
+// `--help` test, which runs the entry point as a child process that exits
+// before settings are loaded.
 //
 // The properties pinned here:
 //   (a) all-tools smoke — the four `core` tools are advertised with
@@ -28,6 +30,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -54,11 +61,18 @@ import {
 import {
   GraphApiError,
   classifyGraphError,
+  createFbRequest,
+  createLogger,
+  createPagesRegistry,
+  createRedactor,
   loadSettings,
+  type LogFields,
+  type LogLevel,
   type Logger,
   type PackageName,
   type PackageSpec,
   type ProgressUpdate,
+  type Redactor,
   type Settings,
   type ToolContext,
   type ToolResult,
@@ -76,16 +90,30 @@ import {
 } from './mcp/index.js';
 import {
   confirmableWriteArgs,
+  createAdsPackage,
   createCorePackage,
+  createInsightsPackage,
+  createMessagesPackage,
+  createModerationPackage,
+  createPostsPackage,
+  createReaderPackage,
   executeWrite,
   gateArgs,
+  META_ERROR_TEXT_MAX,
 } from './tools/index.js';
+import { withFetch, type FetchMock } from './testing/index.js';
 import {
   adAccountProbe,
   buildServer,
+  createTransport,
+  isStrictFlag,
   isVersionFlag,
+  logStartupWarnings,
+  loadedPackages,
   metricProbe,
   resolveSdkVersion,
+  runDoctorCommand,
+  serverStartedFields,
   versionLine,
   type BuildServerDeps,
   type SdkVersionSources,
@@ -146,13 +174,18 @@ interface Harness {
 interface HarnessOverrides {
   readonly settings?: Settings;
   readonly packages?: readonly PackageSpec[];
+  /** Swapped in by the log-line tests, which are ABOUT what the bootstrap logs. */
+  readonly logger?: Logger;
+  /** Swapped in when a test needs the real redactor rather than the value fake. */
+  readonly redactor?: Redactor;
 }
 
 /** Assemble {@link buildServer} dependencies from in-memory fakes. */
 function makeHarness(overrides: HarnessOverrides = {}): Harness {
   const settings = overrides.settings ?? testSettings();
   const clock = createFakeClock(1_000);
-  const redactor = createFakeRedactor({ secrets: [settings.accessToken ?? ''] });
+  const redactor =
+    overrides.redactor ?? createFakeRedactor({ secrets: [settings.accessToken ?? ''] });
   const journal = createMemoryJournal(clock);
   const fb = createFakeFbRequest();
   const pages = createFakePageResolver();
@@ -165,7 +198,7 @@ function makeHarness(overrides: HarnessOverrides = {}): Harness {
     packages,
     serverVersion: '1.2.3-test',
     clock,
-    logger: silentLogger,
+    logger: overrides.logger ?? silentLogger,
     redactor,
     journal,
     fbRequest: fb.fn,
@@ -342,8 +375,10 @@ const FAILURE_KINDS = [
   'graph',
   'graph-bare',
   'graph-throttled',
+  'graph-user-text',
   'plain',
   'non-error',
+  'non-error-object',
 ] as const;
 
 /** The probe package: one context mirror, one on-demand failure. */
@@ -423,8 +458,27 @@ function probePackage(): PackageSpec {
               estimated_time_to_regain_access: 30,
             }),
           });
+        case 'graph-user-text':
+          // An ads/publishing refusal: `message` is the generic line, the
+          // user-facing pair is the only human-readable reason.
+          throw new GraphApiError('Graph API error (HTTP 400): Invalid parameter', {
+            code: 100,
+            subcode: 1_487_390,
+            type: 'OAuthException',
+            httpStatus: 400,
+            userTitle: 'Budget Too Low',
+            userMessage: `The daily budget must be at least $1.00 (token ${ACCESS_TOKEN}).`,
+          });
         case 'plain':
           throw new Error(`upstream blew up while holding ${ACCESS_TOKEN}`);
+        case 'non-error-object': {
+          // A library that rejects with a plain object still names its reason.
+          const notAnError: unknown = {
+            message: 'probe rejected with an object',
+            code: 'EPROBE',
+          };
+          throw notAnError;
+        }
         default: {
           // Not every rejection is an Error — a library may reject with a bare
           // value, and the bootstrap must still produce a usable result.
@@ -520,6 +574,39 @@ test('an unknown package name fails the build and lists the valid names', () => 
       return true;
     },
   );
+});
+
+test('a tool disabled by package configuration says so, not "unknown tool"', async () => {
+  // `ads` is built but off in the default profile; `posts` read-only drops its
+  // write tools. Either way the name is real, and "unknown tool" sends the
+  // model looking for a typo instead of at the operator's package settings.
+  const adsTool = createAdsPackage().tools[0]?.name ?? '';
+  const cases: readonly [Record<string, string>, string, RegExp][] = [
+    [{}, adsTool, /package 'ads' is not loaded.*FB_TOOL_PACKAGES.*FB_PACKAGES_DENY/],
+    [
+      { FB_PACKAGES_READONLY: 'posts' },
+      'facebook_delete_post',
+      /FB_PACKAGES_READONLY drops the write tools of package 'posts'/,
+    ],
+  ];
+  for (const [env, name, expected] of cases) {
+    const { settings } = loadSettings({
+      env: { FB_ACCESS_TOKEN: ACCESS_TOKEN, ...env },
+      loadEnvFile: false,
+    });
+    const { deps, fb } = makeHarness({ settings, packages: bootstrapPackages() });
+    const { client, close } = await connect(deps);
+    try {
+      const result = (await client.callTool({ name, arguments: {} })) as CallToolResult;
+      assert.equal(result.isError, true);
+      const error = String(parseResult(result)['error']);
+      assert.match(error, new RegExp(`tool ${name} is disabled`));
+      assert.match(error, expected);
+    } finally {
+      await close();
+    }
+    assert.equal(fb.calls.length, 0, 'a disabled tool must never reach Graph');
+  }
 });
 
 test('an unadvertised tool name returns an error result, not a protocol error', async () => {
@@ -625,11 +712,47 @@ test('a throttled Graph error ships the next tool and the cool-down, not just pr
   assert.equal(record['retryAfterMs'], 30 * 60_000);
 });
 
+test('a Graph error with user-facing text surfaces it beside the message, redacted', async () => {
+  const result = await callProbeServer('facebook_probe_fail', {
+    kind: 'graph-user-text',
+  });
+
+  assert.equal(result.isError, true);
+  const record = parseResult(result);
+  // Graph's own message is untouched (operators grep for it) …
+  assert.equal(record['error'], 'Graph API error (HTTP 400): Invalid parameter');
+  // … and the reason ships as its own two fields, through the same redaction
+  // choke-point as everything else in the record.
+  assert.equal(record['userTitle'], 'Budget Too Low');
+  assert.equal(
+    record['userMessage'],
+    'The daily budget must be at least $1.00 (token [REDACTED]).',
+  );
+  assert.equal(record['code'], 100);
+  assert.equal(record['subcode'], 1_487_390);
+
+  // Absent on the error ⇒ absent on the record, never null.
+  const bare = parseResult(
+    await callProbeServer('facebook_probe_fail', { kind: 'graph-bare' }),
+  );
+  assert.ok(!('userTitle' in bare));
+  assert.ok(!('userMessage' in bare));
+});
+
 test('a non-Error rejection still maps to a well-formed error result', async () => {
   const result = await callProbeServer('facebook_probe_fail', { kind: 'non-error' });
 
   assert.equal(result.isError, true);
   assert.deepEqual(parseResult(result), { error: 'probe rejected with a bare string' });
+});
+
+test('a non-Error object rejection keeps its message instead of "[object Object]"', async () => {
+  const result = await callProbeServer('facebook_probe_fail', {
+    kind: 'non-error-object',
+  });
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(parseResult(result), { error: 'probe rejected with an object' });
 });
 
 test('an error message carrying the token is redacted before it reaches the client', async () => {
@@ -644,6 +767,286 @@ test('an error message carrying the token is redacted before it reaches the clie
     'the access token leaked through the error path',
   );
   assert.match(text, /\[REDACTED\]/);
+});
+
+// ---------------------------------------------------------------------------
+// (f) The per-call log line — `ToolSpec.logFields` (04 §"Log hygiene")
+// ---------------------------------------------------------------------------
+//
+// The allowlist is a SECURITY control, so it is pinned from the outside, on the
+// wire, rather than by unit-testing the projection helper: what matters is what
+// a real `tools/call` puts in front of the logger. Four properties are load
+// bearing and each gets its own test —
+//
+//   * only allowlisted keys appear, and the un-allowlisted sibling never does;
+//   * a spec with no allowlist logs NOTHING (no default key set);
+//   * every logged value goes through the redactor at the dispatch site;
+//   * a non-scalar is reduced to its shape, never its content;
+//
+// plus the two the placement decision rests on: the line exists even when the
+// call is rejected, and it lands on stderr, never on the stdio JSON-RPC channel.
+
+/** The `msg` the bootstrap stamps on its one per-call line. */
+const TOOL_CALL_MSG = 'tool call';
+
+/** The probe whose spec allowlists three of its four arguments. */
+const LOG_TOOL = 'facebook_probe_logged';
+
+/** The probe that declares no allowlist at all — the 35-of-36 case. */
+const QUIET_TOOL = 'facebook_probe_quiet';
+
+/** One captured log call, in the shape the bootstrap handed to the logger. */
+interface LogRecord {
+  readonly level: LogLevel;
+  readonly msg: string;
+  readonly fields: LogFields | undefined;
+}
+
+/** A {@link Logger} that records instead of writing, so the fields stay inspectable. */
+function recordingLogger(): { readonly logger: Logger; readonly records: LogRecord[] } {
+  const records: LogRecord[] = [];
+  const capture =
+    (level: LogLevel) =>
+    (msg: string, fields?: LogFields): void => {
+      records.push({ level, msg, fields });
+    };
+  return {
+    logger: {
+      debug: capture('debug'),
+      info: capture('info'),
+      warn: capture('warn'),
+      error: capture('error'),
+    },
+    records,
+  };
+}
+
+/**
+ * A probe package (again in the `ads` slot) holding the two specs the log tests
+ * contrast: one with an allowlist, one without. `payload` is typed `unknown` on
+ * purpose — the allowlist may name an argument whose value is not a scalar, and
+ * that is precisely the case the projection has to refuse to serialize.
+ */
+function logProbePackage(): PackageSpec {
+  const logged = defineTool({
+    name: LOG_TOOL,
+    description: 'Test-only: three of these four arguments are safe to log.',
+    inputSchema: z.object({
+      page_id: z.string().optional().describe('Allowlisted, and a string.'),
+      limit: z.number().optional().describe('Allowlisted, and a non-string scalar.'),
+      payload: z.unknown().optional().describe('Allowlisted, but any shape at all.'),
+      note: z.string().optional().describe('NOT allowlisted; must never be logged.'),
+    }),
+    annotations: READ_ONLY_ANNOTATIONS,
+    logFields: ['page_id', 'limit', 'payload'],
+    handler: () => Promise.resolve(textResult({ ok: true })),
+  });
+
+  const quiet = defineTool({
+    name: QUIET_TOOL,
+    description: 'Test-only: the same argument, with no allowlist declared.',
+    inputSchema: z.object({
+      page_id: z
+        .string()
+        .optional()
+        .describe('Never logged: the spec allowlists nothing.'),
+    }),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: () => Promise.resolve(textResult({ ok: true })),
+  });
+
+  return {
+    name: 'ads',
+    title: 'Log probe',
+    description: 'Test-only package for the per-call log line.',
+    tools: [logged, quiet],
+    enabledByDefault: false,
+  };
+}
+
+/** The injected package array for a log-probe-backed server. */
+function logProbePackages(): readonly PackageSpec[] {
+  return [
+    createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+    logProbePackage(),
+  ];
+}
+
+/**
+ * Drive one call against a log-probe server and hand back both the result and
+ * everything the bootstrap logged. `redactor` is injectable because one test
+ * needs the REAL redactor (the fake omits the defensive pattern scan).
+ */
+async function callLogProbe(
+  name: string,
+  args: Record<string, unknown>,
+  redactor?: Redactor,
+): Promise<{ readonly result: CallToolResult; readonly records: readonly LogRecord[] }> {
+  const { logger, records } = recordingLogger();
+  const { deps } = makeHarness({
+    settings: probeSettings(),
+    packages: logProbePackages(),
+    logger,
+    ...(redactor !== undefined ? { redactor } : {}),
+  });
+  const { client, close } = await connect(deps);
+  try {
+    const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
+    return { result, records };
+  } finally {
+    await close();
+  }
+}
+
+/** The single per-call line, asserted to exist exactly once. */
+function onlyCallLine(records: readonly LogRecord[]): LogRecord {
+  const lines = records.filter((r) => r.msg === TOOL_CALL_MSG);
+  assert.equal(lines.length, 1, `expected exactly one ${TOOL_CALL_MSG} line`);
+  const line = lines[0];
+  assert.ok(line);
+  return line;
+}
+
+test('a tool call logs the allowlisted arguments and nothing else', async () => {
+  const { records } = await callLogProbe(LOG_TOOL, {
+    page_id: '1234567890',
+    limit: 7,
+    note: 'free-text the operator never reviewed for hygiene',
+  });
+
+  // Exactly one line for the whole call, at `info` — the default level, so the
+  // control is visible in a default install rather than only under FB_LOG_LEVEL.
+  assert.equal(records.length, 1);
+  const line = onlyCallLine(records);
+  assert.equal(line.level, 'info');
+  // The tool name sits at the top level and the arguments nest under `args`, so
+  // an argument called `tool` can never displace the name of the tool.
+  assert.deepEqual(line.fields, {
+    tool: LOG_TOOL,
+    args: { page_id: '1234567890', limit: 7 },
+  });
+  // `note` is an argument the caller DID send; it is absent because the spec
+  // does not name it, which is the whole point of an allowlist.
+  assert.ok(!JSON.stringify(line.fields).includes('free-text'));
+});
+
+test('a tool with no logFields allowlist logs nothing about the call', async () => {
+  const { result, records } = await callLogProbe(QUIET_TOOL, { page_id: '1234567890' });
+
+  assert.notEqual(result.isError, true);
+  // Not "logs less" — logs NOTHING. An allowlist nobody wrote is not permission
+  // to fall back to a default key set, and never to the argument object whole.
+  assert.deepEqual(records, []);
+});
+
+test('an allowlisted value is redacted before it reaches the log', async () => {
+  // The REAL redactor, because both of its strategies matter here: the user
+  // token is a registered VALUE, while the Page token is one the process never
+  // held and only the defensive pattern scan can catch.
+  const { records } = await callLogProbe(
+    LOG_TOOL,
+    { page_id: `page-of-${ACCESS_TOKEN}`, payload: SECRET_PAGE_TOKEN },
+    createRedactor({ secrets: [ACCESS_TOKEN] }),
+  );
+
+  const line = onlyCallLine(records);
+  const rendered = JSON.stringify(line.fields);
+  assert.ok(!rendered.includes(ACCESS_TOKEN), 'the access token reached the log');
+  assert.ok(!rendered.includes(SECRET_PAGE_TOKEN), 'the Page token reached the log');
+  assert.deepEqual(line.fields, {
+    tool: LOG_TOOL,
+    args: { page_id: 'page-of-[REDACTED]', payload: '[REDACTED]' },
+  });
+});
+
+test('a non-scalar allowlisted argument is logged as a type tag, not its content', async () => {
+  // An author reviews a KEY, not the arbitrary tree a caller can hang under it,
+  // and the line is written before the strict parse — so the runtime shape of a
+  // value is whatever the client sent. Anything but a scalar logs its shape.
+  const cases: readonly (readonly [unknown, string])[] = [
+    [{ token: SECRET_PAGE_TOKEN }, '[object]'],
+    [[SECRET_PAGE_TOKEN], '[array]'],
+    [null, '[null]'],
+  ];
+
+  for (const [value, tag] of cases) {
+    const { records } = await callLogProbe(LOG_TOOL, { payload: value });
+    const line = onlyCallLine(records);
+    assert.deepEqual(line.fields, { tool: LOG_TOOL, args: { payload: tag } });
+    assert.ok(
+      !JSON.stringify(line.fields).includes('EAA'),
+      `a ${tag} argument leaked its content into the log`,
+    );
+  }
+});
+
+test('the log line is written before the handler, so a rejected call still leaves a record', async () => {
+  // `limit` must be a number: this call dies in the strict parse inside the
+  // spec handler. A line emitted only on success would be missing for exactly
+  // the calls worth diagnosing, so the record must exist anyway — carrying the
+  // RAW argument, because validation has not run yet.
+  const { result, records } = await callLogProbe(LOG_TOOL, { limit: 'not-a-number' });
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(onlyCallLine(records).fields, {
+    tool: LOG_TOOL,
+    args: { limit: 'not-a-number' },
+  });
+});
+
+test('the per-call log line lands on stderr, never on the stdout channel (CC-CFG-1)', async () => {
+  // The other tests inject a recording logger, which proves what the bootstrap
+  // hands over but not where it goes. This one runs the REAL logger with its
+  // real default sink: on stdio, stdout is the JSON-RPC channel, so a log line
+  // that reaches it corrupts the protocol.
+  const marker = '1234567890-stdout-purity';
+  const logger = createLogger({
+    clock: createFakeClock(1_000),
+    redactor: createFakeRedactor(),
+    level: 'info',
+  });
+  const { deps } = makeHarness({
+    settings: probeSettings(),
+    packages: logProbePackages(),
+    logger,
+  });
+
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  const realStdout = process.stdout.write.bind(process.stdout);
+  const realStderr = process.stderr.write.bind(process.stderr);
+  try {
+    process.stdout.write = (chunk: unknown): boolean => {
+      stdoutChunks.push(String(chunk));
+      return true;
+    };
+    process.stderr.write = (chunk: unknown): boolean => {
+      stderrChunks.push(String(chunk));
+      return true;
+    };
+    const { client, close } = await connect(deps);
+    try {
+      await client.callTool({ name: LOG_TOOL, arguments: { page_id: marker } });
+    } finally {
+      await close();
+    }
+  } finally {
+    process.stdout.write = realStdout;
+    process.stderr.write = realStderr;
+    // The capture window spans an await, so the runner's own output can land in
+    // it; replay both streams rather than swallowing a failure report.
+    for (const chunk of stdoutChunks) realStdout(chunk);
+    for (const chunk of stderrChunks) realStderr(chunk);
+  }
+
+  assert.ok(
+    stderrChunks.some((chunk) => chunk.includes(marker)),
+    'the per-call line never reached stderr',
+  );
+  assert.ok(
+    !stdoutChunks.some((chunk) => chunk.includes(marker)),
+    'the per-call line corrupted the stdout JSON-RPC channel',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1405,31 @@ test('metricProbe blames the metric names when Graph returns no entry at all', a
   assert.equal((result.details?.['answered'] as string[]).length, 0);
 });
 
+test('metricProbe does not call a metric Graph never returned "accepted" when the other came back empty', async () => {
+  const fb = createFakeFbRequest();
+  // Graph answered page_follows with zero points and said nothing at all about
+  // page_media_view: one accepted-but-empty metric, one absent entry.
+  fb.on(
+    (req) => req.path === '/1010/insights',
+    fbOk({ data: [insightsEntry('page_follows', 0)] }),
+  );
+
+  const result = await metricProbe(probePages())(probeContext(fb).ctx);
+
+  assert.equal(result.available, false);
+  assert.equal(result.degraded, true);
+  assert.deepEqual(result.details?.['empty'], ['page_follows']);
+  assert.deepEqual(result.details?.['unavailable'], ['page_media_view']);
+  // The summary is the line the operator reads; it must not claim Graph
+  // accepted a name it never mentioned, and it must name that name.
+  assert.doesNotMatch(result.summary, /accepted the metrics/);
+  assert.match(result.summary, /no data for page_follows/);
+  assert.match(result.summary, /no entry for page_media_view/);
+  // The accepted-but-empty half still carries both indistinguishable causes.
+  assert.match(result.summary, /eligibility floor/);
+  assert.match(result.summary, /read_insights/);
+});
+
 test('adAccountProbe reports "not configured" without calling Graph', async () => {
   const fb = createFakeFbRequest();
 
@@ -1045,6 +1473,74 @@ test('adAccountProbe surfaces the disable reason and omits an absent currency', 
   // Absent, not null — the details map is read by an operator, and `currency:
   // null` would look like a second fault.
   assert.ok(!('currency' in (result.details ?? {})));
+});
+
+test('the probes mark "configured but unhealthy" so the doctor can tell it from "not configured" (wave 9)', async () => {
+  // A configured ad account Graph says cannot serve: the exact situation the
+  // probe exists to surface (CC-ADS-6). It used to answer the same
+  // `available: false` an UNCONFIGURED account does, so the doctor's verdict
+  // could not tell them apart and printed it above "OK — nothing needs attention".
+  const disabledFb = createFakeFbRequest();
+  disabledFb.on(
+    (req) => req.path === '/act_12345',
+    fbOk({ id: 'act_12345', account_status: 2, disable_reason: 1 }),
+  );
+  const disabled = await adAccountProbe()(
+    probeContext(disabledFb, { FB_AD_ACCOUNT_ID: 'act_12345' }).ctx,
+  );
+  assert.equal(disabled.available, false);
+  assert.equal(disabled.degraded, true, 'a configured, non-serving account is degraded');
+
+  // A Page that accepted the metric names and returned nothing: the operator
+  // has something to do (floor, scope or task), so the doctor must say so.
+  const emptyFb = createFakeFbRequest();
+  emptyFb.on(
+    (req) => req.path === '/1010/insights',
+    fbOk({
+      data: [insightsEntry('page_media_view', 0), insightsEntry('page_follows', 0)],
+    }),
+  );
+  const empty = await metricProbe(probePages())(probeContext(emptyFb).ctx);
+  assert.equal(empty.available, false);
+  assert.equal(empty.degraded, true, 'an empty-insights Page is degraded');
+
+  // Graph returned no entry at all: the pinned names are not valid for this
+  // API version, so the probe cannot judge the Page. Not the operator's Page,
+  // but still an install that cannot read insights as pinned — degraded too.
+  const noEntryFb = createFakeFbRequest();
+  noEntryFb.on((req) => req.path === '/1010/insights', fbOk({ data: [] }));
+  const noEntry = await metricProbe(probePages())(probeContext(noEntryFb).ctx);
+  assert.equal(noEntry.available, false);
+  assert.equal(noEntry.degraded, true, 'unknown metric names are degraded');
+
+  // Controls: nothing to check is NOT unhealthy, and a healthy answer carries
+  // no flag either — `degraded` is absent, not `false`, in both.
+  const unconfigured = await adAccountProbe()(probeContext(createFakeFbRequest()).ctx);
+  assert.equal(unconfigured.available, false);
+  assert.ok(
+    !('degraded' in unconfigured),
+    'an unconfigured ad account must carry no flag',
+  );
+
+  const servingFb = createFakeFbRequest();
+  servingFb.on(
+    (req) => req.path === '/act_12345',
+    fbOk({ id: 'act_12345', account_status: 1, currency: 'EUR' }),
+  );
+  const serving = await adAccountProbe()(
+    probeContext(servingFb, { FB_AD_ACCOUNT_ID: '12345' }).ctx,
+  );
+  assert.equal(serving.available, true);
+  assert.ok(!('degraded' in serving), 'a serving account must carry no flag');
+
+  const answeringFb = createFakeFbRequest();
+  answeringFb.on(
+    (req) => req.path === '/1010/insights',
+    fbOk({ data: [insightsEntry('page_media_view', 2)] }),
+  );
+  const answering = await metricProbe(probePages())(probeContext(answeringFb).ctx);
+  assert.equal(answering.available, true);
+  assert.ok(!('degraded' in answering), 'an answering Page must carry no flag');
 });
 
 test('both probes forward an abort signal to Graph', async () => {
@@ -1146,6 +1642,278 @@ test('the doctor folds a rejected token into the report rather than throwing', a
     !rendered.includes(ACCESS_TOKEN),
     'the doctor report leaked the access token',
   );
+});
+
+/**
+ * The package array `main` assembles: everything the bootstrap can BUILD,
+ * `ads` included — which the default profile leaves OFF. The two tests below
+ * are precisely about the difference between "built" and "loaded".
+ */
+function bootstrapPackages(): readonly PackageSpec[] {
+  return [
+    createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+    createReaderPackage(),
+    createInsightsPackage(),
+    createModerationPackage(),
+    createMessagesPackage(),
+    createPostsPackage(),
+    createAdsPackage(),
+  ];
+}
+
+/**
+ * Exactly the permissions the six default-profile packages need, and nothing
+ * else — the scope set a correctly provisioned out-of-box install has. No ads
+ * permission appears: `ads` is not in the default profile, so no operator of a
+ * default install has any reason to grant one.
+ */
+const DEFAULT_PROFILE_SCOPES = [
+  'pages_show_list',
+  'pages_read_engagement',
+  'pages_read_user_content',
+  'pages_manage_posts',
+  'pages_manage_engagement',
+  'pages_messaging',
+  'pages_manage_metadata',
+  'read_insights',
+] as const;
+
+/** A path that cannot exist, so the credential-file check never stats a real file. */
+const NO_CREDENTIAL_FILE = join(tmpdir(), 'facebook-mcp-index-absent', 'env');
+
+/**
+ * Drive the real `doctor` subcommand over the bootstrap's package array — the
+ * FULL array, exactly as `main` hands it over — with a chosen scope set.
+ *
+ * Deliberately `runDoctorCommand` and not `runDoctor`: the narrowing under test
+ * belongs to the command, and a helper that narrowed here would pass just as
+ * happily with the command's own call deleted.
+ */
+async function doctorOverBootstrapPackages(
+  scopes: readonly string[],
+  args: readonly string[] = [],
+  env: Record<string, string> = {},
+): Promise<{
+  readonly report: DoctorReport;
+  readonly text: string;
+  readonly exitCode: number;
+}> {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbOk({
+      data: {
+        type: 'SYSTEM_USER',
+        is_valid: true,
+        scopes: [...scopes],
+        granular_scopes: [{ scope: 'pages_show_list', target_ids: ['1010'] }],
+        // What Graph really says for a System-User token. Without it the
+        // fixture describes an answer that never states an expiry, and the
+        // doctor (rightly) has something to say about that.
+        expires_at: 0,
+      },
+    }),
+  );
+  const { settings, report: startup } = loadSettings({
+    // An app secret belongs to a correctly provisioned install (the README
+    // tells the operator to enable "Require App Secret"); without one the
+    // startup report carries a warning, and the doctor has to say so too.
+    env: { FB_SYSTEM_TOKEN: 'EAA-system-token', FB_APP_SECRET: 'app-secret', ...env },
+    loadEnvFile: false,
+  });
+  return runDoctorCommand(
+    {
+      fbRequest: fb.fn,
+      settings,
+      clock: createFakeClock(1_760_000_000_000),
+      logger: silentLogger,
+      redactor: createFakeRedactor(),
+      packages: bootstrapPackages(),
+      serverVersion: '1.2.3-test',
+      credentialFilePath: NO_CREDENTIAL_FILE,
+    },
+    args,
+    startup,
+  );
+}
+
+test('a correctly provisioned default install verdicts ok, --strict included', async () => {
+  const { report, exitCode } = await doctorOverBootstrapPackages(DEFAULT_PROFILE_SCOPES, [
+    '--strict',
+  ]);
+
+  // `ads` is off by default, so its scopes are not part of "correctly
+  // provisioned" and its row must not exist to be judged.
+  assert.equal(
+    report.matrix.some((matrixRow) => matrixRow.package === 'ads'),
+    false,
+    'the doctor judged a package the registry never loads',
+  );
+  assert.deepEqual(
+    report.summary.findings.map((finding) => finding.detail),
+    [],
+  );
+  assert.equal(report.summary.verdict, 'ok');
+  // The point of `--strict`: an out-of-box install must be able to pass it, or
+  // the flag is one nobody can put in a pipeline.
+  assert.equal(exitCode, 0);
+});
+
+test('the package narrowing follows the registry, and never costs a report', () => {
+  const packages = bootstrapPackages();
+  const named = (env: Record<string, string>): readonly string[] => {
+    const { settings } = loadSettings({
+      env: { FB_SYSTEM_TOKEN: 'EAA-system-token', ...env },
+      loadEnvFile: false,
+    });
+    return loadedPackages(packages, settings).map((pkg) => pkg.name);
+  };
+
+  assert.deepEqual(named({ FB_TOOL_PACKAGES: 'ads' }), ['core', 'ads']);
+  assert.deepEqual(named({ FB_PACKAGES_DENY: 'messages' }), [
+    'core',
+    'reader',
+    'insights',
+    'moderation',
+    'posts',
+  ]);
+
+  // An unknown selection name is a startup error, but the doctor's whole value
+  // is that it still prints for an operator whose config is broken — so the
+  // narrowing falls back to the full array instead of propagating the throw.
+  const { settings: broken } = loadSettings({
+    env: { FB_SYSTEM_TOKEN: 'EAA-system-token', FB_TOOL_PACKAGES: 'reader,typo' },
+    loadEnvFile: false,
+  });
+  assert.throws(() => createRegistry(packages, broken));
+  assert.deepEqual(
+    loadedPackages(packages, broken).map((pkg) => pkg.name),
+    packages.map((pkg) => pkg.name),
+  );
+});
+
+test('the "server started" line names the packages the registry loaded, not every package built', () => {
+  const packages = bootstrapPackages();
+  const { settings } = loadSettings({
+    env: { FB_SYSTEM_TOKEN: 'EAA-system-token' },
+    loadEnvFile: false,
+  });
+
+  const fields = serverStartedFields('stdio', '1.2.3', packages, settings);
+
+  // `ads` is built on every start but off by default: logging it as started
+  // tells the operator the ads tools are there when tools/list has none.
+  assert.deepEqual(fields['packages'], [
+    'core',
+    'reader',
+    'insights',
+    'moderation',
+    'messages',
+    'posts',
+  ]);
+  assert.equal(fields['transport'], 'stdio');
+  assert.equal(fields['version'], '1.2.3');
+
+  const { settings: adsOnly } = loadSettings({
+    env: { FB_SYSTEM_TOKEN: 'EAA-system-token', FB_TOOL_PACKAGES: 'ads' },
+    loadEnvFile: false,
+  });
+  assert.deepEqual(serverStartedFields('stdio', '1.2.3', packages, adsOnly)['packages'], [
+    'core',
+    'ads',
+  ]);
+});
+
+test('the doctor names an unresolvable package selection instead of judging the full array', async () => {
+  // The narrowing above falls back to every package so the report still prints.
+  // That is right, and on its own it is also a lie: the operator gets a matrix
+  // over seven packages for an install that starts none of them. The command
+  // asks separately why the selection failed and folds the answer into the
+  // verdict, so `doctor --strict` in a pipeline goes red for a config that
+  // cannot boot.
+  const { report, text, exitCode } = await doctorOverBootstrapPackages(
+    [...DEFAULT_PROFILE_SCOPES],
+    ['--strict'],
+    { FB_PACKAGES_DENY: 'reeder' },
+  );
+
+  assert.equal(report.summary.verdict, 'fail');
+  assert.equal(exitCode, 2);
+  const finding = report.summary.findings.find((f) => f.area === 'configuration');
+  assert.ok(finding, 'expected a configuration finding');
+  // Which variable — the deny list, not the allow list that is perfectly fine.
+  assert.match(finding.detail, /FB_PACKAGES_DENY/);
+  assert.match(finding.detail, /"reeder"/);
+  assert.match(text, /WILL NOT START/);
+});
+
+test('a resolvable selection leaves the doctor with nothing to say about configuration', async () => {
+  const { report, text } = await doctorOverBootstrapPackages(
+    [...DEFAULT_PROFILE_SCOPES],
+    [],
+    {
+      FB_PACKAGES_DENY: 'messages',
+    },
+  );
+
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'configuration'),
+    false,
+  );
+  assert.doesNotMatch(text, /WILL NOT START/);
+});
+
+test('a configuration the server refuses to start on fails the doctor, --strict included (wave 9)', async () => {
+  // `loadSettings` is the bootstrap's own judgement of the configuration, and
+  // `assertStartupOk` refuses to start the server on any error in it. The
+  // doctor runs BEFORE that assertion (so it can still report on a broken
+  // install) — which meant the startup report was computed and then thrown
+  // away on the doctor path, and `doctor --strict` exited 0 for a server that
+  // would not start. FB_TRANSPORT=http without FB_HTTP_TOKEN is such an error.
+  const { report, text, exitCode } = await doctorOverBootstrapPackages(
+    [...DEFAULT_PROFILE_SCOPES],
+    ['--strict'],
+    { FB_TRANSPORT: 'http' },
+  );
+
+  const finding = report.summary.findings.find((f) => f.area === 'configuration');
+  assert.ok(finding, 'expected a configuration finding for the startup error');
+  assert.equal(finding.severity, 'fail');
+  assert.match(finding.detail, /FB_HTTP_TOKEN/);
+  assert.equal(report.summary.verdict, 'fail');
+  assert.equal(exitCode, 2);
+  assert.match(text, /WILL NOT START/);
+  assert.match(text, /\[FAIL {3}\] configuration: .*FB_HTTP_TOKEN/);
+
+  // A warning-severity startup problem the doctor does not judge on its own
+  // (no app secret) is a warning here as well: on a real start the server
+  // logs it, and the doctor is the one path where it was said nowhere.
+  const warned = await doctorOverBootstrapPackages(
+    [...DEFAULT_PROFILE_SCOPES],
+    ['--strict'],
+    {
+      FB_APP_SECRET: '',
+    },
+  );
+  const warning = warned.report.summary.findings.find((f) => f.area === 'configuration');
+  assert.ok(warning, 'expected a configuration finding for the startup warning');
+  assert.equal(warning.severity, 'warn');
+  assert.match(warning.detail, /FB_APP_SECRET/);
+  assert.equal(warned.report.summary.verdict, 'warn');
+  assert.equal(warned.exitCode, 1);
+});
+
+test('an ads scope on a default install is over-scope', async () => {
+  const { report } = await doctorOverBootstrapPackages([
+    ...DEFAULT_PROFILE_SCOPES,
+    'ads_management',
+  ]);
+
+  // The over-scope check exists to catch a runtime token carrying a privilege
+  // nothing loaded can use. `ads_management` on an install whose `ads` package
+  // is off is exactly that, and it stays exactly that until the operator turns
+  // the package on.
+  assert.deepEqual(report.overScopePermissions, ['ads_management']);
 });
 
 // ---------------------------------------------------------------------------
@@ -1654,6 +2422,53 @@ test('an explicit FB_WRITE_MODE=apply overrides a plan-first package', async () 
   assert.equal(appliedEntries(journal).length, 2);
 });
 
+// --- Startup config warnings reach the operator ------------------------------
+
+test('a successful start logs every startup config warning, one WARN each', () => {
+  // `assertStartupOk` only throws on errors, and the warnings live inside that
+  // thrown text — so on a clean start (the common case) an operator whose
+  // FB_PAGE_TOKEN is bound to no Page, or whose FB_APP_SECRET is unset, saw
+  // nothing at all. The bootstrap must hand the warnings to the logger.
+  const { settings, report } = loadSettings({
+    env: { FB_PAGE_TOKEN: 'fake-page-token' },
+    loadEnvFile: false,
+  });
+  assert.ok(report.ok, 'a Page token alone is a valid (if warned) configuration');
+  assert.ok(report.warnings.length >= 2, 'the fixture must carry several warnings');
+  assert.equal(settings.defaultPageId, undefined);
+
+  const { logger, records } = recordingLogger();
+  logStartupWarnings(logger, report);
+
+  const warned = records.filter((r) => r.level === 'warn');
+  assert.equal(warned.length, report.warnings.length, 'one WARN per warning, no more');
+  assert.ok(
+    records.every((r) => r.level === 'warn'),
+    'warnings never escalate to error nor demote to info',
+  );
+  for (const problem of report.warnings) {
+    const record = warned.find((r) => r.fields?.['code'] === problem.code);
+    assert.ok(record, `warning ${problem.code} must be logged`);
+    assert.equal(record.msg, 'startup config warning');
+    assert.equal(record.fields?.['message'], problem.message);
+    if (problem.field !== undefined)
+      assert.equal(record.fields?.['field'], problem.field);
+  }
+  // The unbound-Page-token diagnostic specifically must be among them.
+  assert.ok(warned.some((r) => r.fields?.['code'] === 'page-token-unbound'));
+});
+
+test('regression: a warning-free start logs nothing at startup-warning level', () => {
+  const { report } = loadSettings({
+    env: { FB_SYSTEM_TOKEN: 'fake-system-token', FB_APP_SECRET: 's', FB_PAGE_ID: '100' },
+    loadEnvFile: false,
+  });
+  assert.deepEqual(report.warnings, []);
+  const { logger, records } = recordingLogger();
+  logStartupWarnings(logger, report);
+  assert.deepEqual(records, []);
+});
+
 // --- `--version` (G-TOOL-5) ------------------------------------------------
 
 test('isVersionFlag recognises only the version flag and its alias', () => {
@@ -1663,6 +2478,17 @@ test('isVersionFlag recognises only the version flag and its alias', () => {
   // so a typo can never be answered by silently printing a version and exiting 0.
   for (const arg of [undefined, '', 'version', '--v', '-V', 'doctor', '--verbose']) {
     assert.equal(isVersionFlag(arg), false, `${String(arg)} must not be the flag`);
+  }
+});
+
+test('isStrictFlag reads only the doctor argument list, and only the long form', () => {
+  assert.equal(isStrictFlag(['--strict']), true);
+  // The flag may sit anywhere after the subcommand.
+  assert.equal(isStrictFlag(['--json', '--strict']), true);
+  // A near-miss must NOT gate: silently exiting non-zero on a typo is worse than
+  // ignoring a flag the operator can see was ignored in the report.
+  for (const args of [[], ['strict'], ['-s'], ['--Strict'], ['--strict=true']]) {
+    assert.equal(isStrictFlag(args), false, `${JSON.stringify(args)} must not gate`);
   }
 });
 
@@ -1770,4 +2596,514 @@ test('resolveSdkVersion degrades to "unknown" instead of throwing', () => {
   ]) {
     assert.equal(resolveSdkVersion(sources), 'unknown');
   }
+});
+
+// ---------------------------------------------------------------------------
+// CLI argument handling (wave 15)
+// ---------------------------------------------------------------------------
+
+test('doctor names an argument it ignored instead of dropping it silently', async () => {
+  // `--stric` is the typo a CI script acquires; the doctor must not gate on it
+  // (see isStrictFlag), but the operator has to be able to SEE that it was
+  // ignored, or a pipeline that meant to gate reads exit 0 as a pass.
+  const { text, exitCode } = await doctorOverBootstrapPackages(DEFAULT_PROFILE_SCOPES, [
+    '--stric',
+  ]);
+  assert.match(text, /Ignored unknown doctor argument "--stric"/);
+  assert.match(text, /--strict/);
+  assert.equal(exitCode, 0, 'a near-miss still never gates');
+});
+
+test('doctor never echoes the value of an ignored argument', async () => {
+  const pasted = 'EAAB-pasted-into-argv-must-not-echo';
+  const { text } = await doctorOverBootstrapPackages(DEFAULT_PROFILE_SCOPES, [
+    `--token=${pasted}`,
+    pasted,
+  ]);
+  assert.match(text, /"--token=\u2026"/);
+  assert.match(text, /positional argument/);
+  assert.equal(
+    text.includes(pasted),
+    false,
+    'an ignored argument value reached the report',
+  );
+});
+
+test('regression: a clean doctor argument list adds no ignored-argument line', async () => {
+  const { text } = await doctorOverBootstrapPackages(DEFAULT_PROFILE_SCOPES, [
+    '--strict',
+  ]);
+  assert.equal(/Ignored unknown doctor argument/.test(text), false);
+});
+
+test('--help prints usage and exits 0 without loading settings or starting a server', () => {
+  // The only test here that runs the real entry point: `--help` is decided in
+  // `main()`, before anything injectable exists. The child gets no FB_* env and
+  // a cwd with no `.env`, so a build that ignores `--help` fails fast on the
+  // missing token instead of waiting on stdin as a stdio server.
+  const cwd = mkdtempSync(join(tmpdir(), 'facebook-mcp-help-'));
+  try {
+    for (const flag of ['--help', '-h']) {
+      const child = spawnSync(
+        process.execPath,
+        [fileURLToPath(new URL('./index.js', import.meta.url)), flag],
+        {
+          cwd,
+          env: { PATH: process.env['PATH'] ?? '', HOME: cwd, USERPROFILE: cwd },
+          input: '',
+          encoding: 'utf8',
+          timeout: 15_000,
+        },
+      );
+      assert.equal(
+        child.status,
+        0,
+        `${flag}: exit ${String(child.status)}; stderr: ${child.stderr}`,
+      );
+      assert.match(child.stdout, /^Usage: facebook-mcp/m, `${flag}: no usage on stdout`);
+      for (const word of ['doctor', '--strict', 'setup-token', '--version']) {
+        assert.ok(child.stdout.includes(word), `${flag}: usage does not mention ${word}`);
+      }
+      assert.equal(child.stderr, '', `${flag}: unexpected stderr: ${child.stderr}`);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave 16 (lane A): the error hub evicts a dead Page token, names the full
+// usage bucket, and bounds Meta's own refusal text
+// ---------------------------------------------------------------------------
+
+/** The Page the dead-token tests resolve, and the base token that derives it. */
+const HUB_PAGE_ID = '424242';
+
+/** Settings with a default Page, so `resolvePage()` derives through the registry. */
+function hubSettings(): Settings {
+  const { settings } = loadSettings({
+    env: {
+      FB_ACCESS_TOKEN: ACCESS_TOKEN,
+      FB_PAGE_ID: HUB_PAGE_ID,
+      FB_TOOL_PACKAGES: 'ads',
+    },
+    loadEnvFile: false,
+  });
+  return settings;
+}
+
+/**
+ * A package whose one tool reads the default Page's feed with the token the
+ * registry resolves — the shape of every Page-scoped read in the real packages.
+ */
+function pageReadPackage(wrap?: (err: unknown) => unknown): PackageSpec {
+  const read = defineTool({
+    name: 'facebook_probe_page_read',
+    description: 'Test-only: read the default Page feed with its resolved token.',
+    inputSchema: z.object({}),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: async (_input, ctx) => {
+      const page = await ctx.pages.resolvePage(ctx.profile);
+      try {
+        const res = await ctx.fbRequest({
+          protocol: 'json',
+          host: 'graph',
+          method: 'GET',
+          path: `/${page.pageId}/feed`,
+          token: page.token,
+        });
+        return textResult({ data: res.data });
+      } catch (err) {
+        throw wrap !== undefined ? wrap(err) : err;
+      }
+    },
+  });
+  return {
+    name: 'ads',
+    title: 'Probe',
+    description: 'Test-only package injected through the packages seam.',
+    tools: [read],
+    enabledByDefault: false,
+  };
+}
+
+/** Is `req` the registry's `/PAGE_ID?fields=access_token` derivation? */
+function isDerivation(req: {
+  readonly path: string;
+  readonly params?: unknown;
+}): boolean {
+  const params = req.params as Record<string, unknown> | undefined;
+  return req.path === `/${HUB_PAGE_ID}` && params?.['fields'] === 'access_token';
+}
+
+/**
+ * Two calls of the page-read probe against a REAL pages registry whose feed read
+ * fails with `feedError` every time. Returns how many times the registry derived
+ * the Page token, and the second call's error record.
+ */
+async function twoPageReads(
+  feedError: GraphApiError,
+  wrap?: (err: unknown) => unknown,
+): Promise<{ derivations: number; second: Record<string, unknown> }> {
+  const settings = hubSettings();
+  const clock = createFakeClock(1_000);
+  const redactor = createFakeRedactor({ secrets: [ACCESS_TOKEN] });
+  const fb = createFakeFbRequest();
+  fb.on(isDerivation, fbOk({ access_token: 'derived-page-token-1', id: HUB_PAGE_ID }), 1);
+  fb.on(isDerivation, fbOk({ access_token: 'derived-page-token-2', id: HUB_PAGE_ID }));
+  fb.on((req) => req.path === `/${HUB_PAGE_ID}/feed`, fbErr(feedError));
+  const pages = createPagesRegistry({ settings, fbRequest: fb.fn, clock, redactor });
+
+  const { client, close } = await connect({
+    settings,
+    packages: [
+      createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+      pageReadPackage(wrap),
+    ],
+    serverVersion: '1.2.3-test',
+    clock,
+    logger: silentLogger,
+    redactor,
+    journal: createMemoryJournal(clock),
+    fbRequest: fb.fn,
+    pages,
+  });
+  try {
+    const first = (await client.callTool({
+      name: 'facebook_probe_page_read',
+      arguments: {},
+    })) as CallToolResult;
+    assert.equal(first.isError, true);
+    const second = (await client.callTool({
+      name: 'facebook_probe_page_read',
+      arguments: {},
+    })) as CallToolResult;
+    assert.equal(second.isError, true);
+    return {
+      derivations: fb.calls.filter(isDerivation).length,
+      second: parseResult(second),
+    };
+  } finally {
+    await close();
+  }
+}
+
+test('a Page token Graph refuses with 190 is evicted, so the next call re-derives', async () => {
+  const { derivations, second } = await twoPageReads(
+    new GraphApiError('(#190) Error validating access token', {
+      code: 190,
+      subcode: 460,
+      type: 'OAuthException',
+      httpStatus: 400,
+    }),
+  );
+  // Without the eviction the second call is served the SAME dead token from the
+  // registry cache (15-minute TTL) and fails identically without asking Graph.
+  assert.equal(derivations, 2, 'the second call must re-derive the Page token');
+  assert.equal(second['code'], 190);
+});
+
+test('a Page token refused as an expired session (102) is evicted too', async () => {
+  const { derivations } = await twoPageReads(
+    new GraphApiError('(#102) Session has expired', {
+      code: 102,
+      type: 'OAuthException',
+      httpStatus: 400,
+    }),
+  );
+  assert.equal(derivations, 2, 'a 102 on the Page token must drop the cached token');
+});
+
+test('a stale Page object (100 / subcode 21) evicts the cached Page token too', async () => {
+  const { derivations } = await twoPageReads(
+    new GraphApiError('(#21) Page ID was migrated to page ID 999', {
+      code: 100,
+      subcode: 21,
+      type: 'OAuthException',
+      httpStatus: 400,
+    }),
+  );
+  assert.equal(derivations, 2, 'a stale Page object must drop the cached derivation');
+});
+
+test('a tool that re-words a 190 keeping it as cause still evicts the Page token', async () => {
+  // A tool layer that rebuilds a Graph refusal into its own error (a carousel or
+  // multi-photo wrapper, a reclassified send) keeps the original as `cause`. The
+  // hub must read the refusal down that chain, the way core/auth's
+  // isPageTokenDead is applied everywhere else, or the dead token stays cached.
+  const { derivations } = await twoPageReads(
+    new GraphApiError('(#190) Error validating access token', {
+      code: 190,
+      subcode: 463,
+      type: 'OAuthException',
+      httpStatus: 400,
+    }),
+    (err) => new Error('the probe failed while reading the feed', { cause: err }),
+  );
+  assert.equal(derivations, 2, 'a 190 behind a wrapper must drop the cached token');
+});
+
+test('regression: an error that says nothing about the token keeps the cached Page token', async () => {
+  const { derivations } = await twoPageReads(
+    new GraphApiError('(#200) Permissions error', {
+      code: 200,
+      type: 'OAuthException',
+      httpStatus: 403,
+    }),
+  );
+  assert.equal(derivations, 1, 'a permission refusal must not cost a re-derivation');
+});
+
+test('regression: an ads-style 100/33 on a call that resolved no Page keeps the cached Page token', async () => {
+  // The ads tools read and write ad objects with the user token and never
+  // resolve a Page, yet a missing ad object answers with the same 100/33 shape
+  // as a stale Page object. The hub evicts only Pages the failing call itself
+  // resolved, so an ads miss must not cost the next Page read a re-derivation.
+  const settings = hubSettings();
+  const clock = createFakeClock(1_000);
+  const redactor = createFakeRedactor({ secrets: [ACCESS_TOKEN] });
+  const fb = createFakeFbRequest();
+  fb.on(isDerivation, fbOk({ access_token: 'derived-page-token-1', id: HUB_PAGE_ID }), 1);
+  fb.on(isDerivation, fbOk({ access_token: 'derived-page-token-2', id: HUB_PAGE_ID }));
+  fb.on((req) => req.path === `/${HUB_PAGE_ID}/feed`, fbOk({ data: [] }));
+  fb.on(
+    (req) => req.path === '/120000000000001',
+    fbErr(
+      new GraphApiError('(#100) Object with ID does not exist', {
+        code: 100,
+        subcode: 33,
+        type: 'GraphMethodException',
+        httpStatus: 400,
+      }),
+    ),
+  );
+  const pages = createPagesRegistry({ settings, fbRequest: fb.fn, clock, redactor });
+  const adRead = defineTool({
+    name: 'facebook_probe_ad_read',
+    description: 'Test-only: read an ad object with the user token, resolving no Page.',
+    inputSchema: z.object({}),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: async (_input, ctx) => {
+      const res = await ctx.fbRequest({
+        protocol: 'json',
+        host: 'graph',
+        method: 'GET',
+        path: '/120000000000001',
+      });
+      return textResult({ data: res.data });
+    },
+  });
+  const probe = pageReadPackage();
+  const { client, close } = await connect({
+    settings,
+    packages: [
+      createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+      { ...probe, tools: [...probe.tools, adRead] },
+    ],
+    serverVersion: '1.2.3-test',
+    clock,
+    logger: silentLogger,
+    redactor,
+    journal: createMemoryJournal(clock),
+    fbRequest: fb.fn,
+    pages,
+  });
+  try {
+    const first = (await client.callTool({
+      name: 'facebook_probe_page_read',
+      arguments: {},
+    })) as CallToolResult;
+    assert.notEqual(first.isError, true);
+    const miss = (await client.callTool({
+      name: 'facebook_probe_ad_read',
+      arguments: {},
+    })) as CallToolResult;
+    assert.equal(miss.isError, true);
+    assert.equal(parseResult(miss)['code'], 100);
+    const second = (await client.callTool({
+      name: 'facebook_probe_page_read',
+      arguments: {},
+    })) as CallToolResult;
+    assert.notEqual(second.isError, true);
+    assert.equal(
+      fb.calls.filter(isDerivation).length,
+      1,
+      'an ads miss must not evict the Page token another call derived',
+    );
+  } finally {
+    await close();
+  }
+});
+
+test('a Graph refusal carrying usage headers names the full bucket in the error record', async () => {
+  // Build the error the way production does: through the real HTTP client, on
+  // a throttle response that carries Meta's usage headers.
+  const settings = probeSettings();
+  const refused = await withFetch(async (mock: FetchMock) => {
+    mock.on(() => true, {
+      status: 400,
+      json: {
+        error: {
+          message: '(#4) Application request limit reached',
+          type: 'OAuthException',
+          code: 4,
+        },
+      },
+      headers: {
+        'x-app-usage': '{"call_count":100,"total_cputime":40,"total_time":35}',
+        'x-business-use-case-usage':
+          '{"1234":[{"type":"pages","call_count":12,"total_cputime":5,"total_time":5,"estimated_time_to_regain_access":0}]}',
+      },
+    });
+    const fbRequest = createFbRequest({
+      settings,
+      clock: createFakeClock(1_000),
+      redactor: createFakeRedactor(),
+      logger: silentLogger,
+      retry: { maxRetries: 0 },
+    });
+    return fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/me',
+    }).then(
+      () => assert.fail('expected the throttle to reject'),
+      (err: unknown) => err,
+    );
+  });
+  assert.ok(refused instanceof GraphApiError);
+
+  const thrower = defineTool({
+    name: 'facebook_probe_throttled',
+    description: 'Test-only: rethrow a real throttle refusal.',
+    inputSchema: z.object({}),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: () => Promise.reject(refused),
+  });
+  const { deps } = makeHarness({
+    settings,
+    packages: [
+      createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+      {
+        name: 'ads',
+        title: 'Probe',
+        description: 'Test-only package injected through the packages seam.',
+        tools: [thrower],
+        enabledByDefault: false,
+      },
+    ],
+  });
+  const { client, close } = await connect(deps);
+  try {
+    const record = parseResult(
+      (await client.callTool({
+        name: 'facebook_probe_throttled',
+        arguments: {},
+      })) as CallToolResult,
+    );
+    assert.equal(record['category'], 'rate_limit');
+    assert.equal(record['nextTool'], 'facebook_usage');
+    // facebook_usage probes `/me`, not the refused call, so only the refusing
+    // response names the bucket that refused it.
+    assert.deepEqual(record['usage'], { appUsagePct: 100, businessUseCasePct: 12 });
+  } finally {
+    await close();
+  }
+});
+
+test('regression: a Graph error with no usage headers carries no usage field', async () => {
+  const record = parseResult(
+    await callProbeServer('facebook_probe_fail', { kind: 'graph-throttled' }),
+  );
+  assert.ok(!('usage' in record), 'usage must be absent, not invented');
+});
+
+test("Meta's own refusal text is length-bounded in the error record", async () => {
+  const huge = 'x'.repeat(10_000);
+  const thrower = defineTool({
+    name: 'facebook_probe_verbose',
+    description: 'Test-only: throw a Graph error with a pathological user message.',
+    inputSchema: z.object({}),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: () =>
+      Promise.reject(
+        new GraphApiError('Graph API error (HTTP 400): Invalid parameter', {
+          code: 100,
+          httpStatus: 400,
+          userTitle: huge,
+          userMessage: huge,
+          action: {
+            category: 'validation',
+            retryable: false,
+            operatorText: 'Fix the request, then retry.',
+          },
+        }),
+      ),
+  });
+  const { deps } = makeHarness({
+    settings: probeSettings(),
+    packages: [
+      createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+      {
+        name: 'ads',
+        title: 'Probe',
+        description: 'Test-only package injected through the packages seam.',
+        tools: [thrower],
+        enabledByDefault: false,
+      },
+    ],
+  });
+  const { client, close } = await connect(deps);
+  try {
+    const record = parseResult(
+      (await client.callTool({
+        name: 'facebook_probe_verbose',
+        arguments: {},
+      })) as CallToolResult,
+    );
+    assert.ok(
+      String(record['userMessage']).length <= META_ERROR_TEXT_MAX,
+      `userMessage is ${String(String(record['userMessage']).length)} chars`,
+    );
+    assert.ok(String(record['userTitle']).length <= META_ERROR_TEXT_MAX);
+    // The decision fields still ride along beside the bounded text.
+    assert.equal(record['retryable'], false);
+    assert.equal(record['category'], 'validation');
+  } finally {
+    await close();
+  }
+});
+
+test('the production transport sends a multipart upload instead of refusing it', async () => {
+  // main() builds its Graph client through createTransport. A local-file photo,
+  // a video chunk and a reel all use a non-JSON protocol, so without the upload
+  // handler wired in every one of them rejected before reaching the network.
+  const res = await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: { id: 'photo_1' } });
+    const fbRequest = createTransport({
+      settings: probeSettings(),
+      clock: createFakeClock(1_000),
+      redactor: createFakeRedactor(),
+      logger: silentLogger,
+    });
+    const out = await fbRequest<{ id: string }>({
+      protocol: 'multipart',
+      host: 'graph',
+      method: 'POST',
+      path: '/me/photos',
+      fields: { published: 'false' },
+      files: [
+        {
+          name: 'source',
+          data: new Uint8Array([0xff, 0xd8, 0xff]),
+          filename: 'pic.jpg',
+          contentType: 'image/jpeg',
+        },
+      ],
+    });
+    assert.equal(mock.lastRequest()?.body.kind, 'formData');
+    return out;
+  });
+  assert.deepEqual(res.data, { id: 'photo_1' });
 });

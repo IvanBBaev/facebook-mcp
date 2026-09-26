@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createFakeFbRequest, fbErr, fbOk } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, ambiguousWriteAction } from '../core/index.js';
 import type { FbRequest, JsonRequest } from '../core/index.js';
 
 import {
@@ -423,6 +423,30 @@ test('evaluateMessagingWindow answers unknown rather than guessing', () => {
   assert.ok(window.explanation.includes(MESSAGE_TAG_GUIDANCE));
 });
 
+test('evaluateMessagingWindow will not compute a window from a future timestamp', () => {
+  // A last-inbound timestamp ahead of the clock cannot be true, so the age
+  // derived from it is not an age. Reporting `open` with a negative age is the
+  // dangerous direction: it fabricates a deadline later than the real one and
+  // the send goes out untagged on the strength of it. This module's own stance
+  // is that an unverifiable window is `unknown` and Facebook is the authority.
+  const future = evaluateMessagingWindow({
+    lastInboundAtMs: NOW + HOUR_MS,
+    nowMs: NOW,
+  });
+
+  assert.equal(future.status, 'unknown');
+  assert.equal(future.closesAtMs, undefined, 'no fabricated deadline');
+  assert.doesNotMatch(future.explanation, /-\d/, 'never prints a negative age');
+  assert.ok(future.explanation.includes(MESSAGE_TAG_GUIDANCE));
+
+  // The clock is not required to be exact to the millisecond: a same-instant
+  // timestamp is still a usable, open window.
+  assert.equal(
+    evaluateMessagingWindow({ lastInboundAtMs: NOW, nowMs: NOW }).status,
+    'open',
+  );
+});
+
 test('findLastInboundAtMs takes the newest non-Page message and skips unusable ones', () => {
   const messages: MessageRecord[] = [
     messageRecord(PAGE_ID, '2026-07-28T11:59:00+0000'), // outbound: ignored
@@ -528,13 +552,23 @@ test('explainSendFailure maps window and recipient failures to actionable guidan
   assert.match(recipient.message, /recipient is unavailable/);
 });
 
-test('explainSendFailure passes an ambiguous outcome through untouched', () => {
+test('explainSendFailure keeps an ambiguous verdict and only redirects its verify tool', () => {
   const ambiguous = graphError('response lost', { category: 'ambiguous' });
+  const explained = explainSendFailure(ambiguous);
+  assert.ok(explained instanceof GraphApiError);
+  assert.equal(explained.message, 'response lost');
+  assert.equal(explained.action?.category, 'ambiguous', 'still "may have landed"');
+  assert.equal(explained.action?.retryable, false);
   assert.equal(
-    explainSendFailure(ambiguous),
-    ambiguous,
-    'the transport already classified it as "may have landed"',
+    explained.action?.operatorText,
+    'original operator guidance',
+    'non-standard guidance is kept verbatim',
   );
+  assert.equal(explained.action?.nextTool, 'facebook_get_conversation');
+  assert.equal(explained.cause, ambiguous);
+  assert.equal(classifySendOutcome(explained), 'attempted');
+  // Already pointing at the conversation: nothing to rebuild.
+  assert.equal(explainSendFailure(explained), explained);
 });
 
 test('explainSendFailure never invents information for unrelated errors', () => {
@@ -600,6 +634,35 @@ test('sendMessage tolerates an acknowledgement without ids', async () => {
   );
 });
 
+test('sendMessage ignores a message_id that is not a usable string', async () => {
+  const fb = createFakeFbRequest();
+  // The transport hands back whatever JSON parsed, cast to the declared shape
+  // (`data as T`), so Graph is free to answer with a null or a number here. A
+  // non-string id is NOT an acknowledgement: reporting it would let the tool
+  // layer tell the model "delivery is confirmed, do not send it again" for a
+  // send Facebook never confirmed, which is exactly the overclaim CC-MSG-2
+  // forbids.
+  fb.on((req) => req.method === 'POST', fbOk({ message_id: null, recipient_id: 2000 }));
+
+  assert.deepEqual(
+    await sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    {},
+  );
+});
+
+test('sendMessage treats an empty 200 body as an id-less acknowledgement', async () => {
+  const fb = createFakeFbRequest();
+  // An HTTP 200 with no body parses to `undefined` (core/http). Reading through
+  // it would throw a TypeError from the success path, turning a send that DID
+  // go out into an apparent failure — the opposite half of the CC-MSG-2 lie.
+  fb.on((req) => req.method === 'POST', fbOk(undefined));
+
+  assert.deepEqual(
+    await sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    {},
+  );
+});
+
 test('sendMessage rethrows a window failure with the tag guidance attached', async () => {
   const fb = createFakeFbRequest();
   fb.on(
@@ -620,6 +683,79 @@ test('sendMessage rethrows a window failure with the tag guidance attached', asy
   );
 });
 
+test("explainSendFailure keeps Meta's userTitle, userMessage and Graph identity on a reclassified failure", () => {
+  const original = new GraphApiError('This message is sent outside of allowed window.', {
+    code: 10,
+    subcode: 2018278,
+    type: 'OAuthException',
+    fbtraceId: 'TRACE-WINDOW',
+    httpStatus: 400,
+    userTitle: 'Message Not Sent',
+    userMessage: "This person isn't available right now.",
+  });
+  const window = explainSendFailure(original);
+  assert.ok(window instanceof GraphApiError);
+  assert.equal(window.userTitle, 'Message Not Sent');
+  assert.equal(window.userMessage, "This person isn't available right now.");
+  assert.equal(window.fbtraceId, 'TRACE-WINDOW');
+  assert.equal(window.type, 'OAuthException');
+  assert.equal(window.cause, original);
+
+  const recipient = explainSendFailure(
+    new GraphApiError('blocked', {
+      code: 10,
+      subcode: 1545041,
+      httpStatus: 400,
+      userTitle: 'Blocked',
+      userMessage: 'The person has blocked messages from this Page.',
+    }),
+  );
+  assert.ok(recipient instanceof GraphApiError);
+  assert.equal(recipient.action?.category, 'not_found');
+  assert.equal(recipient.userTitle, 'Blocked');
+  assert.equal(recipient.userMessage, 'The person has blocked messages from this Page.');
+});
+
+test('sendMessage names facebook_get_conversation as the verify tool on an ambiguous send', async () => {
+  const lost = new GraphApiError(
+    'ambiguous write outcome (response lost after the request was sent) — do NOT retry; verify first',
+    {
+      code: 0,
+      httpStatus: 0,
+      action: ambiguousWriteAction({
+        detail: 'response lost after the request was sent',
+      }),
+    },
+  );
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbErr(lost));
+
+  await assert.rejects(
+    sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.retryable, false);
+      assert.equal(
+        err.action?.nextTool,
+        'facebook_get_conversation',
+        'a DM never appears in facebook_list_posts',
+      );
+      assert.doesNotMatch(err.action?.operatorText ?? '', /facebook_list_posts/);
+      assert.match(
+        err.action?.operatorText ?? '',
+        /response lost after the request was sent/,
+        'the transport detail survives',
+      );
+      assert.equal(err.message, lost.message);
+      assert.equal(err.code, 0);
+      assert.equal(err.httpStatus, 0);
+      assert.equal(classifySendOutcome(err), 'attempted');
+      return true;
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Operator guidance constants
 // ---------------------------------------------------------------------------
@@ -632,4 +768,376 @@ test('the guidance constants state the honest limits of this surface', () => {
   // Polling is not a stream (CC-MSG-5) and CDN links expire (CC-MSG-6).
   assert.match(POLLING_NOTE, /not a stream/);
   assert.match(ATTACHMENT_URL_NOTE, /expire/);
+});
+
+// ---------------------------------------------------------------------------
+// Malformed wire rows (CC-NET-2)
+//
+// `fbRequest<T>` CASTS the parsed body to `T`; the declared row type is a hope,
+// not a fact. A single malformed row must cost at most its own field — never the
+// whole page the caller already paid a metered Graph call for.
+// ---------------------------------------------------------------------------
+
+test('CC-NET-2: a non-string created_time costs its own field, not the whole page', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        // `created_time` is declared a string; a bare epoch used to reach
+        // `String.prototype.replace` and take every other message down with it.
+        { id: 'm2', created_time: 1785240000, from: { id: PSID, name: 'Ann' } },
+        { id: 'm1', created_time: '2026-07-28T11:00:00+0000', from: { id: PAGE_ID } },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  assert.deepEqual(
+    page.data.map((m) => m.id),
+    ['m2', 'm1'],
+    'the sound message must survive its malformed neighbour',
+  );
+  const [broken] = page.data;
+  assert.ok(broken);
+  assert.equal(broken.createdAtMs, undefined, 'an unusable timestamp is dropped');
+  assert.equal(broken.createdTime, undefined, 'and is never handed on typed as a string');
+  assert.equal(broken.from?.name, 'Ann', 'the rest of the row still shapes');
+});
+
+test('CC-NET-2: a non-string updated_time costs its own field, not the whole page', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === `/${PAGE_ID}/conversations`,
+    fbOk({ data: [{ id: 't_1', updated_time: 0, snippet: 'hi' }] }),
+  );
+
+  const page = await listConversations(fb.fn, { pageId: PAGE_ID, token: PAGE_TOKEN });
+
+  const [conv] = page.data;
+  assert.ok(conv);
+  assert.equal(conv.updatedAtMs, undefined);
+  assert.equal(conv.updatedTime, undefined);
+  assert.equal(conv.snippet, 'hi');
+});
+
+test('CC-NET-2: a non-string mime_type classifies as unknown instead of throwing', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        {
+          id: 'm1',
+          created_time: '2026-07-28T11:00:00+0000',
+          attachments: { data: [{ mime_type: 12, name: 'invoice.pdf' }] },
+        },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  const [msg] = page.data;
+  assert.ok(msg);
+  assert.equal(msg.attachments[0]?.kind, 'unknown');
+  assert.equal(
+    msg.attachments[0]?.mimeType,
+    undefined,
+    'a non-string MIME is not a MIME',
+  );
+  // The index contract with `attachmentNames` still holds.
+  assert.deepEqual(msg.attachmentNames, [{ index: 0, name: 'invoice.pdf' }]);
+});
+
+test('CC-NET-2: an edge whose `data` is not an array shapes as an empty edge', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        {
+          id: 'm1',
+          created_time: '2026-07-28T11:00:00+0000',
+          to: { data: 'nope' },
+          attachments: { data: { name: 'not-an-array' } },
+          shares: { data: 5 },
+        },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  const [msg] = page.data;
+  assert.ok(msg);
+  assert.deepEqual(msg.to, []);
+  assert.deepEqual(msg.attachments, []);
+  assert.deepEqual(msg.attachmentNames, []);
+});
+
+test('CC-NET-2: a numeric node id is dropped, never stringified into a plausible lie', async () => {
+  const fb = createFakeFbRequest();
+  // Graph ids run past `Number.MAX_SAFE_INTEGER`, so `JSON.parse` has already
+  // destroyed digits by the time this row arrives. `String(n)` would mint an id
+  // that looks real and addresses nobody.
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        {
+          id: Number('9876543210987654321'),
+          created_time: '2026-07-28T11:00:00+0000',
+          from: { id: Number('9876543210987654321'), name: 'Ann Customer' },
+          to: { data: [{ id: Number('1234567890123456789'), name: 'My Page' }] },
+          message: 'hi',
+        },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  const [msg] = page.data;
+  assert.ok(msg);
+  assert.equal(msg.id, undefined);
+  assert.equal(
+    msg.from?.id,
+    undefined,
+    'a lossy sender id must never reach a send target',
+  );
+  assert.equal(msg.from?.name, 'Ann Customer', 'the name is still usable');
+  assert.deepEqual(msg.to, [{ name: 'My Page' }]);
+  assert.equal(msg.body, 'hi');
+});
+
+test('CC-NET-2: a numeric conversation id is dropped rather than minted', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === `/${PAGE_ID}/conversations`,
+    fbOk({
+      data: [
+        {
+          id: Number('1234567890123456789'),
+          updated_time: '2026-07-28T11:00:00+0000',
+          participants: { data: [{ id: Number('9876543210987654321'), name: 'Ann' }] },
+        },
+      ],
+    }),
+  );
+
+  const page = await listConversations(fb.fn, { pageId: PAGE_ID, token: PAGE_TOKEN });
+
+  const [conv] = page.data;
+  assert.ok(conv);
+  assert.equal(conv.id, undefined, 'an unpollable thread id is worse than no thread id');
+  assert.deepEqual(conv.participants, [{ name: 'Ann' }]);
+});
+
+test('CC-NET-2: junk rows inside an edge are dropped, not shaped', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        {
+          id: 'm1',
+          created_time: '2026-07-28T11:00:00+0000',
+          to: { data: [null, 'nope', { id: PAGE_ID, name: 'My Page' }] },
+          attachments: { data: [null, { mime_type: 'application/pdf', name: 'a.pdf' }] },
+          shares: { data: [7, { link: 'https://example.test', name: 'Link' }] },
+        },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  const [msg] = page.data;
+  assert.ok(msg);
+  assert.deepEqual(msg.to, [{ id: PAGE_ID, name: 'My Page' }]);
+  assert.equal(msg.attachments.length, 2, 'one attachment, then one share');
+  assert.equal(msg.attachments[0]?.kind, 'file');
+  assert.equal(msg.attachments[1]?.kind, 'share');
+  // Dropping the junk keeps `attachmentNames` index-bound to `attachments`.
+  assert.deepEqual(msg.attachmentNames, [
+    { index: 0, name: 'a.pdf' },
+    { index: 1, name: 'Link — https://example.test' },
+  ]);
+});
+
+test('CC-NET-2: a null sticker, file name or share field costs its own field, not the whole page', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/t_1/messages',
+    fbOk({
+      data: [
+        {
+          id: 'm1',
+          created_time: '2026-07-28T11:00:00+0000',
+          from: { id: PSID, name: 'Ann' },
+          // Every one of these is declared `string` and arrives as something
+          // else. `.length` on a null is a TypeError, and the shaper runs inside
+          // `fetchPage` — one such node used to cost the caller the whole thread
+          // page, and the send tool its window probe.
+          sticker: null,
+          attachments: { data: [{ mime_type: 'application/pdf', name: null }] },
+          shares: {
+            data: [
+              { link: null, name: 'Titled' },
+              { link: 'https://example.test', name: null },
+            ],
+          },
+        },
+        {
+          id: 'm2',
+          created_time: '2026-07-28T10:00:00+0000',
+          from: { id: PSID, name: 'Ann' },
+          message: 'still here',
+          sticker: 7,
+        },
+      ],
+    }),
+  );
+
+  const page = await getConversationMessages(fb.fn, {
+    conversationId: 't_1',
+    pageId: PAGE_ID,
+    token: PAGE_TOKEN,
+  });
+
+  assert.equal(page.data.length, 2, 'both messages survive the malformed fields');
+  const [first, second] = page.data;
+  assert.ok(first);
+  assert.ok(second);
+  assert.deepEqual(
+    first.attachments.map((a) => a.kind),
+    ['file', 'share', 'share'],
+    'a null sticker is no sticker; the file and both shares keep their placeholders',
+  );
+  // The index contract with `attachmentNames` still holds: the null file name
+  // yields no entry, and each share keeps whichever half was a string.
+  assert.deepEqual(first.attachmentNames, [
+    { index: 1, name: 'Titled' },
+    { index: 2, name: 'https://example.test' },
+  ]);
+  assert.equal(second.body, 'still here');
+  assert.deepEqual(second.attachments, [], 'a numeric sticker is not a sticker URL');
+});
+
+test('sendMessage keeps the text of a non-Error rejection and never throws while wrapping it', async () => {
+  for (const [rejection, expected] of [
+    [{ message: 'socket reset' }, 'send failed: socket reset'],
+    [Object.create(null) as object, 'send failed: unknown error (no message)'],
+  ] as const) {
+    const fb = createFakeFbRequest();
+    fb.on((req) => req.method === 'POST', fbErr(rejection as Error));
+    await assert.rejects(
+      sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+      (err: unknown) => err instanceof Error && err.message === expected,
+    );
+  }
+});
+
+test('parseGraphTime refuses a timestamp without an offset and the lenient engine forms', () => {
+  // `Date.parse` reads an offset-less date-time in the SERVER's local zone and
+  // turns bare numbers and month names into dates in 2001, so each of these
+  // used to yield a confident epoch that shifted — or invented — the window.
+  for (const value of [
+    '2026-07-28T10:00:00',
+    '2026-07-28 10:00:00',
+    '2026-07-28',
+    '12',
+    '1',
+    'July 28',
+    '1753696800',
+  ]) {
+    assert.equal(parseGraphTime(value), undefined, `refuses ${JSON.stringify(value)}`);
+  }
+  // Every explicit-offset ISO form still parses to the same instant.
+  const instant = Date.parse('2026-07-28T10:00:00.000Z');
+  for (const value of [
+    '2026-07-28T10:00:00+0000',
+    '2026-07-28T10:00:00Z',
+    '2026-07-28T10:00:00.000Z',
+    '2026-07-28T15:30:00+05:30',
+    '2026-07-28T15:30:00+0530',
+    '2026-07-28T06:00:00-0400',
+  ]) {
+    assert.equal(parseGraphTime(value), instant, `parses ${JSON.stringify(value)}`);
+  }
+});
+
+test('an offset-less created_time leaves the window unknown instead of zone-shifted', () => {
+  // The last inbound message is 23h old in UTC. Read as local time on a server
+  // west of UTC it would be over 24h old — a client-side "Not sent" refusal of
+  // a send Facebook would accept; east of UTC it looks younger than it is.
+  const inbound = messageRecord(PSID, '2026-07-27T13:00:00');
+  const lastInboundAtMs = findLastInboundAtMs([inbound], PAGE_ID);
+  assert.equal(lastInboundAtMs, undefined);
+  const window = evaluateMessagingWindow({
+    ...(lastInboundAtMs !== undefined ? { lastInboundAtMs } : {}),
+    nowMs: NOW,
+  });
+  assert.equal(window.status, 'unknown');
+});
+
+test('attachment metadata outside the taint envelope must be well-formed or absent', () => {
+  const hostileMime = `image/png] ${INJECTION} [x`;
+  const placeholders = summariseAttachments({
+    id: 'm1',
+    sticker: `https://cdn/s.png\n${INJECTION}`,
+    attachments: {
+      data: [
+        {
+          mime_type: hostileMime,
+          size: '1] SYSTEM' as unknown as number,
+          image_data: {
+            width: `800] ${INJECTION}` as unknown as number,
+            height: 600,
+            url: `https://cdn/x.png ${INJECTION}`,
+          },
+        },
+        { mime_type: 'application/pdf', file_url: 'javascript:alert(1)' },
+      ],
+    },
+  });
+
+  // The kind still comes from the media sub-object; nothing hostile survives.
+  // A valid height alone is kept; the placeholder prints dimensions only in pairs.
+  assert.deepEqual(placeholders[0], {
+    kind: 'image',
+    height: 600,
+    placeholder: '[image]',
+  });
+  assert.deepEqual(placeholders[1], {
+    kind: 'file',
+    mimeType: 'application/pdf',
+    placeholder: '[file application/pdf]',
+  });
+  assert.equal(placeholders.length, 2, 'a sticker URL with a line break is no sticker');
+  for (const p of placeholders) {
+    assert.equal(JSON.stringify(p).includes(INJECTION), false);
+  }
 });

@@ -74,14 +74,14 @@ verified empirically by the doctor rather than assumed — see 05 for the design
 | Concern | Design |
 |---|---|
 | Secret storage | Env-first (`FB_ACCESS_TOKEN`, `FB_APP_SECRET`); env file at XDG path written atomically with `chmod 0600`; MCPB `user_config` keychain storage for Desktop installs |
-| Request signing | `appsecret_proof` = HMAC-SHA256(token, app_secret) appended to **every** call when the secret is configured |
-| Credential transport | Token sent as `Authorization: Bearer` header, **never** in the query string (query-string credentials leak into proxy logs, browser history in HTTP mode, and crash dumps); only the non-secret `appsecret_proof` rides the query string where the API forces it |
+| Request signing | `appsecret_proof` = HMAC-SHA256(token, app_secret) attached to every **Graph** call (`graph` and `graph-video`, JSON and multipart alike) when the secret is configured. The exception is **`rupload`**, which carries no proof: it is not a Graph edge, Meta's upload protocol does not define the parameter, and sending one is a request error. A policy that assumes literally every outbound call is signed is wrong about the upload host |
+| Credential transport | Token sent in an `Authorization` header, **never** in the query string (query-string credentials leak into proxy logs, browser history in HTTP mode, and crash dumps); only the non-secret `appsecret_proof` rides the query string where the API forces it. The scheme differs by host: `Bearer` on the Graph hosts, `OAuth` on `rupload`, which does not accept `Bearer` |
 | Response scrubbing | The result shaper **recursively strips every `paging` object and any token-bearing URL** — Graph embeds `access_token` in `paging.next` (including nested paging), so stripping it everywhere is a hard invariant, not best-effort |
 | Token validation | `debug_token` at startup + on demand (doctor); surface `is_valid`, `scopes`, `expires_at`, `granular_scopes` |
 | Log hygiene | JSON logs to **stderr only** (stdout is the stdio protocol channel); `logFields` never carry secrets; every log, error, and result string passes through the value-based redactor below — one choke-point, not two strategies with a seam between them |
-| Redaction | **Value-based redaction at one choke-point** across logs, errors, tool results, **and the write journal**: the exact configured secret *values* — `FB_ACCESS_TOKEN` and every profile token, `FB_APP_SECRET`, `FB_HTTP_TOKEN`, the derived `appsecret_proof`, and any app-access-token — are replaced wherever they appear; known-value redaction has no false negatives. The `EAA…` / long-hex **pattern scan is defense-in-depth only**, for secrets we do not hold (e.g. a token a user pastes into a tool arg). Note the app secret is 32-hex and `appsecret_proof` is 64-hex — neither is `EAA`-shaped, which is why prefix-matching alone is insufficient |
+| Redaction | **Value-based redaction at one choke-point** across logs, errors, tool results, **and the write journal**: the exact configured secret *values* — `FB_ACCESS_TOKEN` and every profile token, `FB_APP_SECRET`, `FB_HTTP_TOKEN`, the derived `appsecret_proof`, and any app-access-token — are replaced wherever they appear; known-value redaction has no false negatives **in the strings and structures it walks**. One documented gap: binary leaves (`ArrayBuffer` and its views) are returned by reference, neither cloned nor scanned, because a byte-level mask is a different strategy from the string scan — a secret routed through a Buffer is not caught. The `EAA…` / long-hex **pattern scan is defense-in-depth only**, for secrets we do not hold (e.g. a token a user pastes into a tool arg). Note the app secret is 32-hex and `appsecret_proof` is 64-hex — neither is `EAA`-shaped, which is why prefix-matching alone is insufficient |
 | SSRF & local files | Host allowlist: only `graph.facebook.com`, `graph-video.facebook.com`, `rupload.facebook.com` reachable; cross-host redirects are not auto-followed. URL-mode uploads (the `url` param is fetched **by Meta**, not by us) carry no *outbound* SSRF surface — but that is **not** "no local surface": local file upload is a file-disclosure primitive, so it is **disabled by default** (`FB_MEDIA_DIR` unset ⇒ URL-only). When `FB_MEDIA_DIR` *is* set, the resolved path is `realpath`-canonicalized and asserted contained within `realpath(FB_MEDIA_DIR)` (symlink-safe), non-regular files are rejected, and an extension/MIME allowlist applies |
-| HTTP mode | **Fails closed**: `FB_TRANSPORT=http` refuses to start without `FB_HTTP_TOKEN`; binds `127.0.0.1` only; validates the `Origin` header (DNS-rebinding guard); constant-time bearer check (`timingSafeEqual`) on every request |
+| HTTP mode | **Fails closed**: `FB_TRANSPORT=http` refuses to start without `FB_HTTP_TOKEN`; binds `127.0.0.1` only; validates the `Origin` header **when the request carries one** (DNS-rebinding guard); a request with **no** `Origin` is passed through to the bearer check, deliberately — a browser always sends `Origin` on the cross-origin requests rebinding can mount, while ordinary local clients send none. The credential a rebound page cannot read is the bearer token, checked in constant time (`timingSafeEqual`) on every request |
 | Write safety | **Tiered** plan-and-apply gating (see 05): reversible writes may honor `apply:true` / `FB_WRITE_MODE`; irreversible and spend writes require the **out-of-band confirmation gate** (Threat model below) and are **never** covered by `FB_WRITE_MODE=apply`. Plan-and-apply defends against model *error*, not a *hijacked* model — the confirmation gate does the latter. Destructive tools annotated `destructiveHint: true` |
 | Error hygiene | Single `GraphApiError` carrying `status`, `code`, `error_subcode`, `fbtrace_id` — enough for the model to react (429 vs 401 vs TOS-gate 1870090) without raw response dumps |
 
@@ -128,21 +128,40 @@ close the gap; none rely on the model policing itself.
    snapshot-tested and is applied by the `reader`, `moderation`, and `messages`
    tools; their specs in 06 cross-reference this requirement.
 
-2. **Out-of-band confirmation gate for dangerous writes.** Destructive,
-   irreversible, or money-spending tools (`*_delete_*`, `send_message`,
-   `private_reply`, `block_user`, all `ads` writes, and `create_post` to a live
-   audience) require a signal the model **cannot supply itself**: MCP
-   elicitation/confirmation (spec 2025-11-25) where the client supports it, with an
-   operator-set per-action token as the fallback. A model-supplied `apply:true` is
-   **not** this gate, and `FB_WRITE_MODE=apply` never bypasses this tier (see the
-   tiered Write-safety row above and 05 §7).
+2. **Out-of-band confirmation gate for the highest-consequence writes.** The gate
+   keys on the declared **write tier**, not on the `destructiveHint` annotation,
+   and exactly two tiers reach it: `irreversible` — `facebook_delete_post`,
+   `facebook_delete_comment`, `facebook_private_reply` — and `spend`, whose only
+   member is `facebook_update_ad_object`. Those four require a signal the model
+   **cannot supply itself**: MCP elicitation/confirmation (spec 2025-11-25) where
+   the client supports it, with an operator-set token as the fallback, and a
+   denial is never a silent allow. A model-supplied `apply:true` is **not** this
+   gate, and `FB_WRITE_MODE=apply` never covers these two tiers (see the tiered
+   Write-safety row above and 05 §7).
+
+   **What it does not cover, plainly.** `facebook_send_message`,
+   `facebook_create_post` and `facebook_block_user` are `reversible` writes and
+   never reach the confirmer. Some of them carry `requirePlanId` instead —
+   `send_message` always, the post/photo/video/reel creates and `update_post`
+   only on a call that publishes to a live audience *now* — which forces
+   `apply:true` to be bound to a `plan_id` from a prior plan call. That is a real
+   brake on a single hijacked call, but it is not an out-of-band signal: the
+   model can make both calls itself. `facebook_block_user` carries no such flag
+   at all, and the `moderation` package declares `writeModeDefault: 'apply'`, so
+   with `FB_WRITE_MODE` unset a block, unblock, hide or reply goes through on the
+   first call with no `apply:true` at all. Raising a tool to `irreversible`, or
+   running read-only (control 3), is what actually takes the decision out of the
+   model's hands.
 
 3. **Read-only profile for unattended UGC ingestion.** The default `core` profile
    already excludes `ads`; extend the principle. When an autonomous agent ingests
    UGC unattended, the **recommended configuration is a read-only package profile**
-   (`FB_PACKAGES_READONLY` / a `readonly` preset) so that *reading untrusted
-   content* and *destructive/spend action* are never both enabled in the same
-   session. Separation belongs in configuration, not in the model's judgment.
+   — `FB_PACKAGES_READONLY=all`, which keeps every read tool and drops every
+   write-tier tool from every package — so that *reading untrusted content* and
+   *destructive/spend action* are never both enabled in the same session. There
+   is no `readonly` selection token: the valid names are the profiles `core`,
+   `all`, `reader`, `publisher`, `moderator`, `ads` plus the package names, and
+   an unknown one refuses startup rather than degrading to something narrower. Separation belongs in configuration, not in the model's judgment.
 
 **Residual risk, stated honestly.** A determined operator can still enable
 everything in one session; these controls make the *default* safe and the dangerous

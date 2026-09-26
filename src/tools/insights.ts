@@ -17,7 +17,9 @@
 // CONTRACT (flat rows + one summary per metric), the row cap, the 90-day window
 // check, the metric rename/deprecation table and the honesty notes; this module
 // owns the zod schemas, the model-facing prose and the result shaping. Nothing
-// is re-derived here, and no date/metric validation is duplicated — a malformed
+// is re-derived here, and no date/metric validation is duplicated (the one date
+// rule added here — a window starting after tomorrow — is one the api module
+// does not make; see `assertWindowHasPast`) — a malformed
 // `since` produces the api module's one actionable message, not a zod issue and
 // an api message that disagree with each other.
 //
@@ -39,6 +41,7 @@
 
 import { z } from 'zod';
 
+import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type {
   PackageSpec,
   ToolAnnotations,
@@ -52,7 +55,7 @@ import {
   type InsightsScope,
 } from '../api/insights.js';
 import { defineTool } from '../mcp/index.js';
-import { profileArg, shapeFor } from './shared.js';
+import { profileArg, shapeFor, videoIdArg } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // Shared annotation quadruple — both insights tools are read-only (doc 06).
@@ -91,10 +94,15 @@ const INSIGHTS_PERIODS = [
 
 /**
  * Cap on metric names per call. Graph fails the WHOLE call over one invalid
- * name, so a huge list is also a huge blast radius; a bounded list keeps the
+ * name (the api module re-reads the rest only when Graph names the rejected
+ * entry), so a huge list is also a huge blast radius; a bounded list keeps the
  * result inside the char budget and keeps isolation cheap.
  */
 const MAX_METRICS = 20;
+
+/** Rejection for a comma-packed metric entry (see {@link metricsArg}). */
+const PACKED_METRIC_MESSAGE =
+  'Pass one metric name per array entry, e.g. ["page_media_view","page_follows"], not a comma-separated string: a packed entry skips the renamed-metric check (one dead name then fails the whole Graph call) and cannot be matched against the metrics Graph returns.';
 
 /**
  * Metric names to read. Trimmed and lower-cased before anything else looks at
@@ -103,11 +111,22 @@ const MAX_METRICS = 20;
  * after Graph echoed the canonical name back.
  */
 const metricsArg = z
-  .array(z.string().trim().toLowerCase().min(1))
+  .array(
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .min(1)
+      // The api module joins the list with commas for the wire, so a comma
+      // inside one entry is several names the rename table, the cap and the
+      // returned-name check each see as one — the reply would carry the rows
+      // next to a note calling the (packed) name invalid.
+      .refine((name) => !name.includes(','), PACKED_METRIC_MESSAGE),
+  )
   .min(1)
   .max(MAX_METRICS)
   .describe(
-    `Graph insights metric names to read, e.g. ["page_media_view","page_follows"] (1-${String(MAX_METRICS)} per call; trimmed and lower-cased). Names are Graph-version dependent and Meta renamed most of them in the 2024-09, 2025-11 and 2026-06 waves: pre-wave names such as "page_impressions" or "page_fans" are dropped before the request and answered with their replacement instead of an error. Graph fails the WHOLE call when one surviving name is invalid, so isolate a suspect name by requesting it alone.`,
+    `Graph insights metric names to read, e.g. ["page_media_view","page_follows"] (1-${String(MAX_METRICS)} per call; trimmed and lower-cased). Names are Graph-version dependent and Meta renamed most of them in the 2024-09, 2025-11 and 2026-06 waves: pre-wave names such as "page_impressions" or "page_fans" are dropped before the request and answered with their replacement instead of an error. Graph fails the WHOLE call when one surviving name is invalid: when Graph says which entry it rejected, that name is dropped, the rest are re-read and it is reported in rejectedMetrics; otherwise isolate a suspect name by requesting it alone. Page metrics (page_*) are read on the Page, post metrics (post_*) on a post or Reel.`,
   );
 
 const periodArg = z
@@ -137,7 +156,7 @@ const aggregateArg = z
   .boolean()
   .optional()
   .describe(
-    'True ⇒ return per-metric totals only (period, points, total, first/last boundary) and NO per-point rows. Use it for wide windows or many metrics: it is the cheapest way to stay inside the result budget when a daily series would otherwise be truncated.',
+    'True ⇒ return per-metric totals only (period, points, total, first/last boundary) and NO per-point rows. Use it for wide windows or many metrics: it is the cheapest way to stay inside the result budget when a daily series would otherwise be truncated. `total` is a sum for disjoint periods (day, month, total_over_range); for the overlapping ones (week, days_28, lifetime) it is the latest point, flagged totalIsLatest.',
   );
 
 const maxRowsArg = z
@@ -153,15 +172,27 @@ const maxRowsArg = z
 /**
  * Post IDs are `{page-id}_{post-id}`; a permalink URL is the classic mistake.
  *
- * The `(?=.*\w)` lookahead is PATH CONTAINMENT, not cosmetics: the ID is
- * interpolated into `/{objectId}/insights`, and the WHATWG URL parser resolves
- * dot segments when that path is assigned — `".."` would turn `/v23.0/../insights`
- * into `/insights`, silently escaping the pinned API version, and `"."` would
- * drop the segment entirely. `/` and `%` are already outside the class, so
- * demanding one word character rules out every dot-segment spelling that is
- * left ("." and ".." and nothing else).
+ * Digits only, optionally joined by one `_`. This is PATH CONTAINMENT, not
+ * cosmetics: the ID is interpolated into `/{objectId}/insights`, so a Page
+ * username (`mybrandpage`) would resolve to the PAGE's insights edge, and a
+ * dot segment (`..`) would be normalized by the WHATWG URL parser into a path
+ * outside the pinned API version. Every post ID Graph issues is numeric, so no
+ * real ID is refused. A bare number passes the shape and is refused just below
+ * with its own message.
  */
-const POST_ID_SHAPE = /^(?=.*\w)[\w.-]+$/;
+const POST_ID_SHAPE = /^\d+(?:_\d+)?$/;
+
+/**
+ * A bare number is never a Page post on `/{id}/insights`: it is the un-prefixed
+ * half of a composite ID, or a video / photo object ID. Graph answers it with a
+ * generic "Unsupported get request" (code 100) or an empty series that says
+ * nothing about the shape, so it is refused here — the mirror of the Reel tool
+ * refusing a composite (`VIDEO_ID_SHAPE` in `./shared.js`).
+ */
+const BARE_NUMERIC_ID = /^\d+$/;
+
+const BARE_POST_ID_MESSAGE =
+  'Expected the composite "{page-id}_{post-id}" post ID (e.g. "111222333_999"), not a bare number: a bare number is a video or photo ID, or the post half without its Page prefix, and does not resolve on /insights. Pass the `id` facebook_list_posts / facebook_get_post return verbatim; for a Reel or video use facebook_reel_insights with its video ID.';
 
 const postIdArg = z
   .string()
@@ -169,32 +200,24 @@ const postIdArg = z
   .min(1)
   .regex(
     POST_ID_SHAPE,
-    'Expected a post ID such as "111222333_999", not a URL, a permalink or a query string. Get the ID from facebook_list_posts or facebook_get_post.',
+    'Expected a numeric post ID such as "111222333_999", not a Page username, a URL, a permalink or a query string. Get the ID from facebook_list_posts or facebook_get_post.',
   )
+  .refine((id) => !BARE_NUMERIC_ID.test(id), BARE_POST_ID_MESSAGE)
   .describe(
-    'The published post to read, as Graph\'s "{page-id}_{post-id}" ID (as returned by facebook_list_posts / facebook_get_post). Permalink URLs are rejected. The post must belong to the resolved Page, whose token authorizes the read.',
+    'The published post to read, as Graph\'s "{page-id}_{post-id}" ID (as returned by facebook_list_posts / facebook_get_post). Permalink URLs and bare numeric IDs are rejected before any request — a bare number is a video/photo ID (see facebook_reel_insights), not a post. The post must belong to the resolved Page, whose token authorizes the read.',
   );
 
 /**
- * Reel/video IDs are bare decimal Graph node IDs. Digits-only is both the true
- * shape and the strictest possible path containment for `/{videoId}/…` — no dot
- * segment, no slash, no percent-escape can survive it — and it rejects the one
- * mistake this edge invites: handing it the `{page-id}_{post-id}` composite,
- * which addresses a POST and answers `/video_insights` with nothing useful.
+ * The Reel id argument. The SHAPE and the rejection wording come from
+ * `./shared.js` so that every video edge in the server — this one and
+ * `facebook_get_video_status` — refuses exactly the same ids for exactly the
+ * same stated reason; only the prose below is specific to `/video_insights`.
  */
-const VIDEO_ID_SHAPE = /^\d+$/;
-
-const videoIdArg = z
-  .string()
-  .trim()
-  .min(1)
-  .regex(
-    VIDEO_ID_SHAPE,
-    'Expected the bare VIDEO id (digits only, e.g. "1234567890"), not a "{page-id}_{post-id}" post ID, a permalink or a URL. facebook_create_reel returns it as `videoId`; facebook_list_posts does NOT list Reels at all, so there is no post ID to convert.',
-  )
-  .describe(
-    'The Reel to read, as its VIDEO id — the `videoId` returned by facebook_create_reel (also echoed by facebook_get_video_status). A "{page-id}_{post-id}" value is a post, not a video, and does not resolve on the /video_insights edge. The Reel must belong to the resolved Page, whose token authorizes the read.',
-  );
+const reelVideoIdArg = videoIdArg({
+  hint: 'List existing Reels with facebook_list_reels (each item `id` is the video id); facebook_create_reel returns it as `videoId`; facebook_list_posts does NOT list Reels at all, so there is no post ID to convert.',
+  description:
+    'The Reel to read, as its VIDEO id — the item `id` from facebook_list_reels, or the `videoId` returned by facebook_create_reel (also echoed by facebook_get_video_status). A "{page-id}_{post-id}" value is a post, not a video, and does not resolve on the /video_insights edge. The Reel must belong to the resolved Page, whose token authorizes the read.',
+});
 
 /** The fields all three tools share, spread into each tool's own `z.object`. */
 const insightsArgs = {
@@ -237,6 +260,64 @@ const OBJECT_KEY: Readonly<Record<InsightsScope, 'pageId' | 'postId' | 'videoId'
   reel: 'videoId',
 };
 
+/** A `{page-id}_{post-id}` composite whose halves are both numeric. */
+const NUMERIC_COMPOSITE = /^(\d+)_\d+$/;
+
+/**
+ * Refuse a post whose composite ID names a different Page than the one the
+ * profile resolved to. The read runs with the RESOLVED Page's token, which
+ * cannot read another Page's post: Graph answers with a generic permission or
+ * "object does not exist" error that never says the profile is the problem, so
+ * the model is sent to re-check permissions instead of switching `profile`.
+ * Only a fully numeric composite against a numeric Page ID is compared — any
+ * other shape is left for Graph to judge rather than refused on a guess.
+ */
+function assertPostOnResolvedPage(postId: string, pageId: string): void {
+  const postPageId = NUMERIC_COMPOSITE.exec(postId)?.[1];
+  if (postPageId === undefined || !/^\d+$/.test(pageId) || postPageId === pageId) return;
+  throw new Error(
+    `Post "${postId}" belongs to Page ${postPageId}, but the resolved Page is ${pageId}; its token cannot read another Page's post insights. Pass \`profile\` for Page ${postPageId} (a configured profile key or the raw Page ID — facebook_list_pages lists the Pages this token manages), or pass a post ID of Page ${pageId}.`,
+  );
+}
+
+const MS_PER_DAY = 86_400_000;
+
+/** `YYYY-MM-DD` — the only date form the api module accepts for `since`. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Refuse a window that starts after tomorrow (UTC) — before any request.
+ *
+ * Graph does not reject such a window: it answers with empty series, and an
+ * all-empty result is exactly what the api module's notes explain as the
+ * eligibility floor, publish lag or a missing permission. For days that have
+ * not happened yet every one of those explanations is false, and the model is
+ * sent to check follower counts and token scopes over a typo in the year.
+ *
+ * The api module's window check does not catch it: a lone `since` is measured
+ * against today there, but an explicit future `until` makes the window
+ * well-ordered and inside the cap. Tomorrow (UTC) is still allowed because the
+ * dates are read in the Page's timezone, which can be up to 14 hours ahead of
+ * UTC — "tomorrow" there may already be today. A malformed or impossible date
+ * is left alone so the api module's one validation message reports it.
+ */
+function assertWindowHasPast(since: string | undefined, nowMs: number): void {
+  if (since === undefined || !DATE_ONLY.test(since)) return;
+  const sinceMs = Date.parse(`${since}T00:00:00Z`);
+  if (Number.isNaN(sinceMs) || new Date(sinceMs).toISOString().slice(0, 10) !== since) {
+    return;
+  }
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  const tomorrowMs = Date.parse(`${today}T00:00:00Z`) + MS_PER_DAY;
+  if (sinceMs <= tomorrowMs) return;
+  const message = `Invalid window: \`since\` (${since}) is in the future — today is ${today} (UTC), so no day in the window has happened yet and Graph would answer with empty series that read like an ineligible Page or zero engagement. Pass a \`since\` on or before today.`;
+  throw new GraphApiError(message, {
+    code: 100,
+    httpStatus: 400,
+    action: classifyGraphError({ code: 100, message }),
+  });
+}
+
 /**
  * Resolve the Page, read the insights edge and shape the reshaped result.
  *
@@ -253,7 +334,13 @@ async function readInsights(
   scope: InsightsScope,
   objectId?: string,
 ): Promise<ToolResult> {
+  // Before the Page is resolved: a window with no past day in it needs no
+  // token, and no request should be spent on it.
+  assertWindowHasPast(input.since, ctx.clock.now());
   const resolved = await ctx.pages.resolvePage(input.profile);
+  if (scope === 'post' && objectId !== undefined) {
+    assertPostOnResolvedPage(objectId, resolved.pageId);
+  }
   const result = await fetchInsights(ctx.fbRequest, {
     scope,
     objectId: objectId ?? resolved.pageId,
@@ -286,6 +373,12 @@ async function readInsights(
  * `insights` is part of the default profile expansion).
  */
 export function createInsightsPackage(): PackageSpec {
+  // No tool in this package declares `logFields`, for a structural reason
+  // rather than squeamishness: the argument that identifies an insights call is
+  // `metrics`, and the log projection can only render an array as "[array]"
+  // (see the bootstrap's field projection). A line carrying a period and a date
+  // window with no subject is not evidence, and these reads touch neither
+  // visitor-authored content nor money — so silence is the honest posture.
   const pageInsights = defineTool({
     name: 'facebook_page_insights',
     title: 'Page Insights',
@@ -333,8 +426,8 @@ export function createInsightsPackage(): PackageSpec {
     description:
       'Read Graph insights for one Reel from /{video-id}/video_insights — the ' +
       'edge Reel metrics actually live on, which facebook_post_insights cannot ' +
-      'reach. Takes the VIDEO id (digits only, as returned by ' +
-      'facebook_create_reel), NOT a "{page-id}_{post-id}" post ID. Same compact ' +
+      'reach. Takes the VIDEO id (digits only, as listed by facebook_list_reels ' +
+      'or returned by facebook_create_reel), NOT a "{page-id}_{post-id}" post ID. Same compact ' +
       'shape as the other insights tools: flat rows plus one summary per metric, ' +
       'or totals only with aggregate:true. The default period is "lifetime", ' +
       'because plays and watch time are cumulative counters rather than a daily ' +
@@ -346,7 +439,7 @@ export function createInsightsPackage(): PackageSpec {
       'is reported as unavailable rather than silently dropped. Empty series ' +
       'usually mean the wrong ID, a Reel that is not PUBLISHED yet, or the usual ' +
       'insights lag — the result says which to check.',
-    inputSchema: z.object({ ...insightsArgs, video_id: videoIdArg }),
+    inputSchema: z.object({ ...insightsArgs, video_id: reelVideoIdArg }),
     annotations: READ_ONLY,
     handler: async (input, ctx) => readInsights(ctx, input, 'reel', input.video_id),
   });

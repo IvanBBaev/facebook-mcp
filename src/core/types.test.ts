@@ -45,6 +45,23 @@ test('GraphApiError carries the envelope fields and is a real Error subclass', (
   assert.equal(err.action?.retryable, false);
 });
 
+test('GraphApiError carries the user-facing Graph text as its own fields', () => {
+  const err = new GraphApiError('Invalid parameter', {
+    code: 100,
+    subcode: 1_487_390,
+    httpStatus: 400,
+    userTitle: 'Budget Too Low',
+    userMessage: 'The daily budget must be at least $1.00.',
+  });
+  assert.equal(err.message, 'Invalid parameter');
+  assert.equal(err.userTitle, 'Budget Too Low');
+  assert.equal(err.userMessage, 'The daily budget must be at least $1.00.');
+
+  const bare = new GraphApiError('Invalid parameter', { code: 100, httpStatus: 400 });
+  assert.equal(bare.userTitle, undefined);
+  assert.equal(bare.userMessage, undefined);
+});
+
 test('GraphApiError supports an error cause and minimal construction', () => {
   const root = new Error('socket hang up');
   const err = new GraphApiError('Network failure', {

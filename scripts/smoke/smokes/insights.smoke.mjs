@@ -389,8 +389,15 @@ registerSmoke({
       );
       ctx.log.step(
         `read Page returned only ${capped.rowsAvailable} data point(s) over 30 days ` +
-          `(unavailable: ${(capped.unavailableMetrics ?? []).join(', ') || 'none'}) — ` +
-          'the row cap could not be exercised',
+          `(unavailable: ${(capped.unavailableMetrics ?? []).join(', ') || 'none'})`,
+      );
+      ctx.notExercised(
+        `the truncation contract never ran: ${capped.rowsAvailable} data point(s) over ` +
+          `30 days did not exceed max_rows=${SMALL_CAP}, so nothing proved that a ` +
+          'capped result reports `truncated:true`, keeps `rowsAvailable` above the ' +
+          'rows returned, carries the "Row cap reached" note naming the real figures ' +
+          'and the aggregate:true escape hatch, and still summarises the FULL series ' +
+          'length. A silent truncation would pass this run unnoticed.',
       );
       return;
     }
@@ -540,8 +547,12 @@ registerSmoke({
     ctx.assert(Array.isArray(posts), `posts is not an array: ${typeof posts}`);
 
     if (posts.length === 0) {
-      ctx.log.step(
-        'read Page has no published posts — post insights not exercised (an empty Page is not a failure)',
+      ctx.log.step('read Page has no published posts (an empty Page is not a failure)');
+      ctx.notExercised(
+        'everything after the listing never ran: no live facebook_post_insights read ' +
+          'happened, so the post-id round-trip, the lifetime-period default, the ' +
+          '"never report a post under the Reel key" rule and the explained-empty-result ' +
+          'note are all unverified for this run',
       );
       return;
     }
@@ -680,8 +691,12 @@ registerSmoke({
     ctx.assert(Array.isArray(reels), `reels is not an array: ${typeof reels}`);
 
     if (reels.length === 0) {
-      ctx.log.step(
-        'read Page has no Reels — the live /video_insights read is not exercised (no Reel is created here)',
+      ctx.log.step('read Page has no Reels (this smoke never creates one)');
+      ctx.notExercised(
+        'only the negative half ran: with no Reel to read, nothing proved that the id ' +
+          'space facebook_list_reels hands out is the one facebook_reel_insights ' +
+          'accepts, and the live /video_insights read never happened. The guard was ' +
+          'shown to REFUSE a composite, never to ACCEPT a real video id.',
       );
       return;
     }

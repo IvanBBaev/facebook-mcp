@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createFakeFbRequest, fbOk, fbErr } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import {
+  createFakeFbRequest,
+  createFakeRedactor,
+  fbOk,
+  fbErr,
+} from '../core/fakes/index.js';
+import { GraphApiError, graphErrorFromResponse } from '../core/index.js';
 import type { FbRequest, FbRequestFn, FbResponse, ParamValue } from '../core/index.js';
 
 import {
@@ -14,6 +19,8 @@ import {
   CURSOR_EXPIRED_NOTE,
   LOOP_GUARD_NOTE,
   MISSING_CURSOR_NOTE,
+  NO_LIST_RETURNED_NOTE,
+  malformedRowsNote,
   type EdgeRequest,
 } from './shared.js';
 
@@ -60,8 +67,30 @@ function cursorExpiredWithAction(): GraphApiError {
   });
 }
 
-function cursorExpiredByMessage(): GraphApiError {
-  return new GraphApiError('Cursor is no longer valid', { code: 1, httpStatus: 400 });
+/**
+ * A cursor rejection built the way production builds one — through the live
+ * transport builder, from Graph's own wording — instead of hand-stamped with an
+ * `action` the way {@link cursorExpiredWithAction} is.
+ *
+ * The wording matters: "not valid" is what Graph actually answers, and it
+ * contains none of the verbs the deleted api-layer message heuristic looked for.
+ * Any fixture that stamps the action itself can only prove this layer reads a
+ * field it was handed; this one proves the classification survives the whole
+ * live path, which is the thing that was broken.
+ */
+function cursorRejectedByGraph(): GraphApiError {
+  return graphErrorFromResponse(
+    400,
+    JSON.stringify({
+      error: {
+        message:
+          'The cursor you provided is not valid. Please use the cursor returned by the API.',
+        type: 'OAuthException',
+        code: 100,
+      },
+    }),
+    createFakeRedactor(),
+  );
 }
 
 /** Narrow a captured request to a JSON request and read its query params. */
@@ -105,7 +134,7 @@ function makeAdversary(config: {
     n += 1;
     const roll = config.rng ? config.rng() : 0.5;
     if (config.expiryProb !== undefined && roll < config.expiryProb) {
-      return Promise.reject(cursorExpiredByMessage());
+      return Promise.reject(cursorRejectedByGraph());
     }
     const dataLen = config.emptyData
       ? 0
@@ -133,12 +162,29 @@ function makeAdversary(config: {
 // isCursorExpiryError predicate
 // ---------------------------------------------------------------------------
 
-test('isCursorExpiryError: recognizes the F06 action category and a message heuristic', () => {
+test('isCursorExpiryError: reads the F06 action category and nothing else', () => {
   assert.equal(isCursorExpiryError(cursorExpiredWithAction()), true);
-  assert.equal(isCursorExpiryError(cursorExpiredByMessage()), true);
+  // Classified by core from the raw envelope, not by re-reading the message here.
+  assert.equal(isCursorExpiryError(cursorRejectedByGraph()), true);
   // Not a cursor error.
   assert.equal(
     isCursorExpiryError(new GraphApiError('Rate limit', { code: 4, httpStatus: 400 })),
+    false,
+  );
+  // Cursor prose is NOT a classification: swallowing this as an empty page would
+  // report "0 results" for a permission failure.
+  assert.equal(
+    isCursorExpiryError(
+      new GraphApiError('Permissions error: invalid cursor', {
+        code: 200,
+        httpStatus: 403,
+        action: {
+          category: 'permission',
+          retryable: false,
+          operatorText: 'check scopes',
+        },
+      }),
+    ),
     false,
   );
   // Not a GraphApiError at all.
@@ -252,16 +298,44 @@ test('CC-PAGE-2: cursor expiry mid-fetchAll keeps prior items + truncated + note
   assert.equal(page.nextCursor, undefined);
 });
 
-test('CC-PAGE-2: expiry detected via message heuristic too', async () => {
+test('CC-PAGE-2: a rejection classified by the live transport is recognized here', async () => {
   const fake = createFakeFbRequest();
   fake
     .enqueue(fbOk(pageWithNext(items('a'), 'c1')))
-    .enqueue(fbErr(cursorExpiredByMessage()));
+    .enqueue(fbErr(cursorRejectedByGraph()));
 
   const page = await fetchAll<Item>(fake.fn, EDGE);
   assert.deepEqual([...page.data], items('a'));
   assert.equal(page.truncated, true);
   assert.equal(page.note, CURSOR_EXPIRED_NOTE);
+});
+
+test('CC-PAGE-2: a failure that merely MENTIONS a cursor is not swallowed as expiry', async () => {
+  // A permission failure whose prose names an invalid cursor. Returning a
+  // truncated page here would hide a credential problem behind "0 more results";
+  // the caller must see the error.
+  const fake = createFakeFbRequest();
+  fake.enqueue(fbOk(pageWithNext(items('a'), 'c1'))).enqueue(
+    fbErr(
+      graphErrorFromResponse(
+        403,
+        JSON.stringify({
+          error: {
+            message: '(#200) Permissions error — the invalid cursor is not the cause',
+            type: 'OAuthException',
+            code: 200,
+          },
+        }),
+        createFakeRedactor(),
+      ),
+    ),
+  );
+
+  await assert.rejects(
+    fetchAll<Item>(fake.fn, EDGE),
+    (err: unknown) =>
+      err instanceof GraphApiError && err.action?.category === 'permission',
+  );
 });
 
 test('fetchAll: a non-cursor error mid-walk propagates (retry lives in fbRequest)', async () => {
@@ -383,6 +457,51 @@ test('CC-PAGE-5: maxPages caps the walk and returns a resume cursor', async () =
   assert.equal(fake.calls.length, 3);
 });
 
+test('CC-PAGE-5: a terminal page longer than maxItems reads as a slice, not a complete listing', async () => {
+  // The edge ENDS on this page, so the walk leaves through the end-of-iteration
+  // return — the one path that never consults the item budget. `finish` then
+  // sliced six rows down to three and still reported `truncated: false` with no
+  // note: "here is the whole listing", at exactly the length of the caller's own
+  // budget. Three rows were discarded and nothing in the result said so, which
+  // is the one shortfall a caller has no way to detect.
+  const fake = createFakeFbRequest();
+  fake.enqueue(fbOk(lastPage(items('a', 'b', 'c', 'd', 'e', 'f'))));
+
+  const page = await fetchAll<Item>(fake.fn, EDGE, { maxItems: 3 });
+
+  assert.deepEqual([...page.data], items('a', 'b', 'c'));
+  assert.equal(page.truncated, true, 'rows were discarded, so the page is partial');
+  assert.match(page.note ?? '', /result budget reached/);
+});
+
+test('CC-PAGE-5: a terminal page landing exactly on maxItems stays complete', async () => {
+  // The mirror image, and the reason the fix keys off the slice and not off the
+  // count: nothing was discarded here, so a budget note telling the caller to
+  // raise `maxItems` would invent a remainder that does not exist.
+  const fake = createFakeFbRequest();
+  fake.enqueue(fbOk(lastPage(items('a', 'b', 'c'))));
+
+  const page = await fetchAll<Item>(fake.fn, EDGE, { maxItems: 3 });
+
+  assert.deepEqual([...page.data], items('a', 'b', 'c'));
+  assert.equal(page.truncated, false);
+  assert.equal(page.note, undefined);
+});
+
+test('CC-PAGE-5: a terminal slice states the budget AND the dropped rows', async () => {
+  // Two different facts — how many rows were withheld by the budget, and how
+  // many were unreadable — so neither may overwrite the other.
+  const fake = createFakeFbRequest();
+  fake.enqueue(fbOk(lastPage([{ id: 'a' }, null, { id: 'b' }, { id: 'c' }])));
+
+  const page = await fetchAll<Item>(fake.fn, EDGE, { maxItems: 2 });
+
+  assert.deepEqual([...page.data], items('a', 'b'));
+  assert.equal(page.truncated, true);
+  assert.match(page.note ?? '', /1 rows were dropped/);
+  assert.match(page.note ?? '', /result budget reached/);
+});
+
 test('fetchAll: a complete walk within budget is not truncated', async () => {
   const fake = createFakeFbRequest();
   fake.enqueue(fbOk(pageWithNext(items('a'), 'c1'))).enqueue(fbOk(lastPage(items('b'))));
@@ -413,6 +532,27 @@ test('fetchAll: a non-advancing (repeated) cursor stops the walk (loop guard)', 
   assert.equal(adv.count(), 2, 'stops on the first cursor repeat');
 });
 
+test('fetchAll: a resumed walk whose first page hands back the seed cursor stops at once (loop guard)', async () => {
+  const fake = createFakeFbRequest();
+  // The caller resumes from SEED; Graph answers with the very same cursor. A
+  // walk started from scratch would stop on the first repeat — a resumed walk
+  // must too, instead of re-issuing the identical request once more.
+  fake
+    .enqueue(fbOk(pageWithNext(items('a'), 'SEED')))
+    .enqueue(fbOk(pageWithNext(items('a'), 'SEED')));
+
+  const page = await fetchAll<Item>(fake.fn, EDGE, {}, { after: 'SEED' });
+  assert.deepEqual([...page.data], items('a'));
+  assert.equal(page.truncated, true);
+  assert.equal(page.note, LOOP_GUARD_NOTE);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(
+    fake.calls.length,
+    1,
+    'the seed cursor is already known — no second identical request',
+  );
+});
+
 test('fetchAll: paging.next present but no extractable cursor stops with a note', async () => {
   const fake = createFakeFbRequest();
   // next URL has no `after` param and there is no cursors.after.
@@ -425,6 +565,39 @@ test('fetchAll: paging.next present but no extractable cursor stops with a note'
   assert.equal(page.truncated, true);
   assert.equal(page.note, MISSING_CURSOR_NOTE);
   assert.equal(fake.calls.length, 1);
+});
+
+test('fetchAll: a page budget met on a page without a usable cursor reports the missing cursor, not a resumable budget', async () => {
+  const fake = createFakeFbRequest();
+  // The budget and the cursor run out on the same page. The budget note tells
+  // the caller to "resume from the returned cursor" — but there is none to
+  // return, and `fetchPage` on this exact response says so (MISSING_CURSOR_NOTE).
+  fake.enqueue(
+    fbOk({ data: items('a'), paging: { next: 'https://graph.facebook.com/e?limit=25' } }),
+  );
+
+  const page = await fetchAll<Item>(fake.fn, EDGE, { maxPages: 1 });
+  assert.deepEqual([...page.data], items('a'));
+  assert.equal(page.truncated, true);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(page.note, MISSING_CURSOR_NOTE);
+  assert.equal(fake.calls.length, 1);
+});
+
+test('fetchAll: a page budget met on a repeated cursor does not hand that cursor back as a resume point', async () => {
+  const adv = makeAdversary({ alwaysNext: true, repeatCursor: true });
+  // Page 2 repeats page 1's cursor and also lands on the budget. Resuming from
+  // that cursor fetches page 2 again, forever — the walk knows it did not
+  // advance, so it must say so instead of offering it as a resume point.
+  const page = await fetchAll<Item>(adv.fn, EDGE, { maxPages: 2 });
+  assert.equal(adv.count(), 2);
+  assert.equal(page.truncated, true);
+  assert.equal(
+    page.nextCursor,
+    undefined,
+    'a cursor the walk itself refused to follow is not a resume point',
+  );
+  assert.equal(page.note, LOOP_GUARD_NOTE);
 });
 
 // ---------------------------------------------------------------------------
@@ -485,4 +658,143 @@ test('property: an endless non-empty stream stops at an explicit finite maxPages
   const page = await fetchAll<Item>(adv.fn, EDGE, { maxPages: 250 });
   assert.equal(adv.count(), 250);
   assert.equal(page.truncated, true);
+});
+
+// ---------------------------------------------------------------------------
+// Malformed rows — the element cast under `data`
+// ---------------------------------------------------------------------------
+
+test('a page drops rows that are not objects instead of casting them to T', async () => {
+  // `parsePage` proved the EDGE was an array and then cast the ELEMENTS. Every
+  // shaper downstream reads `item.id` off what it was handed, so a `null` or a
+  // bare string in `data` — which Graph does emit for a partially-failed row —
+  // reached them as a `T` that is not one: `null.id` throws and takes the whole
+  // listing down, and a string answers `.id` with `undefined`, quietly producing
+  // a row with no identity.
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk(lastPage([{ id: 'a' }, null, 'nope', 42, { id: 'b' }])));
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], items('a', 'b'), 'only the real rows survive');
+  assert.equal(page.note, malformedRowsNote(3));
+});
+
+test('the dropped-row note says how many, and never appears for a clean page', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk(lastPage([{ id: 'a' }, { id: 'b' }])));
+  assert.equal((await fetchPage<Item>(fb.fn, EDGE)).note, undefined);
+
+  // `data` not an array is no rows to drop — it is no list at all, which is
+  // reported by its own note (see the no-list tests below), never as a drop.
+  fb.reset();
+  fb.on(() => true, fbOk({ data: 'not-an-array' }));
+  const bad = await fetchPage<Item>(fb.fn, EDGE);
+  assert.deepEqual([...bad.data], []);
+  assert.equal(bad.note, NO_LIST_RETURNED_NOTE);
+});
+
+test('dropped rows are counted across a whole fetchAll walk, alongside the budget note', async () => {
+  // A walk must not report "2 pages" worth of clean data when six rows were
+  // discarded along the way; and when a budget note is also due, both facts have
+  // to reach the caller — one silently replacing the other is how a listing ends
+  // up understating both its size and its trustworthiness.
+  const fb = createFakeFbRequest()
+    .enqueue(fbOk(pageWithNext([{ id: 'a' }, null], 'c1')))
+    .enqueue(fbOk(pageWithNext([{ id: 'b' }, 'junk'], 'c2')));
+
+  const page = await fetchAll<Item>(fb.fn, EDGE, { maxPages: 2 });
+
+  assert.deepEqual([...page.data], items('a', 'b'));
+  assert.equal(page.truncated, true);
+  assert.ok(page.note !== undefined);
+  assert.match(page.note, /page budget reached/);
+  assert.match(page.note, /2 rows/, 'the drop count survives alongside the budget note');
+});
+
+test('a page of nothing but malformed rows reports empty AND says why', async () => {
+  // The worst reading: `data: []` with no note is a truthful "this Page has no
+  // posts", and an operator acts on it. Five unusable rows is a different fact.
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk(lastPage([null, null, 1, 'x', false])));
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], []);
+  assert.equal(page.note, malformedRowsNote(5));
+});
+
+test('fetchPage: a resumed page that hands back the same cursor is not resumable (loop guard)', async () => {
+  const fake = createFakeFbRequest();
+  // The caller resumes from SEED and Graph advertises a next page whose cursor
+  // is SEED again. Handing SEED back as `nextCursor` sends the caller round the
+  // same page forever; `fetchAll` stops on this exact response, and the two
+  // must not disagree about it.
+  fake.enqueue(fbOk(pageWithNext(items('a', 'b'), 'SEED')));
+
+  const page = await fetchPage<Item>(fake.fn, EDGE, { after: 'SEED' });
+  assert.deepEqual([...page.data], items('a', 'b'));
+  assert.equal(page.nextCursor, undefined, 'the repeated cursor must not be offered');
+  assert.equal(page.truncated, true);
+  assert.equal(page.note, LOOP_GUARD_NOTE);
+});
+
+test('fetchPage: a repeated cursor keeps the dropped-row count beside the loop-guard note', async () => {
+  const fake = createFakeFbRequest();
+  fake.enqueue(fbOk(pageWithNext([{ id: 'a' }, null], 'SEED')));
+
+  const page = await fetchPage<Item>(fake.fn, EDGE, { after: 'SEED' });
+  assert.deepEqual([...page.data], items('a'));
+  assert.equal(page.truncated, true);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(page.note, `${malformedRowsNote(1)}; ${LOOP_GUARD_NOTE}`);
+});
+
+// ---------------------------------------------------------------------------
+// A 200 answer with no list in it
+// ---------------------------------------------------------------------------
+
+test('fetchPage: a body with no data array is not a complete empty listing', async () => {
+  // Graph reports an edge with no rows as `data: []`. An empty object, a bare
+  // false/null or a string carries no list at all; reading it as `data: []`,
+  // `truncated: false`, no note tells the caller "there is nothing here" —
+  // "this post has no comments", "this Page has no posts" — on no evidence.
+  for (const body of [{}, false, null, 'nope', { data: null }, { data: { id: 'x' } }]) {
+    const fb = createFakeFbRequest();
+    fb.on(() => true, fbOk(body));
+
+    const page = await fetchPage<Item>(fb.fn, EDGE);
+
+    const label = JSON.stringify(body);
+    assert.deepEqual([...page.data], [], `${label}: no rows`);
+    assert.equal(page.truncated, true, `${label}: must not read as a complete listing`);
+    assert.equal(page.nextCursor, undefined, `${label}: nothing to resume from`);
+    assert.equal(page.note, NO_LIST_RETURNED_NOTE, `${label}: the caller is told why`);
+  }
+});
+
+test('fetchPage: an empty data array is still a complete empty listing', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ data: [] }));
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], []);
+  assert.equal(page.truncated, false);
+  assert.equal(page.note, undefined);
+});
+
+test('fetchAll: a later page with no data array keeps the rows so far and is truncated', async () => {
+  // Page 2 answering `{}` ends the walk exactly like a terminal page would, so
+  // the first page's rows came back as the whole edge.
+  const fb = createFakeFbRequest()
+    .enqueue(fbOk(pageWithNext(items('a', 'b'), 'c1')))
+    .enqueue(fbOk({}));
+
+  const page = await fetchAll<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], items('a', 'b'));
+  assert.equal(page.truncated, true);
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(page.note, NO_LIST_RETURNED_NOTE);
 });

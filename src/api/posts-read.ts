@@ -29,6 +29,7 @@
 //     pass-through philosophy). Unknown keys in a response pass through
 //     normalisation untouched.
 
+import { GraphApiError } from '../core/index.js';
 import type { Cursor, FbRequestFn, PageRequest, ParamValue } from '../core/index.js';
 import { CURSOR_EXPIRED_NOTE, fetchPage, type EdgeRequest } from './shared.js';
 
@@ -223,9 +224,50 @@ export const RANKING_CAP_NOTE =
   'resumable cursor while older posts still exist. Report this as a partial ' +
   'listing, never as the complete post history.';
 
-/** Emitted on every post listing: the post edges never contain Reels (doc 03 §Reels). */
+/**
+ * Emitted on every post listing: what the post edges never contain. Reels live
+ * only on `/video_reels` (doc 03 §Reels); scheduled posts sit on
+ * `/scheduled_posts` until their publish time, and unpublished drafts are on no
+ * listing this server reads. Naming Reels alone implies everything else is
+ * here, so a scheduled post missing from the page would read as "never created"
+ * — the conclusion the write tools' verify notes exist to prevent (CC-PUB-1).
+ */
 export const REELS_NOT_LISTED_NOTE =
-  'Reels are never returned by the post edges — list them with facebook_list_reels.';
+  'Reels are never returned by the post edges — list them with facebook_list_reels. ' +
+  'Scheduled posts are not returned either until their publish time (list them with ' +
+  'facebook_list_scheduled_posts), and unpublished drafts are on no listing this ' +
+  'server reads, so a post missing here may still exist as a scheduled post or a draft.';
+
+/**
+ * Emitted on an EMPTY post page that still hands back a forward cursor. Graph
+ * can answer a slice with `data: []` next to `paging.next` (CC-PAGE-1); bare,
+ * `count: 0` beside {@link REELS_NOT_LISTED_NOTE} reads as "this Page has no
+ * posts" when the next page is one call away.
+ */
+export const EMPTY_POSTS_PAGE_MORE_FOLLOWS_NOTE =
+  'No posts on this page, but Graph returned a forward cursor — more pages ' +
+  'follow. Resume with `nextCursor` before concluding anything about how many ' +
+  'posts this Page has.';
+
+/**
+ * The Reels counterpart of {@link EMPTY_POSTS_PAGE_MORE_FOLLOWS_NOTE}: an empty
+ * `/video_reels` slice next to a forward cursor is not "this Page has no Reels".
+ */
+export const EMPTY_REELS_PAGE_MORE_FOLLOWS_NOTE =
+  'No Reels on this page, but Graph returned a forward cursor — more pages ' +
+  'follow. Resume with `nextCursor` before concluding anything about how many ' +
+  'Reels this Page has.';
+
+/**
+ * Emitted on a default-field post read that carries `comment_count`. The default
+ * set asks for `comments.limit(0).summary(total_count)` with no `filter`, i.e.
+ * Graph's `toplevel` view, whose `total_count` leaves replies out — so the bare
+ * number is smaller than the thread a person sees whenever anyone replied.
+ */
+export const TOPLEVEL_COMMENT_COUNT_NOTE =
+  '`comment_count` counts top-level comments only — replies are not included. For a ' +
+  'count that includes replies use facebook_list_comments with filter "stream" and ' +
+  'include_summary true.';
 
 /** Emitted on every reactions read: identities are permission-limited (doc 03). */
 export const REACTION_IDENTITY_NOTE =
@@ -236,6 +278,31 @@ export const REACTION_IDENTITY_NOTE =
 export const CARE_FOLDED_NOTE =
   'Graph folds CARE reactions into the LIKE total, so per-type totals need not ' +
   'sum to the overall total.';
+
+/**
+ * Operator/model guidance on the error thrown when a node read comes back 200
+ * with no node in it (a bare `false`, `null`, an empty body, a string or an
+ * array). Graph answers some reads of an object the token cannot see with a
+ * bare `false`; normalising that into `{ id: "" }` would report a successful
+ * read of an empty post instead of a failed lookup.
+ */
+export const NODE_NOT_RETURNED_TEXT =
+  'Graph answered 200 but returned no object for this id — it does not exist, ' +
+  'was deleted, or is not visible to this Page token. Nothing was read: do not ' +
+  'report it as an empty post or as having no reactions. Re-check the id with ' +
+  'facebook_list_posts.';
+
+/**
+ * Emitted when a reaction total that was asked for did not come back. An absent
+ * total next to a short (usually empty) reactor list otherwise reads as "nobody
+ * reacted" — a claim nothing on the wire made.
+ */
+export function reactionTotalsUnknownNote(missing: readonly string[]): string {
+  return (
+    `Graph did not report ${missing.join(', ')}: those figures are UNKNOWN, not ` +
+    'zero — say they are unavailable, never report them as 0.'
+  );
+}
 
 /** Join the present note fragments into one model-facing sentence run. */
 function composeNote(parts: readonly (string | undefined)[]): string | undefined {
@@ -266,15 +333,19 @@ export interface ReactionUser {
   readonly type?: string;
 }
 
-/** Keys replaced by flat scalars during normalisation (their nested form is dropped). */
-const FLATTENED_KEYS: ReadonlySet<string> = new Set([
-  'shares',
-  'comments',
-  'reactions',
-  // Nested edge paging carries the access token; the shaper strips it too, but
-  // dropping it here means it never travels through the api layer at all (C3).
-  'paging',
-]);
+/**
+ * Keys whose flat scalar (`share_count`, …) replaces the nested object — but
+ * only when that object is JUST the count. The default field sets ask for these
+ * as `.limit(0).summary(total_count)`, so their `data` is empty and the summary
+ * is the whole payload; dropping it then is the point of normalisation. A
+ * `fields` OVERRIDE (`comments{message,from}`) asks for the rows themselves,
+ * and those are the caller's answer — dropping them would report a post as
+ * having no comments moments after Graph handed them over.
+ */
+const COUNT_KEYS: ReadonlySet<string> = new Set(['shares', 'comments', 'reactions']);
+
+/** The Graph key whose value embeds the live access token (C3 / CC-PAGE-4). */
+const PAGING_KEY = 'paging';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -296,18 +367,113 @@ function summaryTotal(node: unknown): number | undefined {
 }
 
 /**
+ * Drop every `paging` object from a passed-through value, at ANY depth. A
+ * `fields` expansion (`attachments{...}`, `likes{...}`) returns the edge as
+ * `{ data, paging }`, so the token-bearing `paging.next` sits BELOW the node's
+ * top level — where the key loop in {@link normalizeNode} never reaches it. The
+ * value is rebuilt, never mutated.
+ */
+/**
+ * Assign a shaped field. `JSON.parse` creates `__proto__` as an OWN property, so
+ * a Graph node can carry one and `Object.keys` hands it straight to the shaper —
+ * where a plain `out[key] = value` runs the inherited `__proto__` setter and
+ * re-parents the record instead of defining a field, silently losing it. Mirrors
+ * `setOwn` in `src/mcp/result.ts`.
+ */
+function setOwn(out: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(out, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  out[key] = value;
+}
+
+/** Whether an expansion actually returned rows, as opposed to only a summary. */
+function hasRows(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.data) && value.data.length > 0;
+}
+
+/**
+ * Marker set on an expanded edge whose `paging` advertised a further page. The
+ * paging object itself must go (C3), but it was also the only evidence that the
+ * rows shown are Graph's FIRST page of that edge, not all of it.
+ */
+export const EXPANSION_HAS_MORE_KEY = 'has_more';
+
+/** Whether a Graph `paging` object advertises a further page. */
+function advertisesNext(paging: unknown): boolean {
+  return isRecord(paging) && typeof paging.next === 'string' && paging.next.length > 0;
+}
+
+function stripNestedPaging(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNestedPaging);
+  if (!isRecord(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (key === PAGING_KEY) continue;
+    setOwn(out, key, stripNestedPaging(value[key]));
+  }
+  // Dropping the paging silently would hand the caller the first page of an
+  // expansion (`comments{message}` ⇒ 25 comments) as if it were the whole edge.
+  if (advertisesNext(value[PAGING_KEY])) out[EXPANSION_HAS_MORE_KEY] = true;
+  return out;
+}
+
+/** Top-level fields of a normalised node holding an expansion marked as cut short. */
+function partialExpansions(node: GraphRecord): string[] {
+  const hit = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.some(hit);
+    if (!isRecord(value)) return false;
+    if (value[EXPANSION_HAS_MORE_KEY] === true) return true;
+    return Object.values(value).some(hit);
+  };
+  return Object.keys(node).filter((key) => hit(node[key]));
+}
+
+/**
+ * Emitted when an expanded field returned only Graph's first page of rows. The
+ * row count of such an expansion is NOT its total.
+ */
+export function partialExpansionNote(fields: readonly string[]): string {
+  return (
+    `The expanded field(s) ${fields.join(', ')} returned only Graph's first page of ` +
+    `rows (marked ${EXPANSION_HAS_MORE_KEY}: true); more exist that this read does not ` +
+    'include. Never report the rows shown as the full set or count them as the total.'
+  );
+}
+
+/** The partial-expansion note for a set of nodes, or `undefined` when none was cut. */
+function partialExpansionNoteFor(nodes: readonly GraphRecord[]): string | undefined {
+  const fields = new Set<string>();
+  for (const node of nodes) for (const key of partialExpansions(node)) fields.add(key);
+  return fields.size > 0 ? partialExpansionNote([...fields]) : undefined;
+}
+
+/**
  * Normalise one Graph node: pass unknown fields through, guarantee a string
  * `id` (empty only when the caller's `fields` override omitted it), and flatten
  * `shares.count` / `comments.summary.total_count` /
  * `reactions.summary.total_count` into `share_count` / `comment_count` /
- * `reaction_count`. The input is never mutated.
+ * `reaction_count`. Those three keys are dropped only when they carried nothing
+ * but the count; an expansion that returned rows is kept, because the rows are
+ * what the caller's `fields` override asked for. Nested edge `paging` is
+ * dropped at every depth, so no token-bearing URL travels on through the api
+ * layer (C3). The input is never mutated.
  */
 export function normalizeNode(raw: unknown): GraphRecord {
   const src: Record<string, unknown> = isRecord(raw) ? raw : {};
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(src)) {
-    if (FLATTENED_KEYS.has(key)) continue;
-    out[key] = src[key];
+    // Top-level `paging` carries the access token; the shaper strips it too, but
+    // dropping it here means it never travels through the api layer at all (C3).
+    if (key === PAGING_KEY) continue;
+    if (COUNT_KEYS.has(key) && !hasRows(src[key])) continue;
+    setOwn(out, key, stripNestedPaging(src[key]));
   }
   out.id = readString(src.id) ?? '';
 
@@ -410,6 +576,8 @@ export interface ReelListResult extends PagedResult {
 export interface PostDetailResult {
   readonly postId: string;
   readonly post: GraphRecord;
+  /** Model-facing guidance on what a flattened count does and does not include. */
+  readonly note?: string;
 }
 
 export interface ReactionsResult extends PagedResult {
@@ -472,6 +640,27 @@ async function getNode(
 }
 
 /**
+ * Require a node-shaped (non-array object) body from a node read, else throw a
+ * not-found {@link GraphApiError} naming the id (see {@link NODE_NOT_RETURNED_TEXT}).
+ */
+function requireNode(data: unknown, id: string): Record<string, unknown> {
+  if (isRecord(data) && !Array.isArray(data)) return data;
+  throw new GraphApiError(
+    `no object returned for id '${id}' — ${NODE_NOT_RETURNED_TEXT}`,
+    {
+      code: 0,
+      httpStatus: 200,
+      action: {
+        category: 'not_found',
+        retryable: false,
+        nextTool: 'facebook_list_posts',
+        operatorText: NODE_NOT_RETURNED_TEXT,
+      },
+    },
+  );
+}
+
+/**
  * Project a `fetchPage` result onto the cursor-pagination fields of a
  * {@link PagedResult}, optionally replacing the note with a composed one (the
  * helper's own expiry note is then expected to be folded into `noteOverride`).
@@ -524,8 +713,11 @@ export async function listPosts(
   // the cap note says how much history was never in reach to begin with.
   const noForwardCursor =
     page.nextCursor === undefined && page.note !== CURSOR_EXPIRED_NOTE;
+  const emptyWithCursor = posts.length === 0 && page.nextCursor !== undefined;
   const note = composeNote([
     page.note,
+    emptyWithCursor ? EMPTY_POSTS_PAGE_MORE_FOLLOWS_NOTE : undefined,
+    partialExpansionNoteFor(posts),
     noForwardCursor ? RANKING_CAP_NOTE : undefined,
     REELS_NOT_LISTED_NOTE,
   ]);
@@ -553,7 +745,30 @@ export async function getPost(
     opts.fields ?? POST_DETAIL_FIELDS,
     opts,
   );
-  return { postId: opts.postId, post: normalizeNode(data) };
+  const post = normalizeNode(requireNode(data, opts.postId));
+  // Only the default field set is known to ask for the top-level view; an
+  // override chose its own comments expansion, whose filter this layer cannot see.
+  const toplevelCount = opts.fields === undefined && post.comment_count !== undefined;
+  // The default set asks for both summaries, and Graph reports a post nobody
+  // commented on or reacted to as `total_count: 0` — so a missing count was not
+  // reported (typically withheld from this token), never "none". Omitted
+  // silently, the post reads as having no comments / no reactions.
+  const unreported =
+    opts.fields === undefined
+      ? (['comment_count', 'reaction_count'] as const).filter(
+          (key) => post[key] === undefined,
+        )
+      : [];
+  const note = composeNote([
+    toplevelCount ? TOPLEVEL_COMMENT_COUNT_NOTE : undefined,
+    unreported.length > 0 ? reactionTotalsUnknownNote(unreported) : undefined,
+    partialExpansionNoteFor([post]),
+  ]);
+  return {
+    postId: opts.postId,
+    post,
+    ...(note !== undefined ? { note } : {}),
+  };
 }
 
 /**
@@ -575,11 +790,17 @@ export async function listReels(
     pageOf(opts),
   );
   const reels = page.data.map(normalizeNode);
+  const emptyWithCursor = reels.length === 0 && page.nextCursor !== undefined;
+  const note = composeNote([
+    page.note,
+    emptyWithCursor ? EMPTY_REELS_PAGE_MORE_FOLLOWS_NOTE : undefined,
+    partialExpansionNoteFor(reels),
+  ]);
   return {
     pageId: opts.pageId,
     reels,
     count: reels.length,
-    ...pagedFields(page),
+    ...pagedFields(page, note),
   };
 }
 
@@ -607,13 +828,18 @@ export async function getReactions(
     reactionSummaryFields(types),
     opts,
   );
-  const node: Record<string, unknown> = isRecord(summary) ? summary : {};
+  const node = requireNode(summary, opts.postId);
   const totals: Record<string, number> = {};
+  const missing: string[] = [];
+  const total = summaryTotal(node[TOTAL_ALIAS]);
+  // The all-types figure is only the answer on an unfiltered read; under a
+  // filter its absence is no gap in what was asked.
+  if (type === undefined && total === undefined) missing.push('the overall total');
   for (const candidate of types) {
     const count = summaryTotal(node[aliasFor(candidate)]);
     if (count !== undefined) totals[candidate] = count;
+    else missing.push(candidate);
   }
-  const total = summaryTotal(node[TOTAL_ALIAS]);
 
   const page = await fetchPage<unknown>(
     fbRequest,
@@ -630,6 +856,7 @@ export async function getReactions(
   const users = page.data.map(normalizeReactionUser);
   const note = composeNote([
     page.note,
+    missing.length > 0 ? reactionTotalsUnknownNote(missing) : undefined,
     REACTION_IDENTITY_NOTE,
     types.includes('LIKE') || type === 'CARE' ? CARE_FOLDED_NOTE : undefined,
   ]);

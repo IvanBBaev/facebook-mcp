@@ -15,10 +15,16 @@ import {
   fbOk,
 } from '../core/fakes/index.js';
 import type { FakeClock, FakeFbRequest } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import {
+  DEFAULT_THROTTLE_RETRY_AFTER_MS,
+  GraphApiError,
+  toGraphApiError,
+} from '../core/index.js';
 import type {
   ErrorAction,
   FbRequest,
+  FbRequestFn,
+  FbResponse,
   JsonRequest,
   LogFields,
   Logger,
@@ -75,6 +81,15 @@ const WIRE: Pick<Settings, 'apiVersion' | 'hosts'> = {
 const UPLOAD_PATH = `/video-upload/${WIRE.apiVersion}/${VIDEO_ID}`;
 const UPLOAD_URL = `https://${WIRE.hosts.rupload}${UPLOAD_PATH}`;
 
+/**
+ * A Graph id as it reaches this module when the wire sent a JSON NUMBER.
+ * `JSON.parse` has already rounded it to the nearest double, so the low digits
+ * are gone before any code here gets a look at it. Written through `Number(...)`
+ * rather than as a literal so the rounding is the test's subject rather than a
+ * lint error about a lossy literal.
+ */
+const ROUNDED_WIRE_ID = Number('12345678901234567890');
+
 interface RecordedLog {
   readonly level: 'debug' | 'info' | 'warn' | 'error';
   readonly msg: string;
@@ -113,6 +128,7 @@ function harness(opts?: {
   readonly nowMs?: number;
   readonly chunkBytes?: number;
   readonly maxResumeAttempts?: number;
+  readonly resumeBackoffMs?: number;
 }): Harness {
   const fb = createFakeFbRequest();
   const logger = createTestLogger();
@@ -128,6 +144,9 @@ function harness(opts?: {
     ...(opts?.maxResumeAttempts !== undefined
       ? { maxResumeAttempts: opts.maxResumeAttempts }
       : {}),
+    // The fake clock resolves a sleep only when a test ticks it, so resume tests
+    // run with the local backoff off; pacing gets its own dedicated tests.
+    resumeBackoffMs: opts?.resumeBackoffMs ?? 0,
   };
   return { fb, logger, clock, progress, deps };
 }
@@ -273,6 +292,20 @@ test('startReelUpload keeps the documented rupload layout when upload_url is abs
   const session = await startReelUpload(deps, { pageId: PAGE_ID });
 
   assert.equal(session.uploadPath, UPLOAD_PATH);
+});
+
+test('startReelUpload refuses a numeric video_id instead of reserving a rounded one', async () => {
+  const { fb, deps } = harness();
+  // `fbRequest` CASTS the body (CC-NET-2), so a numeric id is a fact about the
+  // wire. Rounding it into a string would name a video that is not ours: the
+  // whole file would be uploaded, and the finish phase would then commit against
+  // somebody else's node. Failing the start phase costs nothing but this call.
+  fb.on(isStartCall, fbOk({ video_id: ROUNDED_WIRE_ID, upload_url: UPLOAD_URL }));
+
+  const err = await expectReelError(() => startReelUpload(deps, { pageId: PAGE_ID }));
+
+  assert.equal(err.reel.phase, 'start');
+  assert.match(err.message, /no video_id/);
 });
 
 test('ruploadPathForReel refuses an upload target off the allowlisted rupload host', () => {
@@ -430,6 +463,26 @@ test('finishReelUpload publishes immediately for video_state PUBLISHED', async (
   assert.match(result.processingNote, /acceptance, not visibility/);
   assert.ok(result.quotaNote.includes(String(REEL_QUOTA_PER_24H)));
   assert.ok(result.lifecycle.some((note) => note.id === 'reel-published'));
+});
+
+test('finishReelUpload acknowledges the publish without handing back a rounded post_id', async () => {
+  const { fb, deps } = harness();
+  // Graph answered with an id, so the publish was ACCEPTED — but the digits did
+  // not survive the wire, so there is no handle to offer. The two facts are
+  // separate: reporting `ambiguous` here would send the operator to verify a
+  // Reel Graph has already confirmed, over an optional field they do not need
+  // (a Reel is addressed by its video id).
+  fb.on(isFinishCall, fbOk({ post_id: ROUNDED_WIRE_ID }));
+
+  const result = await finishReelUpload(deps, {
+    pageId: PAGE_ID,
+    videoId: VIDEO_ID,
+    videoState: 'PUBLISHED',
+  });
+
+  assert.equal(result.success, true, 'an id in the answer is acceptance');
+  assert.equal(result.postId, undefined, 'a rounded id is never offered as a handle');
+  assert.equal(result.videoId, VIDEO_ID);
 });
 
 test('finishReelUpload saves a draft for video_state DRAFT', async () => {
@@ -787,6 +840,38 @@ test('uploadReelBinary refuses an empty payload before touching the wire', async
   assert.match(err.message, /empty \(0 bytes\)/);
 });
 
+test('uploadReelBinary terminates when the server offset oscillates instead of advancing', async () => {
+  const { deps } = harness({ chunkBytes: 4, maxResumeAttempts: 2 });
+  // Every chunk "succeeds", but the server alternates between acknowledging
+  // chunk 1 and rewinding to 0: the offset advances on every other POST, so a
+  // guard that resets on any advance never trips. The recorded fake answers
+  // per-request, which the canned fake cannot express; it is capped so a
+  // regression fails the test instead of hanging the suite.
+  const offsets: number[] = [];
+  const fbRequest = ((req: FbRequest) => {
+    const rupload = ruploadOf(req);
+    offsets.push(rupload.fileOffset);
+    if (offsets.length > 50) return Promise.reject(new Error('runaway transfer loop'));
+    const res: FbResponse<unknown> = {
+      data: {},
+      headers: { file_offset: rupload.fileOffset === 0 ? '4' : '0' },
+      status: 200,
+    };
+    return Promise.resolve(res);
+  }) as FbRequestFn;
+
+  const err = await expectReelError(() =>
+    uploadReelBinary({ ...deps, fbRequest }, { session: SESSION, data: bytes(10) }),
+  );
+
+  assert.equal(err.reel.kind, 'session', `got: ${err.message}`);
+  assert.match(err.message, /stopped advancing/);
+  assert.ok(
+    offsets.length <= 10,
+    `the loop must stop within the stall budget; made ${String(offsets.length)} calls`,
+  );
+});
+
 test('uploadReelBinary fails loudly when the server offset stops advancing', async () => {
   const { fb, deps } = harness({ chunkBytes: 4, maxResumeAttempts: 2 });
   fb.on(isTransferCall, fbOk({}, { file_offset: '0' }));
@@ -799,6 +884,42 @@ test('uploadReelBinary fails loudly when the server offset stops advancing', asy
   assert.equal(err.reel.kind, 'session');
   assert.match(err.message, /stopped advancing/);
   assert.match(err.message, /restart from the start phase/);
+});
+
+test('uploadReelBinary never counts a chunk answered with success:false as uploaded', async () => {
+  // A 2xx whose body refuses the chunk is not an acknowledgement. Advancing by
+  // our own arithmetic would return finalOffset === byteLength and let
+  // publishReel go on to finish a Reel whose bytes the host declined.
+  const { fb, deps } = harness({ chunkBytes: 4, maxResumeAttempts: 2 });
+  fb.on(isTransferCall, fbOk({ success: false }));
+
+  const err = await expectReelError(() =>
+    uploadReelBinary(deps, { session: SESSION, data: bytes(10) }),
+  );
+
+  assert.equal(err.reel.kind, 'session');
+  assert.deepEqual(
+    fb.calls.map((call) => ruploadOf(call).fileOffset),
+    [0, 0, 0],
+    'the refused chunk is re-sent from its own start, never skipped',
+  );
+});
+
+test('publishReel does not finish a Reel whose chunks were refused with success:false', async () => {
+  const { fb, deps } = harness({ chunkBytes: 4, maxResumeAttempts: 1 });
+  fb.on(isStartCall, fbOk({ video_id: VIDEO_ID, upload_url: UPLOAD_URL }));
+  fb.on(isTransferCall, fbOk({ success: false }));
+  fb.on(isFinishCall, fbOk({ success: true }));
+
+  await expectReelError(() =>
+    publishReel(deps, { pageId: PAGE_ID, data: bytes(10), videoState: 'PUBLISHED' }),
+  );
+
+  assert.equal(
+    fb.calls.filter(isFinishCall).length,
+    0,
+    'the finish (publish) call must never run after a refused transfer',
+  );
 });
 
 test('uploadReelBinary treats a desynced session as terminal, not as a resume', async () => {
@@ -835,6 +956,119 @@ test('uploadReelBinary reports byte progress against the total', async () => {
   for (const update of progress) {
     assert.equal(update.total, 10);
   }
+});
+
+test('a throwing progress sink never abandons a Reel whose bytes already landed', async () => {
+  // The tools layer bridges onProgress onto an MCP progress notification, and that
+  // notification can fail on a closing transport (CC-MCP-1). Reporting is ADVISORY:
+  // a failed notification must not strand a reserved video_id with every byte
+  // uploaded and no finish call. `media-video.ts` states exactly this contract for
+  // the legacy resumable edge; the Reels edge owes the operator the same.
+  const { fb, logger, clock } = harness();
+  programHappyPath(fb);
+  let sinkCalls = 0;
+  const deps: ReelsDeps = {
+    fbRequest: fb.fn,
+    logger,
+    clock,
+    settings: WIRE,
+    chunkBytes: 4,
+    onProgress: () => {
+      sinkCalls += 1;
+      throw new Error('progress notification failed');
+    },
+  };
+
+  const result = await publishReel(deps, {
+    pageId: PAGE_ID,
+    data: bytes(10),
+    videoState: 'PUBLISHED',
+  });
+
+  // start, three chunks, finish — the sink is offered every one of them.
+  assert.equal(sinkCalls, 5);
+  assert.equal(result.finish.success, true);
+  assert.equal(result.finish.postId, '111_222');
+  assert.equal(result.transfer.finalOffset, 10);
+  assert.equal(fb.calls.filter(isFinishCall).length, 1, 'the finish POST still ran');
+  assert.equal(
+    logger.entries.filter((e) => e.msg === 'reels.progress.failed').length,
+    5,
+    'every contained throw is logged, never silently dropped',
+  );
+});
+
+test('a sink that throws on the finish update never leaves an uploaded Reel uncommitted', async () => {
+  // The worst shape of the same fault. By the finish phase every byte is on
+  // Meta's side and the reserved video_id is waiting for its commit; the finish
+  // POST is the only call that names that session, so a throw in front of it
+  // strands the upload with no way for the operator to find or complete it.
+  const { fb, logger, clock } = harness();
+  fb.on(isFinishCall, fbOk({ success: true, post_id: '111_222' }));
+  const deps: ReelsDeps = {
+    fbRequest: fb.fn,
+    logger,
+    clock,
+    settings: WIRE,
+    onProgress: () => {
+      throw new Error('progress notification failed');
+    },
+  };
+
+  const result = await finishReelUpload(deps, {
+    pageId: PAGE_ID,
+    videoId: VIDEO_ID,
+    videoState: 'PUBLISHED',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(fb.calls.filter(isFinishCall).length, 1, 'the commit still reached Graph');
+});
+
+test('publishReel names the stranded session when the upload outruns the schedule lead', async () => {
+  // publishReel promises the schedule "costs no Graph write and no uploaded
+  // bytes", and validates it against the clock at the START call. finishReelUpload
+  // re-validates against a FRESH clock. A schedule that was legal when the operator
+  // submitted it can therefore fail after a video_id is reserved and every byte is
+  // on Meta's side — a local rejection raised past the point where it was free. The
+  // throw itself is right (Graph would reject the short lead too), but the operator
+  // must be told what actually happened and what is left behind.
+  const { fb, logger, clock } = harness();
+  programHappyPath(fb);
+  const slowUpload: FbRequestFn = async <T = unknown>(
+    req: FbRequest,
+  ): Promise<FbResponse<T>> => {
+    const res = await fb.fn<T>(req);
+    if (req.protocol === 'rupload') clock.advance(5 * MINUTE);
+    return res;
+  };
+  const deps: ReelsDeps = { fbRequest: slowUpload, logger, clock, settings: WIRE };
+  // 12 minutes ahead at the start call: comfortably inside the 10-minute window
+  // publishReel checks. Five minutes of upload later it no longer is.
+  const scheduledPublishTime = Math.floor((NOW + 12 * MINUTE) / 1000);
+
+  const err = await expectReelError(() =>
+    publishReel(deps, {
+      pageId: PAGE_ID,
+      data: bytes(10),
+      videoState: 'SCHEDULED',
+      scheduledPublishTime,
+    }),
+  );
+
+  assert.equal(err.reel.kind, 'schedule');
+  assert.equal(err.reel.phase, 'finish');
+  assert.equal(fb.calls.filter(isFinishCall).length, 0, 'no bad schedule reached Graph');
+  assert.match(
+    err.reel.operatorText,
+    new RegExp(VIDEO_ID),
+    'the reserved video id the operator now owns must be named',
+  );
+  assert.match(
+    err.reel.operatorText,
+    /upload/i,
+    'the cause is the upload outrunning the lead, not a bad submission',
+  );
 });
 
 test('uploadReelBinary rewinds only to the last ACKNOWLEDGED offset, not to a stale server one', async () => {
@@ -908,6 +1142,105 @@ test('uploadReelBinary accepts a zero resume budget as "never resume"', async ()
 
   assert.equal(fb.calls.length, 1);
   assert.equal(err.reel.kind, 'transient');
+});
+
+/** Let queued promise continuations run until the loop parks on the clock (or ends). */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+/** A transient chunk fault whose transport attached a server-named wait (`Retry-After`). */
+function waitError(retryAfterMs: number): GraphApiError {
+  return graphError('HTTP 503 on rupload chunk POST', {
+    code: 0,
+    category: 'transient',
+    retryable: true,
+    retryAfterMs,
+  });
+}
+
+test('uploadReelBinary waits out a server-named Retry-After before re-driving a chunk', async () => {
+  const { fb, clock, deps } = harness({ chunkBytes: 4 });
+  fb.enqueue(fbErr(waitError(5_000)));
+  fb.on(isTransferCall, fbOk({}));
+
+  let done = false;
+  const run = uploadReelBinary(deps, { session: SESSION, data: bytes(4) }).finally(() => {
+    done = true;
+  });
+  await settle();
+  assert.equal(fb.calls.length, 1, 'no re-drive before the server-named wait elapses');
+  assert.equal(done, false);
+  clock.advance(4_999);
+  await settle();
+  assert.equal(fb.calls.length, 1, 'still inside the Retry-After window');
+  clock.advance(1);
+  const result = await run;
+  assert.equal(fb.calls.length, 2);
+  assert.equal(result.resumes, 1);
+});
+
+test('uploadReelBinary backs off between re-drives when the server names no wait', async () => {
+  const { fb, clock, deps } = harness({ chunkBytes: 4, resumeBackoffMs: 100 });
+  fb.enqueue(fbErr(transientError()));
+  fb.enqueue(fbErr(transientError('HTTP 503 again')));
+  fb.on(isTransferCall, fbOk({}));
+
+  const run = uploadReelBinary(deps, { session: SESSION, data: bytes(4) });
+  await settle();
+  assert.equal(fb.calls.length, 1, 'the first re-drive waits the base backoff');
+  clock.advance(100);
+  await settle();
+  assert.equal(fb.calls.length, 2);
+  clock.advance(199);
+  await settle();
+  assert.equal(fb.calls.length, 2, 'the second re-drive waits twice as long');
+  clock.advance(1);
+  const result = await run;
+  assert.equal(fb.calls.length, 3);
+  assert.equal(result.resumes, 2);
+});
+
+test('uploadReelBinary backs off before re-sending after a POST that did not advance the offset', async () => {
+  const { fb, clock, deps } = harness({ chunkBytes: 4, resumeBackoffMs: 100 });
+  fb.enqueue(fbOk({}, { file_offset: '0' }));
+  fb.on(isTransferCall, fbOk({}, { file_offset: '4' }));
+
+  const run = uploadReelBinary(deps, { session: SESSION, data: bytes(4) });
+  await settle();
+  assert.equal(fb.calls.length, 1, 'a stalled offset is not re-sent back-to-back');
+  clock.advance(100);
+  const result = await run;
+  assert.equal(fb.calls.length, 2);
+  assert.equal(result.finalOffset, 4);
+});
+
+test('uploadReelBinary surfaces a server-named wait beyond the in-call cap at once, with the wait', async () => {
+  const { fb, clock, deps } = harness({ chunkBytes: 4, resumeBackoffMs: 100 });
+  fb.enqueue(fbErr(waitError(120_000)));
+  fb.on(isTransferCall, fbOk({}));
+
+  const run = expectReelError(() =>
+    uploadReelBinary(deps, { session: SESSION, data: bytes(4) }),
+  );
+  await settle();
+  // Tick past every local backoff so an unguarded re-drive would show up.
+  clock.advance(1_000);
+  const err = await run;
+
+  assert.equal(fb.calls.length, 1, 'no re-drive into the announced maintenance window');
+  assert.equal(
+    clock.pendingSleeps(),
+    0,
+    'a two-minute wait is not slept through in-call',
+  );
+  assert.equal(err.reel.kind, 'transient');
+  assert.equal(err.reel.phase, 'transfer');
+  assert.equal(err.reel.retryable, true);
+  assert.equal(err.reel.retryAfterMs, 120_000, 'the caller is told how long to wait');
+  assert.equal(err.action?.retryAfterMs, 120_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1352,187 @@ test('a finish response whose payload confirms nothing is ambiguous, not a silen
   assert.match(err.reel.operatorText, /NEVER retried/);
 });
 
+test('an explicit success:false is not upgraded to acceptance by a sibling post_id', async () => {
+  const { fb, deps } = harness();
+  // Graph said "no" in so many words; an id next to it is a reference, not a
+  // contradiction of the verdict. Only an explicit `true`, or an id with NO
+  // success field at all, may confirm the publish.
+  fb.on(isFinishCall, fbOk({ success: false, post_id: '111_222' }));
+
+  const err = await expectReelError(() =>
+    finishReelUpload(deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    }),
+  );
+
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.equal(err.reel.phase, 'finish');
+  assert.equal(err.reel.retryable, false);
+  assert.match(err.reel.operatorText, /video_reels/);
+});
+
+test('a caller abort during the finish POST is ambiguous, never a clean failure', async () => {
+  const { fb, deps } = harness();
+  // The transport rethrows the caller's own AbortError untouched, so it reaches
+  // the api layer as a plain non-Graph throw. The finish POST is the write that
+  // publishes: once it is on the wire, an abort means "response lost", which
+  // is the C2 ambiguous verdict — the same verdict a 5xx or a timeout on this
+  // POST already gets — not "nothing landed, re-run freely".
+  const abort = new Error('This operation was aborted');
+  abort.name = 'AbortError';
+  fb.on(isFinishCall, fbErr(abort));
+
+  const err = await expectReelError(() =>
+    finishReelUpload(deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    }),
+  );
+
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.equal(err.reel.phase, 'finish');
+  assert.equal(err.reel.category, 'ambiguous');
+  assert.equal(err.reel.retryable, false);
+  assert.match(err.reel.operatorText, /NEVER retried/);
+  assert.match(err.reel.operatorText, /video_reels/);
+  assert.match(err.reel.operatorText, /aborted/i);
+  assert.equal(err.cause, abort);
+});
+
+test('an ambiguous finish names the video_id the operator must verify', async () => {
+  const { fb, deps } = harness();
+  fb.on(
+    isFinishCall,
+    fbErr(
+      graphError('network fault: socket hang up', {
+        code: 0,
+        category: 'ambiguous',
+        retryable: false,
+      }),
+    ),
+  );
+
+  const err = await expectReelError(() =>
+    finishReelUpload(deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    }),
+  );
+
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.ok(
+    err.reel.operatorText.includes(`GET /${VIDEO_ID}?fields=status`),
+    `the operator must be told which Reel to check; got: ${err.reel.operatorText}`,
+  );
+  assert.equal(err.reel.videoId, VIDEO_ID);
+  assert.ok(err.message.includes(VIDEO_ID));
+  assert.equal(err.action?.operatorText, err.reel.operatorText);
+});
+
+test('a finish that confirms nothing names the video_id, and so does a finish rejection', async () => {
+  const unconfirmed = harness();
+  unconfirmed.fb.on(isFinishCall, fbOk({ success: false }));
+  const err = await expectReelError(() =>
+    finishReelUpload(unconfirmed.deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    }),
+  );
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.ok(err.reel.operatorText.includes(`GET /${VIDEO_ID}?fields=status`));
+  assert.equal(err.reel.videoId, VIDEO_ID);
+
+  const rejected = harness();
+  const cause = graphError('(#100) Video too short', {
+    code: 100,
+    category: 'validation',
+  });
+  rejected.fb.on(isFinishCall, fbErr(cause));
+  const rejection = await expectReelError(() =>
+    finishReelUpload(rejected.deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    }),
+  );
+  assert.equal(rejection.reel.kind, 'constraint');
+  assert.equal(rejection.reel.videoId, VIDEO_ID);
+  assert.ok(rejection.reel.operatorText.includes(VIDEO_ID));
+  // Mapped, not swallowed: the Graph envelope survives the re-wrap.
+  assert.equal(rejection.code, 100);
+  assert.equal(rejection.cause, cause);
+});
+
+test('a caller abort during start or transfer stays a passthrough: nothing was published', async () => {
+  const abort = new Error('This operation was aborted');
+  abort.name = 'AbortError';
+
+  const start = harness();
+  start.fb.on(isStartCall, fbErr(abort));
+  const startErr = await expectReelError(() =>
+    startReelUpload(start.deps, { pageId: PAGE_ID, token: TOKEN }),
+  );
+  assert.equal(startErr.reel.kind, 'passthrough');
+  assert.equal(startErr.reel.phase, 'start');
+
+  const transfer = harness();
+  transfer.fb.on(isTransferCall, fbErr(abort));
+  const transferErr = await expectReelError(() =>
+    uploadReelBinary(transfer.deps, { session: SESSION, data: bytes(10) }),
+  );
+  assert.equal(transferErr.reel.kind, 'passthrough');
+  assert.equal(transferErr.reel.phase, 'transfer');
+  assert.equal(transfer.fb.calls.length, 1, 'an abort is not a transient to resume from');
+});
+
+test('an ambiguous start never claims a Reel may have landed: only finish publishes', async () => {
+  const { fb, deps } = harness();
+  // Core stamps `ambiguous` on any POST whose response was lost (a 5xx, a
+  // mid-flight reset). On the start POST that write only reserves an upload
+  // session; no Reel can be live, and no listing shows a reserved id.
+  fb.on(
+    isStartCall,
+    fbErr(
+      graphError(
+        'ambiguous write outcome (HTTP 502 on POST) — do NOT retry; verify first',
+        {
+          code: 0,
+          category: 'ambiguous',
+          retryable: false,
+        },
+      ),
+    ),
+  );
+
+  const err = await expectReelError(() => startReelUpload(deps, { pageId: PAGE_ID }));
+
+  assert.equal(err.reel.phase, 'start');
+  assert.doesNotMatch(err.reel.operatorText, /may or may not have landed/);
+  assert.doesNotMatch(err.reel.operatorText, /NEVER retried/);
+  assert.doesNotMatch(err.reel.operatorText, /video_reels instead/);
+  assert.match(err.reel.operatorText, /Nothing was published/);
+  assert.equal(err.reel.nextTool, undefined, 'no read can show a reserved-only session');
+  assert.equal(err.reel.retryable, true, 're-running the publish cannot publish twice');
+  assert.equal(err.action?.retryable, true);
+
+  // The transfer phase shares the rule: a chunk POST publishes nothing either.
+  const transfer = classifyReelFailure(
+    graphError('ambiguous upload outcome (network fault)', {
+      code: 0,
+      category: 'ambiguous',
+    }),
+    'transfer',
+  );
+  assert.doesNotMatch(transfer.operatorText, /may or may not have landed/);
+  assert.match(transfer.operatorText, /Nothing was published/);
+  assert.equal(transfer.retryable, true);
+});
+
 // ---------------------------------------------------------------------------
 // Quota mapping (CC-MEDIA-8)
 // ---------------------------------------------------------------------------
@@ -1094,6 +1608,24 @@ test('a Reels-cap message on an unlisted code still maps to quota, flagged unver
   assert.equal(failure.verified, false);
 });
 
+test('a media rejection worded like the cap is a constraint, not a quota', () => {
+  // Meta rejects an over-long Reel with the cap's own vocabulary - "Reels",
+  // "limit", "reached" - on a plain validation code. Trusting the wording here
+  // would answer a file that is a few seconds too long with "wait 24 h".
+  const err = graphError(
+    '(#100) Your video does not meet the Reels requirements: the duration limit is 90 seconds and this file reached 214 s',
+    { code: 100, category: 'validation' },
+  );
+
+  assert.equal(isReelQuotaError(err), false);
+  const failure = classifyReelFailure(err, 'finish');
+  assert.equal(failure.kind, 'constraint');
+  assert.equal(failure.category, 'validation');
+  assert.equal(failure.retryable, false);
+  assert.equal(failure.retryAfterMs, undefined, 'never advertise a cap reset');
+  assert.match(failure.operatorText, /90 s duration/);
+});
+
 test('a bare throttle that does not name Reels is NOT reported as a Reels quota', () => {
   const err = graphError('(#4) Application request limit reached', {
     code: 4,
@@ -1108,6 +1640,52 @@ test('a bare throttle that does not name Reels is NOT reported as a Reels quota'
   assert.equal(failure.category, 'rate_limit');
   assert.equal(failure.retryable, true);
   assert.equal(failure.retryAfterMs, 60_000);
+});
+
+test("core's generic throttle default is not reported as Graph's reset estimate for the Reels cap", () => {
+  // Built through core's own classifier, exactly as the transport builds it.
+  // The BUC row stamps its generic 60 s throttle default into `retryAfterMs`
+  // when the envelope carries no ETA, so a Reels cap with no ETA reaches this
+  // module holding a number Graph never sent.
+  const cause = toGraphApiError(
+    {
+      message: 'You have reached the maximum number of Reels you can publish in 24 hours',
+      code: 80004,
+    },
+    400,
+  );
+  assert.equal(cause.action?.retryAfterMs, DEFAULT_THROTTLE_RETRY_AFTER_MS);
+
+  const failure = classifyReelFailure(cause, 'finish');
+
+  assert.equal(failure.kind, 'quota');
+  assert.doesNotMatch(
+    failure.operatorText,
+    /Graph estimates access returns in about 1 minutes/,
+    'a 24 h rolling cap must not be advertised as clearing in a minute Graph never quoted',
+  );
+  assert.match(failure.operatorText, /Graph did not supply an ETA/);
+  assert.equal(failure.retryAfterMs, REEL_QUOTA_DEFAULT_RESET_MS);
+});
+
+test('a Reels cap with a real Graph ETA still surfaces that ETA', () => {
+  const cause = toGraphApiError(
+    {
+      message: 'You have reached the maximum number of Reels you can publish in 24 hours',
+      code: 80004,
+      estimated_time_to_regain_access: 42,
+    },
+    400,
+  );
+
+  const failure = classifyReelFailure(cause, 'finish');
+
+  assert.equal(failure.kind, 'quota');
+  assert.equal(failure.retryAfterMs, 42 * MINUTE);
+  assert.match(
+    failure.operatorText,
+    /Graph estimates access returns in about 42 minutes/,
+  );
 });
 
 test('isReelQuotaError recognises an already-wrapped quota failure', () => {
@@ -1153,6 +1731,20 @@ test('wrapReelError preserves the Graph envelope and keeps the original as cause
   assert.equal(wrapped.reel.category, 'auth');
   assert.equal(wrapped.action?.nextTool, 'facebook_whoami');
   assert.equal(wrapReelError(wrapped, 'finish'), wrapped, 'wrapping is idempotent');
+});
+
+test("wrapReelError keeps Meta's user-facing title and message", () => {
+  const cause = new GraphApiError('(#100) Invalid parameter', {
+    code: 100,
+    httpStatus: 400,
+    userTitle: 'Video Too Long',
+    userMessage: 'Reels must be 90 seconds or shorter.',
+  });
+
+  const wrapped = wrapReelError(cause, 'finish');
+
+  assert.equal(wrapped.userTitle, 'Video Too Long');
+  assert.equal(wrapped.userMessage, 'Reels must be 90 seconds or shorter.');
 });
 
 test('wrapReelError copes with a non-Graph throw', () => {
@@ -1327,4 +1919,150 @@ test('two concurrent publishes share no module state', async () => {
   assert.equal(second.session.uploadPath, '/video-upload/v25.0/reel-b');
   assert.equal(a.fb.calls.length, 4);
   assert.equal(b.fb.calls.length, 5);
+});
+
+/** Types a deliberately non-Error throwable so it can be thrown or rejected. */
+function notAnError(value: object): Error {
+  return value as Error;
+}
+
+test('a sink that throws a non-Error still never fails the commit, and the log keeps its text', async () => {
+  for (const [thrown, expected] of [
+    [{ message: 'transport closing' }, 'transport closing'],
+    [Object.create(null) as object, 'unknown error (no message)'],
+  ] as const) {
+    const { fb, logger, clock } = harness();
+    fb.on(isFinishCall, fbOk({ success: true, post_id: '111_222' }));
+    const deps: ReelsDeps = {
+      fbRequest: fb.fn,
+      logger,
+      clock,
+      settings: WIRE,
+      onProgress: () => {
+        throw notAnError(thrown);
+      },
+    };
+
+    const result = await finishReelUpload(deps, {
+      pageId: PAGE_ID,
+      videoId: VIDEO_ID,
+      videoState: 'PUBLISHED',
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(
+      fb.calls.filter(isFinishCall).length,
+      1,
+      'the commit still reached Graph',
+    );
+    const logged = logger.entries.filter((e) => e.msg === 'reels.progress.failed');
+    assert.ok(logged.length > 0);
+    for (const entry of logged) assert.equal(entry.fields?.error, expected);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Verify tools (wave 19): which read can show a Reel write that may have landed
+// ---------------------------------------------------------------------------
+
+function ambiguousFinishError(): GraphApiError {
+  return graphError('network fault: socket hang up', {
+    code: 0,
+    category: 'ambiguous',
+    retryable: false,
+  });
+}
+
+function finishInputFor(state: 'PUBLISHED' | 'DRAFT' | 'SCHEDULED') {
+  return {
+    pageId: PAGE_ID,
+    videoId: VIDEO_ID,
+    videoState: state,
+    ...(state === 'SCHEDULED'
+      ? { scheduledPublishTime: Math.floor((NOW + DAY) / 1000) }
+      : {}),
+  } as const;
+}
+
+test('a PUBLISHED finish stamps facebook_list_reels as its verify tool, and an ambiguous outcome names it', async () => {
+  const { fb, deps } = harness();
+  fb.on(isFinishCall, fbErr(ambiguousFinishError()));
+
+  const err = await expectReelError(() =>
+    finishReelUpload(deps, finishInputFor('PUBLISHED')),
+  );
+
+  // The request the api layer sent carries the verify tool core names on an
+  // ambiguous fault (timeout, network fault, 5xx on this non-idempotent POST).
+  assert.equal(jsonOf(fb.lastRequest()).verifyTool, 'facebook_list_reels');
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.equal(err.reel.nextTool, 'facebook_list_reels');
+  assert.equal(err.action?.nextTool, 'facebook_list_reels');
+  assert.match(err.reel.operatorText, /verify via facebook_list_reels/);
+  assert.ok(err.reel.operatorText.includes(VIDEO_ID));
+});
+
+test('a DRAFT or SCHEDULED finish verifies by video_id via facebook_get_video_status, not the Reels listing', async () => {
+  for (const state of ['DRAFT', 'SCHEDULED'] as const) {
+    const { fb, deps } = harness();
+    fb.on(isFinishCall, fbErr(ambiguousFinishError()));
+
+    const err = await expectReelError(() =>
+      finishReelUpload(deps, finishInputFor(state)),
+    );
+
+    assert.equal(jsonOf(fb.lastRequest()).verifyTool, 'facebook_get_video_status', state);
+    assert.equal(err.reel.kind, 'ambiguous', state);
+    assert.equal(err.reel.nextTool, 'facebook_get_video_status', state);
+    assert.equal(err.action?.nextTool, 'facebook_get_video_status', state);
+    assert.match(err.reel.operatorText, /verify via facebook_get_video_status/, state);
+    // The generic ambiguous text must not send a draft/scheduled Reel to an edge
+    // it is not known to appear on, as a second, conflicting instruction.
+    assert.doesNotMatch(
+      err.reel.operatorText,
+      /read GET \/\{page-id\}\/video_reels instead/,
+      state,
+    );
+  }
+});
+
+test('a locally raised ambiguous finish (success:false, caller abort) names the same verify tool', async () => {
+  const unconfirmed = harness();
+  unconfirmed.fb.on(isFinishCall, fbOk({ success: false }));
+  const err = await expectReelError(() =>
+    finishReelUpload(unconfirmed.deps, finishInputFor('PUBLISHED')),
+  );
+  assert.equal(err.reel.kind, 'ambiguous');
+  assert.equal(err.reel.nextTool, 'facebook_list_reels');
+  assert.equal(err.action?.nextTool, 'facebook_list_reels');
+
+  const aborted = harness();
+  const abort = new Error('This operation was aborted');
+  abort.name = 'AbortError';
+  aborted.fb.on(isFinishCall, fbErr(abort));
+  const abortErr = await expectReelError(() =>
+    finishReelUpload(aborted.deps, finishInputFor('DRAFT')),
+  );
+  assert.equal(abortErr.reel.kind, 'ambiguous');
+  assert.equal(abortErr.reel.nextTool, 'facebook_get_video_status');
+  assert.equal(abortErr.action?.nextTool, 'facebook_get_video_status');
+});
+
+test('the start and transfer requests name no verify tool', async () => {
+  const { fb, deps } = harness();
+  programHappyPath(fb);
+
+  await publishReel(deps, {
+    pageId: PAGE_ID,
+    data: new Uint8Array([1, 2, 3, 4]),
+    videoState: 'PUBLISHED',
+  });
+
+  const start = fb.calls.find(isStartCall);
+  const transfer = fb.calls.find(isTransferCall);
+  assert.ok(start !== undefined && transfer !== undefined);
+  // Start reserves an id nothing lists; transfer is offset-idempotent and never
+  // ambiguous. Neither may point the caller at a listing.
+  assert.equal(start.verifyTool, undefined);
+  assert.equal(transfer.verifyTool, undefined);
 });

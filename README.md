@@ -194,7 +194,8 @@ one** of the token variables below; the most specific wins (`FB_SYSTEM_TOKEN` �
   assign it.
 - **`FB_ACCESS_TOKEN`** — a Meta user access token (a long-lived one preferred).
 - **`FB_PAGE_TOKEN`** — a long-lived **Page token**, the no-Business-Manager
-  fallback.
+  fallback. It belongs to exactly one Page, so set `FB_PAGE_ID` to that Page
+  alongside it (`doctor` / `facebook_whoami` reports it as the acting Page).
 
 Grant only the permissions the packages you enable actually need
 ([full list below](#permissions-you-need-to-grant)), and set **`FB_APP_SECRET`**
@@ -212,7 +213,22 @@ token and writes the env file for you (`--page=<id>`, `--env-file=<path>`,
 Then run `node build/index.js doctor` before anything else: it inspects the
 token, reports type, expiry and granted scopes, and prints a per-package
 usable / partial / blocked matrix so you find a missing permission before a tool
-call does.
+call does. It ends with a one-line verdict over everything it found.
+
+The doctor is a report, so it exits 0 whatever it finds — a wrapper that runs it
+for the text keeps working. Add `--strict` to make it a gate instead:
+
+| Verdict   | With `--strict` | Means                                                                                                                                                       |
+| --------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OK`      | exit 0          | Nothing needs attention.                                                                                                                                    |
+| `WARN`    | exit 1          | The server will run, but something is degraded (partial scopes, a token about to expire, a world-readable env file, a metric name Graph no longer accepts). |
+| `UNKNOWN` | exit 1          | A check could not be completed — typically `debug_token` was unreachable, so the credential is unverified rather than bad.                                  |
+| `FAIL`    | exit 2          | This configuration cannot serve requests: no token, a token Graph rejects, revoked asset access, or no usable package.                                      |
+
+`UNKNOWN` outranks `WARN` on purpose: "nothing was established" must not hide
+behind "degraded". A platform without POSIX permission bits raises no finding for
+the credential file — there is no `chmod` to recommend there, and a warning
+nothing can clear would make `--strict` permanently red on Windows.
 
 `node build/index.js --version` (or `-v`) prints the server, Node and MCP SDK
 versions on one line and exits — it needs no credential, so it still answers on
@@ -225,9 +241,12 @@ facebook-mcp 0.7.0 (node v22.23.0, darwin arm64, sdk 1.30.0)
 The bare server version is always the second field, so `--version | awk '{print
 $2}'` keeps working. The same three versions plus the pinned Graph API version
 are reported by `facebook_whoami` in its `server` object (`name`, `version`,
-`apiVersion`, `sdkVersion`). `doctor`, `setup-token` and `--version` are the only
-arguments that exit on their own; **anything else starts the stdio server** and
-waits on JSON-RPC.
+`apiVersion`, `sdkVersion`). `--help` (or `-h`) prints the command summary to
+stdout and exits 0, again without reading any credential. `doctor`, `setup-token`,
+`--version` and `--help` are the only arguments that exit on their own; **anything
+else starts the stdio server** and waits on JSON-RPC. An argument `doctor` does not
+recognise (say `--stric`) never gates, but the report names it — option names
+only, never a value — so a mistyped `--strict` in CI is visible.
 
 ### Environment variables
 
@@ -236,34 +255,34 @@ Provide at least one token; everything else is optional tuning. Variables marked
 
 <!-- BEGIN GENERATED: env -->
 
-| Variable                    | Required |                 Default                  | Description                                                                                                              |
-| --------------------------- | :------: | :--------------------------------------: | ------------------------------------------------------------------------------------------------------------------------ |
-| `FB_SYSTEM_TOKEN`           | one of¹  |                    —                     | **Secret.** System User token (Business Manager). Recommended; wins over the other two.                                  |
-| `FB_ACCESS_TOKEN`           | one of¹  |                    —                     | **Secret.** Meta user access token (a long-lived one preferred).                                                         |
-| `FB_PAGE_TOKEN`             | one of¹  |                    —                     | **Secret.** Long-lived Page token — the no-Business-Manager fallback.                                                    |
-| `FB_APP_ID`                 |    no    |                    —                     | Meta app ID. With `FB_APP_SECRET` it forms the app token used to inspect tokens.                                         |
-| `FB_APP_SECRET`             |    no    |                    —                     | **Secret.** When set, `appsecret_proof` is attached so a stolen bare token is unusable.                                  |
-| `FB_PAGE_ID`                |    no    |                    —                     | Default Page ID for Page-scoped tools when a call omits `profile`.                                                       |
-| `FB_API_VERSION`            |    no    |                 `v23.0`                  | Graph API version to pin. Off-default values are accepted, but only the default is tested.                               |
-| `FB_REQUEST_TIMEOUT_MS`     |    no    |                 `60000`                  | Per-request timeout in milliseconds (1–600000).                                                                          |
-| `FB_HOST_CONCURRENCY`       |    no    |                   `4`                    | Max parallel requests per Graph host (1–64).                                                                             |
-| `FB_MAX_RESULT_CHARS`       |    no    |                 `25000`                  | Character budget before a tool result is truncated (500–10000000).                                                       |
-| `FB_WRITE_MODE`             |    no    |                  `plan`                  | `plan` (default) previews a write without mutating; `apply` executes. Never covers the irreversible/spend tiers.         |
-| `FB_CONFIRM_TOKEN`          |    no    |                    —                     | **Secret.** Out-of-band confirmation token authorizing gated write / spend actions, for clients that cannot prompt.      |
-| `FB_MEDIA_DIR`              |    no    |                    —                     | Directory permitted as a source for local media uploads. Unset ⇒ URL-only, local file access disabled.                   |
-| `FB_JOURNAL_PATH`           |    no    |        XDG / %APPDATA% state path        | Path to the append-only, rotating write journal (0600).                                                                  |
-| `FB_TOOL_PACKAGES`          |    no    | core profile (all packages except `ads`) | Comma-separated packages or profiles to enable. `core` is always forced on; `ads` is opt-in.                             |
-| `FB_PACKAGES_DENY`          |    no    |                    —                     | Packages to exclude even if enabled by `FB_TOOL_PACKAGES`.                                                               |
-| `FB_PACKAGES_READONLY`      |    no    |                    —                     | Packages whose write tools are not registered; their read tools stay.                                                    |
-| `FB_TRANSPORT`              |    no    |                 `stdio`                  | `stdio` (default) or `http` (loopback-only Streamable HTTP for local agent clients).                                     |
-| `FB_HTTP_TOKEN`             | if http  |                    —                     | **Secret.** Bearer token required by the `http` transport; it fails closed without it.                                   |
-| `FB_HTTP_PORT`              |    no    |                  `3000`                  | TCP port for the `http` transport (the bind host is fixed to loopback `127.0.0.1`).                                      |
-| `FB_AD_ACCOUNT_ID`          |    no    |                    —                     | Ad account ID for the opt-in `ads` package.                                                                              |
-| `FB_ADS_BUDGET_CEILING`     |    no    |                    —                     | Hard budget ceiling for ads writes, in minor currency units (non-negative integer).                                      |
-| `FB_LOG_LEVEL`              |    no    |                  `info`                  | Stderr log verbosity: `debug`, `info`, `warn`, `error`.                                                                  |
-| `FB_SETUP_TOKEN`            |    no    |                    —                     | **Secret.** Short-lived user token consumed once by `setup-token`; the safe alternative to passing it as a CLI argument. |
-| `FB_PROFILE_<NAME>_PAGE_ID` |    no    |                    —                     | Page ID for a named profile, e.g. FB_PROFILE_BRAND_A_PAGE_ID.                                                            |
-| `FB_PROFILE_<NAME>_TOKEN`   |    no    |                    —                     | **Secret.** Optional per-profile token override for the matching FB_PROFILE_<NAME>_PAGE_ID.                              |
+| Variable                    | Required |                 Default                  | Description                                                                                                                                                                       |
+| --------------------------- | :------: | :--------------------------------------: | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FB_SYSTEM_TOKEN`           | one of¹  |                    —                     | **Secret.** System User token (Business Manager). Recommended; wins over the other two.                                                                                           |
+| `FB_ACCESS_TOKEN`           | one of¹  |                    —                     | **Secret.** Meta user access token (a long-lived one preferred).                                                                                                                  |
+| `FB_PAGE_TOKEN`             | one of¹  |                    —                     | **Secret.** Long-lived Page token — the no-Business-Manager fallback. Belongs to exactly one Page: set `FB_PAGE_ID` to that Page alongside it, or no Page-scoped tool can use it. |
+| `FB_APP_ID`                 |    no    |                    —                     | Meta app ID. With `FB_APP_SECRET` it forms the app token used to inspect tokens.                                                                                                  |
+| `FB_APP_SECRET`             |    no    |                    —                     | **Secret.** When set, `appsecret_proof` is attached so a stolen bare token is unusable.                                                                                           |
+| `FB_PAGE_ID`                |    no    |                    —                     | Default Page ID for Page-scoped tools when a call omits `profile`. Required when `FB_PAGE_TOKEN` is the only credential (it names the Page the token belongs to).                 |
+| `FB_API_VERSION`            |    no    |                 `v23.0`                  | Graph API version to pin. Off-default values are accepted, but only the default is tested.                                                                                        |
+| `FB_REQUEST_TIMEOUT_MS`     |    no    |                 `60000`                  | Per-request timeout in milliseconds (1–600000).                                                                                                                                   |
+| `FB_HOST_CONCURRENCY`       |    no    |                   `4`                    | Max parallel requests per Graph host (1–64).                                                                                                                                      |
+| `FB_MAX_RESULT_CHARS`       |    no    |                 `25000`                  | Character budget before a tool result is truncated (500–10000000).                                                                                                                |
+| `FB_WRITE_MODE`             |    no    |                  `plan`                  | `plan` (default) previews a write without mutating; `apply` executes. Never covers the irreversible/spend tiers.                                                                  |
+| `FB_CONFIRM_TOKEN`          |    no    |                    —                     | **Secret.** Out-of-band confirmation token authorizing gated write / spend actions, for clients that cannot prompt. At least 16 characters.                                       |
+| `FB_MEDIA_DIR`              |    no    |                    —                     | Directory permitted as a source for local media uploads. Unset ⇒ URL-only, local file access disabled.                                                                            |
+| `FB_JOURNAL_PATH`           |    no    |        XDG / %APPDATA% state path        | Path to the append-only, rotating write journal (0600).                                                                                                                           |
+| `FB_TOOL_PACKAGES`          |    no    | core profile (all packages except `ads`) | Comma-separated packages or profiles to enable. `core` is always forced on; `ads` is opt-in.                                                                                      |
+| `FB_PACKAGES_DENY`          |    no    |                    —                     | Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.                                                                      |
+| `FB_PACKAGES_READONLY`      |    no    |                    —                     | Packages or profiles whose write tools are not registered; their read tools stay.                                                                                                 |
+| `FB_TRANSPORT`              |    no    |                 `stdio`                  | `stdio` (default) or `http` (loopback-only Streamable HTTP for local agent clients).                                                                                              |
+| `FB_HTTP_TOKEN`             | if http  |                    —                     | **Secret.** Bearer token required by the `http` transport; it fails closed without it. At least 16 characters.                                                                    |
+| `FB_HTTP_PORT`              |    no    |                  `3000`                  | TCP port for the `http` transport (the bind host is fixed to loopback `127.0.0.1`).                                                                                               |
+| `FB_AD_ACCOUNT_ID`          |    no    |                    —                     | Ad account ID for the opt-in `ads` package.                                                                                                                                       |
+| `FB_ADS_BUDGET_CEILING`     |    no    |                    —                     | Hard budget ceiling for ads writes, in minor units of the ad account currency (non-negative integer, no currency conversion).                                                     |
+| `FB_LOG_LEVEL`              |    no    |                  `info`                  | Stderr log verbosity: `debug`, `info`, `warn`, `error`.                                                                                                                           |
+| `FB_SETUP_TOKEN`            |    no    |                    —                     | **Secret.** Short-lived user token consumed once by `setup-token`; the safe alternative to passing it as a CLI argument.                                                          |
+| `FB_PROFILE_<NAME>_PAGE_ID` |    no    |                    —                     | Page ID for a named profile, e.g. FB_PROFILE_BRAND_A_PAGE_ID.                                                                                                                     |
+| `FB_PROFILE_<NAME>_TOKEN`   |    no    |                    —                     | **Secret.** Optional per-profile token override for the matching FB_PROFILE_<NAME>_PAGE_ID.                                                                                       |
 
 ¹ Provide at least one of `FB_SYSTEM_TOKEN`, `FB_ACCESS_TOKEN` or `FB_PAGE_TOKEN`.
 A full, commented template lives in [`.env.example`](.env.example).
@@ -280,58 +299,58 @@ against what your token really has and prints a per-package usable / partial /
 blocked matrix. `business_management` is deliberately **not** in this list — it
 is a setup-only permission that should never ride on a runtime token.
 
-| Package      | Required Graph permissions                             |
-| ------------ | ------------------------------------------------------ |
-| `core`       | `pages_show_list`<br>`pages_read_engagement`           |
-| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`   |
-| `posts`      | `pages_manage_posts`<br>`pages_read_engagement`        |
-| `insights`   | `read_insights`                                        |
-| `moderation` | `pages_read_user_content`<br>`pages_manage_engagement` |
-| `messages`   | `pages_messaging`<br>`pages_manage_metadata`           |
-| `ads`        | `ads_read`<br>`ads_management`                         |
+| Package      | Required Graph permissions                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------ |
+| `core`       | `pages_show_list`<br>`pages_read_engagement`                                                           |
+| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`                                                   |
+| `posts`      | `pages_manage_posts`<br>`pages_read_engagement`                                                        |
+| `insights`   | `read_insights`                                                                                        |
+| `moderation` | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_manage_engagement`<br>`pages_messaging` |
+| `messages`   | `pages_messaging`<br>`pages_manage_metadata`                                                           |
+| `ads`        | `ads_read`<br>`ads_management`                                                                         |
 
 <details>
 <summary>Per-tool scopes (a tool marked <em>inherited</em> has no finer mapping and falls back to its package set)</summary>
 
-| Tool                            | Required Graph permissions                                         |
-| ------------------------------- | ------------------------------------------------------------------ |
-| `facebook_whoami`               | _(none — the token itself is enough)_                              |
-| `facebook_list_pages`           | `pages_show_list`                                                  |
-| `facebook_get_page`             | `pages_read_engagement`                                            |
-| `facebook_usage`                | _(none — the token itself is enough)_                              |
-| `facebook_list_posts`           | `pages_read_engagement`                                            |
-| `facebook_get_post`             | `pages_read_engagement`                                            |
-| `facebook_list_reels`           | `pages_read_engagement`                                            |
-| `facebook_get_reactions`        | `pages_read_engagement`                                            |
-| `facebook_create_post`          | `pages_manage_posts`                                               |
-| `facebook_create_photo_post`    | `pages_manage_posts`                                               |
-| `facebook_create_video_post`    | `pages_manage_posts`                                               |
-| `facebook_create_reel`          | `pages_manage_posts`                                               |
-| `facebook_update_post`          | `pages_manage_posts`                                               |
-| `facebook_delete_post`          | `pages_manage_posts`                                               |
-| `facebook_list_scheduled_posts` | `pages_read_engagement`                                            |
-| `facebook_get_video_status`     | `pages_manage_posts`, `pages_read_engagement` _(inherited)_        |
-| `facebook_page_insights`        | `read_insights`                                                    |
-| `facebook_post_insights`        | `read_insights`                                                    |
-| `facebook_reel_insights`        | `read_insights`                                                    |
-| `facebook_list_comments`        | `pages_read_user_content`                                          |
-| `facebook_get_comment`          | `pages_read_user_content`                                          |
-| `facebook_reply_to_comment`     | `pages_manage_engagement`                                          |
-| `facebook_hide_comment`         | `pages_manage_engagement`                                          |
-| `facebook_delete_comment`       | `pages_manage_engagement`, `pages_read_user_content`               |
-| `facebook_private_reply`        | `pages_messaging`, `pages_manage_engagement`                       |
-| `facebook_block_user`           | `pages_read_user_content`, `pages_manage_engagement` _(inherited)_ |
-| `facebook_unblock_user`         | `pages_read_user_content`, `pages_manage_engagement` _(inherited)_ |
-| `facebook_list_conversations`   | `pages_messaging`, `pages_manage_metadata`                         |
-| `facebook_get_conversation`     | `pages_messaging`, `pages_manage_metadata`                         |
-| `facebook_send_message`         | `pages_messaging`                                                  |
-| `facebook_list_campaigns`       | `ads_read`                                                         |
-| `facebook_list_adsets`          | `ads_read`                                                         |
-| `facebook_list_ads`             | `ads_read`                                                         |
-| `facebook_get_ad_object`        | `ads_read`                                                         |
-| `facebook_ads_insights`         | `ads_read`                                                         |
-| `facebook_ads_report_status`    | `ads_read`                                                         |
-| `facebook_update_ad_object`     | `ads_management`                                                   |
+| Tool                            | Required Graph permissions                                            |
+| ------------------------------- | --------------------------------------------------------------------- |
+| `facebook_whoami`               | _(none — the token itself is enough)_                                 |
+| `facebook_list_pages`           | `pages_show_list`                                                     |
+| `facebook_get_page`             | `pages_read_engagement`                                               |
+| `facebook_usage`                | _(none — the token itself is enough)_                                 |
+| `facebook_list_posts`           | `pages_read_engagement`                                               |
+| `facebook_get_post`             | `pages_read_engagement`                                               |
+| `facebook_list_reels`           | `pages_read_engagement`                                               |
+| `facebook_get_reactions`        | `pages_read_engagement`                                               |
+| `facebook_create_post`          | `pages_manage_posts`                                                  |
+| `facebook_create_photo_post`    | `pages_manage_posts`                                                  |
+| `facebook_create_video_post`    | `pages_manage_posts`                                                  |
+| `facebook_create_reel`          | `pages_manage_posts`                                                  |
+| `facebook_update_post`          | `pages_manage_posts`                                                  |
+| `facebook_delete_post`          | `pages_manage_posts`                                                  |
+| `facebook_list_scheduled_posts` | `pages_read_engagement`                                               |
+| `facebook_get_video_status`     | `pages_read_engagement`                                               |
+| `facebook_page_insights`        | `read_insights`                                                       |
+| `facebook_post_insights`        | `read_insights`                                                       |
+| `facebook_reel_insights`        | `read_insights`                                                       |
+| `facebook_list_comments`        | `pages_read_engagement`, `pages_read_user_content`                    |
+| `facebook_get_comment`          | `pages_read_engagement`, `pages_read_user_content`                    |
+| `facebook_reply_to_comment`     | `pages_manage_engagement`                                             |
+| `facebook_hide_comment`         | `pages_manage_engagement`                                             |
+| `facebook_delete_comment`       | `pages_manage_engagement`, `pages_read_user_content`                  |
+| `facebook_private_reply`        | `pages_messaging`, `pages_read_engagement`, `pages_read_user_content` |
+| `facebook_block_user`           | `pages_manage_engagement`                                             |
+| `facebook_unblock_user`         | `pages_manage_engagement`                                             |
+| `facebook_list_conversations`   | `pages_messaging`, `pages_manage_metadata`                            |
+| `facebook_get_conversation`     | `pages_messaging`, `pages_manage_metadata`                            |
+| `facebook_send_message`         | `pages_messaging`                                                     |
+| `facebook_list_campaigns`       | `ads_read`                                                            |
+| `facebook_list_adsets`          | `ads_read`                                                            |
+| `facebook_list_ads`             | `ads_read`                                                            |
+| `facebook_get_ad_object`        | `ads_read`                                                            |
+| `facebook_ads_insights`         | `ads_read`                                                            |
+| `facebook_ads_report_status`    | `ads_read`                                                            |
+| `facebook_update_ad_object`     | `ads_management`                                                      |
 
 </details>
 
@@ -342,6 +361,14 @@ is a setup-only permission that should never ride on a runtime token.
 Packages are the unit of exposure: you enable and disable whole packages with
 `FB_TOOL_PACKAGES`, and `FB_PACKAGES_READONLY` drops a package's write tools
 while keeping its reads.
+
+All three package variables share one namespace of packages **and** profiles
+(`core`, `all`, `reader`, `publisher`, `moderator`, `ads`), and a profile name
+wins over a same-spelled package. That matters most in `FB_PACKAGES_DENY`:
+`FB_PACKAGES_DENY=core` denies the six-package **core profile**, not the single
+`core` package — and the `core` package is then forced back on anyway, since its
+identity and rate-limit tools are how you diagnose the surface you just narrowed.
+A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: packages -->
 
@@ -399,7 +426,7 @@ while keeping its reads.
 | `ads`        | `facebook_get_ad_object`        |     `read`     | Read one campaign, ad set or ad by id.                                                                                                                                     |
 | `ads`        | `facebook_ads_insights`         |     `read`     | Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad.                                                          |
 | `ads`        | `facebook_ads_report_status`    |     `read`     | Probe one async insights report run and, with fetch_results:true, read its rows once it has completed.                                                                     |
-| `ads`        | `facebook_update_ad_object`     | `irreversible` | Pause or resume an ads object, or change its budget.                                                                                                                       |
+| `ads`        | `facebook_update_ad_object`     |    `spend`     | Pause or resume an ads object, or change its budget.                                                                                                                       |
 
 <!-- END GENERATED -->
 

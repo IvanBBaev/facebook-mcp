@@ -6,8 +6,9 @@
 //   * `buildServer(deps)` — a pure, dependency-injected builder. It resolves the
 //     active tool set via the registry, registers a `tools/list` + `tools/call`
 //     handler pair on a low-level MCP `Server`, assembles a per-call
-//     `ToolContext` (plus the write-gate + confirmer seam), invokes the matching
-//     tool handler and maps any thrown error to an error `ToolResult` through the
+//     `ToolContext` (plus the write-gate + confirmer seam), emits the one
+//     allowlisted log line the called spec authorizes, invokes the matching tool
+//     handler and maps any thrown error to an error `ToolResult` through the
 //     redaction choke-point. It never reads env, never touches process streams,
 //     never opens a transport — a test drives it over an in-memory transport.
 //
@@ -45,22 +46,29 @@ import {
 import {
   assertStartupOk,
   createFbRequest,
+  createHostSemaphores,
+  createUploadHandler,
+  usageOfGraphError,
   createLogger,
   createPagesRegistry,
   createRedactor,
+  errorMessageOf,
   GraphApiError,
+  isPageTokenDead,
   loadSettings,
   type Clock,
   type ConfirmationRequest,
   type Confirmer,
   type FbRequestFn,
   type Journal,
+  type LogFields,
   type Logger,
   type PackageSpec,
   type PageResolver,
   type ProgressReporter,
   type Redactor,
   type Settings,
+  type StartupReport,
   type ToolContext,
   type ToolResult,
   type ToolSpec,
@@ -71,6 +79,7 @@ import {
   createJournal,
   createRegistry,
   createWriteGate,
+  doctorExitCode,
   parseSetupTokenArgs,
   renderDoctorReport,
   renderSetupTokenReport,
@@ -80,6 +89,8 @@ import {
   startTransport,
   WriteGateError,
   type AdAccountProbe,
+  type DoctorDeps,
+  type DoctorReport,
   type ConnectableServer,
   type ElicitCapability,
   type MetricProbe,
@@ -90,6 +101,7 @@ import { fetchInsights, PAGE_INSIGHTS_LIKES_FLOOR } from './api/insights.js';
 import {
   createAdsPackage,
   createCorePackage,
+  graphErrorFields,
   createInsightsPackage,
   createMessagesPackage,
   createModerationPackage,
@@ -192,6 +204,20 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
     return gate;
   };
 
+  // A name the registry dropped by configuration is not a typo: "unknown tool"
+  // sends the model hunting for a spelling, while the fix is an operator's
+  // package setting. Name the package and the variable that removed it.
+  const unadvertisedToolMessage = (name: string): string => {
+    const owner = deps.packages.find((pkg) =>
+      pkg.tools.some((tool) => tool.name === name),
+    );
+    if (owner === undefined) return `unknown tool: ${name}`;
+    const reason = registry.packageNames.some((loaded) => loaded === owner.name)
+      ? `FB_PACKAGES_READONLY drops the write tools of package '${owner.name}'`
+      : `package '${owner.name}' is not loaded (FB_TOOL_PACKAGES does not select it, or FB_PACKAGES_DENY removes it)`;
+    return `tool ${name} is disabled in this deployment: ${reason}. Retrying will not help; an operator must change that setting and restart the server.`;
+  };
+
   // tools/list — advertise every resolved spec (schemas converted lazily here).
   server.setRequestHandler(ListToolsRequestSchema, () => ({
     tools: registry.tools.map(toMcpTool),
@@ -206,7 +232,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       // error result rather than throwing a raw protocol error.
       return toCallToolResult(
         shapeResult(
-          { error: `unknown tool: ${request.params.name}` },
+          { error: unadvertisedToolMessage(request.params.name) },
           { maxResultChars: settings.maxResultChars, redactor, isError: true },
         ),
       );
@@ -214,10 +240,11 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
 
     const profile = extractProfile(args);
     const reportProgress = progressReporterFor(extra, deps.logger);
+    const tracked = trackResolvedPages(deps.pages);
     const ctx: ToolCallContext = {
       settings,
       fbRequest: deps.fbRequest,
-      pages: deps.pages,
+      pages: tracked.pages,
       logger: deps.logger,
       redactor,
       clock: deps.clock,
@@ -229,10 +256,28 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       confirmer,
     };
 
+    // The log-hygiene control (04 §"Log hygiene"): at most ONE structured line
+    // per call, carrying the tool name and only what `spec.logFields` allowlists.
+    // It is emitted BEFORE the handler runs — a line written only on success is
+    // missing for exactly the calls worth diagnosing (a throw, a hang, a call
+    // that took the process down), and the failure path already ships its own
+    // redacted error result, so a second line after the fact adds nothing.
+    // Logging pre-handler means logging RAW, unvalidated arguments: the strict
+    // parse happens inside `spec.handler`, which is why the projection below
+    // trusts neither the declared type of a value nor the caller.
+    const logged = allowlistedLogFields(spec, args, redactor);
+    if (logged !== undefined) deps.logger.info('tool call', logged);
+
     try {
       const result = await spec.handler(args, ctx);
       return toCallToolResult(result);
     } catch (err) {
+      // The C1 invalidate-on-190 hook, driven from the one place every thrown
+      // Graph refusal passes: a Page token Graph just called dead is dropped so
+      // the model's retry re-derives instead of replaying it from the cache.
+      if (invalidatesPageToken(err)) {
+        for (const pageId of tracked.resolved) deps.pages.invalidate(pageId);
+      }
       return toCallToolResult(
         shapeResult(buildErrorRecord(err), {
           maxResultChars: settings.maxResultChars,
@@ -296,7 +341,7 @@ function progressReporterFor(
         },
       }))().catch((err: unknown) => {
       logger.debug('progress notification failed', {
-        error: err instanceof Error ? err.message : String(err),
+        error: errorMessageOf(err),
       });
     });
   };
@@ -399,6 +444,74 @@ function toCallToolResult(result: ToolResult): CallToolResult {
 }
 
 /**
+ * Wrap the shared {@link PageResolver} for ONE call so the hub knows which
+ * Page(s) the handler resolved a token for. The registry's cache would otherwise
+ * keep serving a Page token Graph has already refused until its TTL expires
+ * (15 min), and every retry the model makes in that window fails the same way:
+ * no handler reports a dead token back, so the hub does it on their behalf.
+ *
+ * Invalidating a Page whose token is a configured override is harmless — the
+ * registry returns an override before consulting the cache, so nothing is lost.
+ */
+function trackResolvedPages(pages: PageResolver): {
+  readonly pages: PageResolver;
+  readonly resolved: ReadonlySet<string>;
+} {
+  const resolved = new Set<string>();
+  return {
+    pages: {
+      resolvePage: async (profile) => {
+        const page = await pages.resolvePage(profile);
+        resolved.add(page.pageId);
+        return page;
+      },
+      invalidate: (pageId) => {
+        pages.invalidate(pageId);
+      },
+    },
+    resolved,
+  };
+}
+
+/**
+ * Whether a thrown error proves the resolved Page token worthless: core/auth's
+ * {@link isPageTokenDead} (190, 102, or 100 with a stale-object subcode — the
+ * resolver cache's own CC-AUTH-7 signal) on the error or anywhere down its
+ * `cause` chain, bounded at depth 4. A tool that re-words a Graph refusal into
+ * its own error keeps the original as `cause`; reading only the top level would
+ * leave that dead token cached for the rest of its TTL. Anything else says
+ * nothing about the Page token and leaves the cache alone.
+ */
+function invalidatesPageToken(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    if (isPageTokenDead(current)) return true;
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
+
+/**
+ * The compact usage figures of the response a Graph error was raised for — the
+ * percentage of each bucket Meta reported — or `undefined` when that response
+ * carried none. Only the parsed percentages ship: the raw header bag is
+ * unbounded and adds nothing the model can act on.
+ */
+function usageRecord(err: unknown): Record<string, number> | undefined {
+  const snapshot = usageOfGraphError(err);
+  if (snapshot === undefined) return undefined;
+  const usage: Record<string, number> = {};
+  if (snapshot.appUsagePct !== undefined) usage['appUsagePct'] = snapshot.appUsagePct;
+  if (snapshot.businessUseCasePct !== undefined) {
+    usage['businessUseCasePct'] = snapshot.businessUseCasePct;
+  }
+  if (snapshot.adsInsightsThrottlePct !== undefined) {
+    usage['adsInsightsThrottlePct'] = snapshot.adsInsightsThrottlePct;
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
+/**
  * Turn a thrown error into a redactable record for the error `ToolResult`.
  * `WriteGateError` and `GraphApiError` surface their machine-readable fields so
  * the model can self-correct; everything else degrades to a bare message. The
@@ -411,19 +524,21 @@ function toCallToolResult(result: ToolResult): CallToolResult {
  * "do NOT retry" from wording; `retryable: false` and `nextTool` state it.
  */
 function buildErrorRecord(err: unknown): Record<string, unknown> {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessageOf(err);
   if (err instanceof WriteGateError) {
     return { error: message, code: err.code, tool: err.tool, tier: err.tier };
   }
   if (err instanceof GraphApiError) {
     const action = err.action;
+    const usage = usageRecord(err);
     return {
       error: message,
-      code: err.code,
-      ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
-      ...(err.type !== undefined ? { type: err.type } : {}),
-      httpStatus: err.httpStatus,
-      ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+      // Graph's identity plus its human-readable refusal, when it sent one: on
+      // an ads or publishing rejection `error` is the generic "Invalid
+      // parameter" and userTitle/userMessage are the only reason the model can
+      // act on. Shared with the package-local envelopes, which bound Meta's
+      // text the same way so a pathological body cannot dominate the record.
+      ...graphErrorFields(err),
       ...(action !== undefined
         ? {
             action: action.operatorText,
@@ -435,9 +550,77 @@ function buildErrorRecord(err: unknown): Record<string, unknown> {
               : {}),
           }
         : {}),
+      // The usage figures of the refusing response. A throttle sends the model
+      // to facebook_usage, but that tool probes `/me` — a different call that
+      // may land in a different bucket, or be refused by the same throttle — so
+      // only this response names the bucket that refused THIS call.
+      ...(usage !== undefined ? { usage } : {}),
     };
   }
   return { error: message };
+}
+
+/**
+ * Project one call's allowlisted arguments into the fields of its log line
+ * (04 §"Log hygiene"). `spec.logFields` is the ONLY source of keys: there is no
+ * default key set and no whole-argument fallback, so a spec that declares no
+ * allowlist returns `undefined` and the call logs NOTHING. Logging an argument
+ * object nobody reviewed is the precise failure the allowlist exists to prevent.
+ *
+ * Three rules make the line safe to append to a long-lived operator log:
+ *
+ *  - the allowlist decides WHICH keys are eligible — a key the author never
+ *    named cannot reach the log however innocuous it looks;
+ *  - every surviving value still goes through the {@link Redactor}, because a
+ *    reviewed key is no guarantee about the VALUE a caller put in it (a token
+ *    pasted into `object_id` is a real shape). The allowlist is the first
+ *    defence at the C3 choke-point, never the only one. Redacting here rather
+ *    than relying on the logger's own pass is deliberate: the logger is an
+ *    injected seam, and a caller that supplies a non-redacting one must not be
+ *    able to turn this line into a leak;
+ *  - only `string` / `number` / `boolean` values are logged. Anything else is
+ *    replaced by a bare type tag: the author reviewed the KEY, and an object or
+ *    array smuggles in sub-keys nobody reviewed — and since this runs before the
+ *    strict parse, an argument's runtime shape is whatever the caller sent, not
+ *    what the schema declares. The tag keeps the diagnostic signal (the argument
+ *    was present, and it was an object) without emitting its content.
+ *
+ * An absent — or explicitly `undefined` — argument contributes nothing rather
+ * than a `null` that a genuine `null` could not be told apart from.
+ *
+ * The values ride under a nested `args` member so that an allowlisted argument
+ * named `tool` cannot displace the tool name, and no tool argument can even
+ * reach the logger's reserved `time`/`level`/`msg` keys.
+ */
+function allowlistedLogFields(
+  spec: ToolSpec,
+  args: Record<string, unknown>,
+  redactor: Redactor,
+): LogFields | undefined {
+  const allowed = spec.logFields;
+  if (allowed === undefined || allowed.length === 0) return undefined;
+
+  const projected: Record<string, unknown> = {};
+  for (const key of allowed) {
+    const value = args[key];
+    if (value === undefined) continue;
+    projected[key] =
+      typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+        ? redactor.redact(value)
+        : typeTag(value);
+  }
+  return { tool: spec.name, args: projected };
+}
+
+/**
+ * The stand-in logged for a non-scalar allowlisted argument: its SHAPE, never
+ * its content. `null` and arrays are named explicitly because `typeof` calls
+ * both `'object'`, and the difference is the whole diagnostic value of the tag.
+ */
+function typeTag(value: unknown): string {
+  if (value === null) return '[null]';
+  if (Array.isArray(value)) return '[array]';
+  return `[${typeof value}]`;
 }
 
 /** Read the optional auto-injected `profile` arg (a profile key or Page ID). */
@@ -604,6 +787,90 @@ export function isVersionFlag(arg: string | undefined): boolean {
   return arg === '--version' || arg === '-v';
 }
 
+/** Is `arg` the help flag? `-h` is an alias. */
+export function isHelpFlag(arg: string | undefined): boolean {
+  return arg === '--help' || arg === '-h';
+}
+
+/**
+ * What `--help` prints. Answered before settings are loaded, like `--version`:
+ * without it, `--help` fell through to the server start, which either hung
+ * silently on stdin (a token configured) or failed on the missing token — the
+ * operator asking how to use the binary was told neither.
+ */
+export const USAGE_TEXT = [
+  'Usage: facebook-mcp [command]',
+  '',
+  'With no command, starts the MCP server (stdio by default; FB_TRANSPORT=http',
+  'selects the HTTP transport) and waits for a client. Any argument not listed',
+  'below also starts the server.',
+  '',
+  'Commands:',
+  '  doctor [--strict]      Pre-flight report on stderr: token, scopes, package',
+  '                         matrix. Exits 0 unless --strict is passed and the',
+  '                         verdict is not ok.',
+  '  setup-token [options]  Exchange a short-lived user token for a long-lived',
+  '                         credential. Read the token from FB_SETUP_TOKEN rather',
+  '                         than passing it as an argument. Options: --page=<id>,',
+  '                         --env-file=<path>, --force, --no-write.',
+  '  --version, -v          Print the server, Node and MCP SDK versions.',
+  '  --help, -h             Print this help.',
+  '',
+].join('\n');
+
+/**
+ * The arguments `doctor` did not understand, described without their values,
+ * or `undefined` when there are none.
+ *
+ * A near-miss such as `--stric` deliberately does not gate (see
+ * {@link isStrictFlag}), but ignoring it silently let a pipeline that meant to
+ * gate read exit 0 as a pass with nothing on screen to say otherwise. Only the
+ * option NAME is echoed: `--token=EAAB…` or a pasted bare token is exactly what
+ * lands here, and the doctor report never carries a credential.
+ */
+function ignoredDoctorArgsNote(args: readonly string[]): string | undefined {
+  const described = new Set<string>();
+  for (const arg of args) {
+    if (arg === '--strict') continue;
+    if (arg.startsWith('-')) {
+      const eq = arg.indexOf('=');
+      described.add(JSON.stringify(eq === -1 ? arg : `${arg.slice(0, eq)}=\u2026`));
+    } else {
+      described.add('a positional argument');
+    }
+  }
+  if (described.size === 0) return undefined;
+  return `Ignored unknown doctor argument ${[...described].join(', ')}. The doctor accepts only --strict.`;
+}
+
+/**
+ * Hand every warning-severity startup problem to the logger, one WARN each.
+ *
+ * `assertStartupOk` renders the warnings only inside the error it throws, so on
+ * a clean start — the common case — an operator whose Page token is bound to no
+ * Page, or whose app secret is unset, saw nothing at all. The fields mirror
+ * `StartupProblem` so a log consumer can key on the stable `code`.
+ */
+export function logStartupWarnings(logger: Logger, report: StartupReport): void {
+  for (const problem of report.warnings) {
+    logger.warn('startup config warning', {
+      code: problem.code,
+      ...(problem.field !== undefined ? { field: problem.field } : {}),
+      message: problem.message,
+    });
+  }
+}
+
+/**
+ * Did the operator ask `doctor` to gate on its own verdict?
+ *
+ * Long form only: a one-letter alias for a flag that changes an exit code is
+ * the kind of thing a CI script acquires by accident.
+ */
+export function isStrictFlag(args: readonly string[]): boolean {
+  return args.includes('--strict');
+}
+
 /**
  * The single line `--version` prints.
  *
@@ -648,6 +915,107 @@ function collectSecrets(settings: Settings): string[] {
 }
 
 /**
+ * Narrow the built package array to the packages the registry will actually
+ * LOAD — the set the doctor documents as its input (`DoctorDeps.packages`) and
+ * the set `ToolRegistry.packageNames` exists to name.
+ *
+ * The array `main` assembles is everything the bootstrap CAN build; selection
+ * happens later, inside the registry. Handing the whole array to the doctor
+ * makes it judge packages that are not running, and both directions are wrong:
+ * `ads` is off by default, so a correctly provisioned default install reports
+ * `ads: BLOCKED - missing ads_read, ads_management` and turns `doctor --strict`
+ * red over a package nobody enabled; and in reverse, the over-scope check counts
+ * the ads permissions as "needed", so an `ads_management` scope riding on a
+ * runtime token that cannot use it is never flagged.
+ *
+ * A selection fault (an unknown `FB_TOOL_PACKAGES` name) is not the doctor's
+ * failure to report: fall back to the full array so the report still comes out,
+ * and leave the error to the startup path, which is where the operator is told
+ * about it.
+ */
+export function loadedPackages(
+  packages: readonly PackageSpec[],
+  settings: Settings,
+): readonly PackageSpec[] {
+  let loaded: ReadonlySet<string>;
+  try {
+    loaded = new Set<string>(createRegistry(packages, settings).packageNames);
+  } catch {
+    return packages;
+  }
+  return packages.filter((pkg) => loaded.has(pkg.name));
+}
+
+/**
+ * Why the configured package selection does not resolve, if it does not.
+ *
+ * {@link loadedPackages} deliberately swallows this — it has a report to
+ * produce and no channel to complain through. But swallowing it everywhere left
+ * the doctor, of all commands, silently judging an install against every package
+ * when the truth is that the server will not start at all. This is the channel:
+ * the bootstrap asks, and the doctor turns the answer into a `fail` finding.
+ */
+export function packageSelectionFault(
+  packages: readonly PackageSpec[],
+  settings: Settings,
+  redactor: Redactor,
+): string | undefined {
+  try {
+    createRegistry(packages, settings);
+    return undefined;
+  } catch (err) {
+    return redactor.redactString(errorMessageOf(err));
+  }
+}
+
+/**
+ * The whole `doctor` subcommand, minus the two things only `main` can do: write
+ * to stderr and exit the process.
+ *
+ * It exists as its own function because the narrowing below is the kind of
+ * defect that cannot be caught where it is written. `loadedPackages` is unit
+ * tested, but a test that calls it itself proves only that the helper works —
+ * delete the call from the command and every such test still passes, while a
+ * default install goes back to being judged on a package it never loads. The
+ * seam has to sit where the report is actually produced for a test to be able
+ * to hold the command to it.
+ *
+ * `startup` is the report `loadSettings()` produced for the environment the
+ * doctor runs in. It is required, not optional, for the same reason the
+ * package fault is computed here: the doctor runs BEFORE `assertStartupOk`,
+ * so this is the only place a startup error — a server that will not start —
+ * can still reach the verdict, and a caller that forgets it would get a green
+ * report on an install that throws on the real start.
+ *
+ * Returns the rendered report and the exit code rather than performing either:
+ * `process.exit` in a tested path would take the test runner with it.
+ */
+export async function runDoctorCommand(
+  deps: DoctorDeps,
+  args: readonly string[],
+  startup: StartupReport,
+): Promise<{
+  readonly report: DoctorReport;
+  readonly text: string;
+  readonly exitCode: number;
+}> {
+  const fault = packageSelectionFault(deps.packages, deps.settings, deps.redactor);
+  const report = await runDoctor({
+    ...deps,
+    packages: loadedPackages(deps.packages, deps.settings),
+    ...(fault !== undefined ? { packageSelectionError: fault } : {}),
+    startupProblems: startup.problems,
+  });
+  const ignored = ignoredDoctorArgsNote(args);
+  const rendered = renderDoctorReport(report);
+  return {
+    report,
+    text: ignored === undefined ? rendered : `${rendered}\n${ignored}`,
+    exitCode: doctorExitCode(report.summary.verdict, isStrictFlag(args)),
+  };
+}
+
+/**
  * Ad-account health probe for the doctor (CC-ADS-6). Lives here rather than in
  * `mcp/doctor.ts` for the same reason the metric probe does: the doctor stays
  * free of api-layer imports and the bootstrap does the wiring.
@@ -670,8 +1038,13 @@ export function adAccountProbe(): AdAccountProbe {
       accountId: normalizeAdAccountId(configured),
       ...(signal !== undefined ? { signal } : {}),
     });
+    // `available: false` alone reads the same as "not configured" to the
+    // doctor, so a configured account that cannot serve says so explicitly —
+    // that is the one answer this probe exists to give (CC-ADS-6), and it has
+    // to move the verdict.
     return {
       available: info.serving,
+      ...(info.serving ? {} : { degraded: true }),
       summary: `ad account ${info.id}: ${info.summary}`,
       details: {
         statusLabel: info.statusLabel,
@@ -737,18 +1110,61 @@ export function metricProbe(pages: PageResolver): MetricProbe {
         details,
       };
     }
+    // Both remaining answers are `degraded`, not silent: Graph answered, and
+    // either way this install cannot read insights as pinned. The "no entry"
+    // case is a version problem the operator fixes with FB_API_VERSION or a
+    // server upgrade rather than from `.env` scopes — but it is still theirs to
+    // act on, and the summary already says the Page is not at fault. `warn`
+    // (not `unknown`) keeps the ladder honest: the probe DID complete; it is
+    // a probe that threw that established nothing.
     if (unavailable.size === result.queriedMetrics.length) {
       return {
         available: false,
+        degraded: true,
         summary: `metric probe: Graph returned no entry for ${result.queriedMetrics.join(', ')} on Page ${resolved.pageId} — those names are not valid for the pinned API version, so the probe cannot judge the Page. Ask facebook_page_insights for a name Meta still serves.`,
+        details,
+      };
+    }
+    // A mix — some names accepted with no data, the rest never mentioned —
+    // must not be summarised as "accepted the metrics": the operator would read
+    // a name the pinned version does not serve as one Graph took.
+    const floor = `Usually the eligibility floor (a Page under ~${String(PAGE_INSIGHTS_LIKES_FLOOR)} followers returns empty insights), otherwise a token missing read_insights or the ANALYZE Page task.`;
+    if (unavailable.size > 0) {
+      return {
+        available: false,
+        degraded: true,
+        summary: `metric probe: Page ${resolved.pageId} returned no data for ${result.emptyMetrics.join(', ')} and no entry for ${result.unavailableMetrics.join(', ')} (not valid for the pinned API version). ${floor}`,
         details,
       };
     }
     return {
       available: false,
-      summary: `metric probe: Page ${resolved.pageId} accepted the metrics and returned no data. Usually the eligibility floor (a Page under ~${String(PAGE_INSIGHTS_LIKES_FLOOR)} followers returns empty insights), otherwise a token missing read_insights or the ANALYZE Page task.`,
+      degraded: true,
+      summary: `metric probe: Page ${resolved.pageId} accepted the metrics and returned no data. ${floor}`,
       details,
     };
+  };
+}
+
+/**
+ * The fields of the one `facebook-mcp server started` line.
+ *
+ * `packages` names what the registry actually LOADED, not every package the
+ * bootstrap built: selection, the deny-list and the default expansion all
+ * happen inside the registry, so the built array always lists `ads` — which
+ * is off by default. An operator reading this line to learn why a tool is
+ * missing was told the package serving it was running.
+ */
+export function serverStartedFields(
+  transport: string,
+  serverVersion: string,
+  packages: readonly PackageSpec[],
+  settings: Settings,
+): LogFields {
+  return {
+    transport,
+    version: serverVersion,
+    packages: loadedPackages(packages, settings).map((pkg) => pkg.name),
   };
 }
 
@@ -756,6 +1172,23 @@ export function metricProbe(pages: PageResolver): MetricProbe {
  * Real bootstrap: resolve settings, build collaborators, then run `doctor` or
  * start the transport. Never called by tests (they drive {@link buildServer}).
  */
+/**
+ * The production Graph transport: the JSON client with the multipart / rupload
+ * handler wired in, both sharing ONE per-host semaphore set so upload traffic
+ * and JSON calls honor a single concurrency budget. Without the upload handler
+ * every local-file photo, video chunk and reel upload rejects before it is sent.
+ */
+export function createTransport(deps: {
+  readonly settings: Settings;
+  readonly clock: Clock;
+  readonly redactor: Redactor;
+  readonly logger: Logger;
+}): FbRequestFn {
+  const semaphores = createHostSemaphores(deps.settings.hostConcurrency);
+  const uploadHandler = createUploadHandler({ ...deps, semaphores });
+  return createFbRequest({ ...deps, semaphores, uploadHandler });
+}
+
 async function main(): Promise<void> {
   const serverVersion = resolveServerVersion();
   const sdkVersion = resolveSdkVersion();
@@ -769,13 +1202,17 @@ async function main(): Promise<void> {
     process.stdout.write(`${versionLine(serverVersion, sdkVersion)}\n`);
     process.exit(0);
   }
+  if (isHelpFlag(process.argv[2])) {
+    process.stdout.write(USAGE_TEXT);
+    process.exit(0);
+  }
 
   const { settings, report } = loadSettings();
 
   const clock = systemClock;
   const redactor = createRedactor({ secrets: collectSecrets(settings) });
   const logger = createLogger({ clock, redactor, level: settings.logLevel });
-  const fbRequest = createFbRequest({ settings, clock, redactor, logger });
+  const fbRequest = createTransport({ settings, clock, redactor, logger });
   const journal = createJournal({ clock, redactor, journalPath: settings.journalPath });
   const pages = createPagesRegistry({ settings, fbRequest, clock, redactor, logger });
 
@@ -796,21 +1233,28 @@ async function main(): Promise<void> {
 
   // `doctor` subcommand: emit the diagnostic report to STDERR (never stdout) and
   // exit BEFORE the fail-closed assertion, so it still reports when the token is
-  // missing (the doctor never throws for an auth/scope problem).
+  // missing (the doctor never throws for an auth/scope problem). What that
+  // assertion would have thrown on still reaches the verdict: the startup
+  // report is handed to the doctor rather than dropped on this path. The exit
+  // code stays 0 unless `--strict` was passed — see {@link doctorExitCode}.
   if (process.argv[2] === 'doctor') {
-    const doctorReport = await runDoctor({
-      fbRequest,
-      settings,
-      clock,
-      logger,
-      redactor,
-      packages,
-      serverVersion,
-      metricProbe: metricProbe(pages),
-      adAccountProbe: adAccountProbe(),
-    });
-    process.stderr.write(`${renderDoctorReport(doctorReport)}\n`);
-    process.exit(0);
+    const doctor = await runDoctorCommand(
+      {
+        fbRequest,
+        settings,
+        clock,
+        logger,
+        redactor,
+        packages,
+        serverVersion,
+        metricProbe: metricProbe(pages),
+        adAccountProbe: adAccountProbe(),
+      },
+      process.argv.slice(3),
+      report,
+    );
+    process.stderr.write(`${doctor.text}\n`);
+    process.exit(doctor.exitCode);
   }
 
   // `setup-token` subcommand: the guided onboarding that MINTS the credential,
@@ -833,6 +1277,9 @@ async function main(): Promise<void> {
 
   // Fail closed on error-severity config problems (missing token; http w/o token).
   assertStartupOk(report);
+  // Then surface the warning-severity ones, which the assertion never prints on
+  // a start it lets through (stderr — stdout is the stdio channel, CC-CFG-1).
+  logStartupWarnings(logger, report);
 
   const controller = new AbortController();
   const server = buildServer({
@@ -851,11 +1298,10 @@ async function main(): Promise<void> {
     logger,
     signal: controller.signal,
   });
-  logger.info('facebook-mcp server started', {
-    transport: handle.kind,
-    version: serverVersion,
-    packages: packages.map((pkg) => pkg.name),
-  });
+  logger.info(
+    'facebook-mcp server started',
+    serverStartedFields(handle.kind, serverVersion, packages, settings),
+  );
 
   // Graceful shutdown: aborting the controller drives the transport's own
   // shutdown path (close listener + unwind in-flight work — CC-MCP-5).
@@ -883,9 +1329,7 @@ export async function runCli(): Promise<void> {
   try {
     await main();
   } catch (err: unknown) {
-    process.stderr.write(
-      `facebook-mcp failed to start: ${err instanceof Error ? err.message : String(err)}\n`,
-    );
+    process.stderr.write(`facebook-mcp failed to start: ${errorMessageOf(err)}\n`);
     process.exit(1);
   }
 }

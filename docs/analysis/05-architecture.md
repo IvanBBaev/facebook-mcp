@@ -112,12 +112,17 @@ never import `core/http` directly.
    media-photos/video/reels create tools converge here), `insights`,
    `moderation`, `messages`, `ads`. **Default expansion (C5)** — the single
    line the corpus previously left undefined: `FB_TOOL_PACKAGES` unset ⇒
-   **`core + posts + reader + insights + moderation + messages`** (≈27 tools),
+   **`core + posts + reader + insights + moderation + messages`** (30 tools),
    with **`ads` excluded by default** (Meta ships an official ads MCP; see 02);
    `all` adds `ads`. The expansion table is documented in 06 and
    **snapshot-tested** so the surface can never drift silently. A read-only
-   profile (`FB_PACKAGES_READONLY`, or a reader-only `FB_TOOL_PACKAGES`) is the
-   recommended posture for unattended untrusted-content ingestion (see 04).
+   posture is the recommendation for unattended untrusted-content ingestion (see
+   04): `FB_PACKAGES_READONLY=all` keeps every read tool and drops every
+   write-tier tool. A narrowed `FB_TOOL_PACKAGES` also works but is easy to get
+   wrong, because profile names and package names share one namespace and the
+   profile wins — `FB_TOOL_PACKAGES=reader` is read-only, while
+   `FB_TOOL_PACKAGES=core,reader` reproduces the entire default surface, writes
+   included.
 7. **Tiered plan-and-apply write gating** (`mcp/write-mode.ts` +
    `mcp/journal.ts`): every write tool takes `apply?: boolean`; without
    `apply:true` it returns a **validating dry-run preview** — resolves the Page
@@ -129,17 +134,24 @@ never import `core/http` directly.
    - **Blast-radius tiers (C4):** the `FB_WRITE_MODE=apply` env bypass covers
      only low-consequence writes; **irreversible (delete) and spend (ads) tiers
      are never env-bypassed** — they always require a per-call `apply:true`.
-   - **`plan_id` binding:** the highest-consequence tools bind `apply` to a
-     short-lived `plan_id` returned by the preview step.
+   - **`plan_id` binding:** the `irreversible` and `spend` tiers always bind
+     `apply` to a short-lived `plan_id` returned by the preview step. A
+     `reversible` tool can opt into the same binding per call via
+     `requirePlanId` (`facebook_send_message` always; the create tools and
+     `facebook_update_post` when the call publishes to a live audience now).
+     That flag does **not** raise the tier, so it does not summon the
+     out-of-band confirmer.
    - **Divergence semantics:** apply **re-validates** before mutating; if state
      changed since the preview it **fails with a diff** rather than proceeding.
    - **Per-package write-mode defaults** avoid confirmation stacking (moderation
      may default to apply; publishing and ads never do).
    - Applied writes are recorded to a **journal**: structured metadata only,
      passed through the redactor (no tokens/PII), 0600 under the XDG state dir,
-     non-blocking, rotated at ~5 MB. Out-of-band confirmation for
-     destructive/spend tools (elicitation-ready, operator-token fallback) is a
-     separate seam (see 04). Publishing to a real audience is the most
+     non-blocking, rotated at ~5 MB. Out-of-band confirmation is a separate
+     seam (elicitation-ready, operator-token fallback; see 04) and it keys on the
+     `irreversible` and `spend` **tiers**, not on the `destructiveHint`
+     annotation — `facebook_update_post` and `facebook_send_message` are
+     annotated destructive and still never reach it. Publishing to a real audience is the most
      consequential action this server performs — safe-by-default is
      non-negotiable.
 8. **Result shaping** (`mcp/result.ts`): compact JSON by default;
@@ -165,13 +177,15 @@ never import `core/http` directly.
    **resumable-session state is in-memory** ("resume within one server
    lifetime") — durable state via MCP Tasks is deferred. Long uploads emit
    progress via a `progressToken`; video creates return a `video_id` +
-   `processing` state polled by `facebook_get_video_status` (**roadmap — not
-   shipped**: `getVideoStatus` exists in `src/api/media-video.ts` but no
-   `ToolSpec` exposes it).
+   `processing` state polled by `facebook_get_video_status`, a read-only tool in
+   the `posts` package.
 10. **Transport**: stdio default; `FB_TRANSPORT=http` → Streamable HTTP that
     **fails closed** — it refuses to start without `FB_HTTP_TOKEN`, binds
-    `127.0.0.1` only, validates the `Origin` header (DNS-rebinding guard), and
-    constant-time-checks the bearer on every request. No SSE.
+    `127.0.0.1` only, rejects a request whose `Origin` is present and is not this
+    loopback port (DNS-rebinding guard; an absent `Origin` is deliberately passed
+    through, since local clients send none), and constant-time-checks the bearer
+    on every request — the bearer, not the `Origin` check, is what a rebound page
+    cannot satisfy. No SSE.
 11. **Testing strategy**: `withEnv`/`withFetch` helpers (recording fetch mock),
     fixtures with real Graph API response shapes, a **tools-manifest snapshot
     test** guarding the whole surface, readme/env-docs sync tests. Coverage

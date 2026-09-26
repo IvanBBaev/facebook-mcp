@@ -28,7 +28,9 @@
 // (`videoByUrlRequest` in ../../src/api/posts-write.ts). There is no video
 // fixture in this repo, an encodable one cannot be synthesized at runtime, and a
 // fresh upload needs minutes of Meta-side encoding before anything is
-// assertable. So nothing is registered for it: an accepted gap, not an oversight.
+// assertable. It is registered all the same, as the no-op `posts/video-not-covered`
+// at the bottom of this file, so the harness can report it as a KNOWN hole: an
+// accepted gap is only honest while it is visible in `--list` and in every run.
 //
 // All three declare `requires: ['FB_CONFIRM_TOKEN']`. `facebook_delete_post` is
 // irreversible-tier and this harness's MCP client advertises no elicitation
@@ -414,5 +416,59 @@ registerSmoke({
       // but leaving the post behind would make every run report a leak.
       await tryDeletePost(ctx, postId);
     }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// facebook_create_video_post — DELIBERATELY NOT COVERED BY A LIVE SMOKE
+// ---------------------------------------------------------------------------
+//
+// The only write path in the whole server with no live coverage. Registered as a
+// no-op so the gap is visible in `--list` and in every run, rather than being an
+// absence nobody can see. It calls no tool and asserts nothing; there is no
+// pretend coverage here.
+//
+// Why it is not smoked:
+//   1. Neither source is free. The LOCAL path needs a real, encodable video the
+//      repository cannot contain and cannot synthesize at runtime, plus
+//      `FB_MEDIA_DIR` — local file access is off by default (C11) — which is the
+//      same double opt-in `reels/create-and-status` already carries. The URL
+//      path (`videoByUrlRequest` in ../../src/api/posts-write.ts) needs a public
+//      video URL, and baking someone else's CDN link into the repo would make
+//      the smoke fail for reasons that have nothing to do with this server.
+//   2. Nothing is assertable for minutes. A video create returns a `videoId` and
+//      a `processing` state; Meta-side encoding runs asynchronously (CC-MEDIA-7),
+//      so the post may 404 or render empty right after the call. A smoke may
+//      observe processing, never wait it out.
+//   3. The artifact cannot be fully swept. The feed post carries the run marker
+//      and `../sweepers/posts.sweep.mjs` reclaims it, but the server ships no
+//      `facebook_delete_video`, so the VIDEO node behind it survives the sweep —
+//      the same leak-by-construction `reels/create-and-status` documents.
+//
+// What an operator must do BY HAND, once, on the test Page:
+//   a. call `facebook_create_video_post` with a public https:// video URL and NO
+//      `apply` — confirm the preview names the Page, reports `applied: false` and
+//      uploads nothing;
+//   b. apply it and confirm the result carries a `videoId` plus a
+//      `{page-id}_{post-id}` composite, and that `isPublishedAndProcessed` is
+//      false at creation time;
+//   c. poll `facebook_get_video_status` with that `videoId` until it reports a
+//      terminal state (`ready` or `error`);
+//   d. delete the feed post with `facebook_delete_post`, then delete the VIDEO in
+//      the Facebook UI — this server cannot.
+registerSmoke({
+  id: 'posts/video-not-covered',
+  phase: 2,
+  title:
+    'NOT COVERED LIVE: facebook_create_video_post needs a video fixture and minutes of encoding',
+  page: 'none',
+  writes: false,
+  run: async (ctx) => {
+    ctx.log.step(
+      'facebook_create_video_post is not smoked: it needs a video this repository cannot ' +
+        'ship or synthesize, nothing about the result is assertable until Meta finishes ' +
+        'encoding, and the VIDEO node it leaves behind cannot be deleted through this ' +
+        'server. See the comment above this registration for the manual check.',
+    );
   },
 });

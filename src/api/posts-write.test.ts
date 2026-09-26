@@ -24,8 +24,10 @@ import {
   DRAFT_TRANSITION_NOTE,
   POST_MESSAGE_MAX_CHARS,
   POST_STATE_FIELDS,
+  PUBLISH_VERIFY_NOTE,
   PostValidationError,
   RESCHEDULE_MAX_FROM_CREATION_MS,
+  RESCHEDULE_WINDOW_UNKNOWN_NOTE,
   SCHEDULED_POST_FIELDS,
   SCHEDULE_MAX_LEAD_MS,
   SCHEDULE_MIN_LEAD_MS,
@@ -285,9 +287,19 @@ test('isSupportedTimeZone separates real IANA zones from nonsense', () => {
 test('resolvePageTimezone accepts an IANA name and rejects a numeric offset', () => {
   assert.equal(resolvePageTimezone('Europe/Sofia'), 'Europe/Sofia');
   assert.equal(resolvePageTimezone(' Europe/Sofia '), 'Europe/Sofia');
-  // Meta's legacy Page `timezone` field can be a numeric UTC offset — unusable.
+  // A region prefix is not what makes a zone usable: these are real IANA names
+  // the runtime formats with (see the formatInTimeZone case just below), so
+  // rejecting them would report a known timezone as unknown.
+  assert.equal(resolvePageTimezone('UTC'), 'UTC');
+  assert.equal(resolvePageTimezone('GMT'), 'GMT');
+  assert.equal(resolvePageTimezone('Japan'), 'Japan');
+  // Meta's legacy Page `timezone` field can be a numeric UTC offset — unusable,
+  // including the offset spellings a newer `Intl` would otherwise accept.
   assert.equal(resolvePageTimezone(3), undefined);
-  assert.equal(resolvePageTimezone('UTC'), undefined);
+  assert.equal(resolvePageTimezone('-8'), undefined);
+  assert.equal(resolvePageTimezone('+08:00'), undefined);
+  assert.equal(resolvePageTimezone('+0800'), undefined);
+  assert.equal(resolvePageTimezone('Mars/Olympus'), undefined);
   assert.equal(resolvePageTimezone(''), undefined);
   assert.equal(resolvePageTimezone(undefined), undefined);
 });
@@ -358,6 +370,54 @@ test('planCreatePost accepts a link-only post and notes the scrape caveat', () =
   assert.ok(plan.warnings.some((w) => /scraped by Facebook/.test(w)));
 });
 
+// `link` is sent to Graph as the URL whose preview Facebook scrapes. A local
+// file path (a model that meant `photos`) or a non-web scheme can never be a
+// link preview, so the dry run must refuse it: approving "Create a link post"
+// and only learning at apply time that Graph rejects the URL is exactly the
+// preview/apply drift this planner exists to prevent.
+test('planCreatePost refuses a link that is a local path or a non-web URL', () => {
+  for (const link of [
+    '/Users/me/media/cat.jpg',
+    './media/cat.jpg',
+    '~/media/cat.jpg',
+    'C:\\media\\cat.jpg',
+    'file:///srv/media/cat.jpg',
+    'ftp://files.example/cat.jpg',
+    'javascript:alert(1)',
+    'data:text/html,hi',
+  ]) {
+    const err = expectValidationError(
+      () => planCreatePost({ pageId: PAGE_ID, link }, { nowMs: NOW_MS }),
+      'invalid_link',
+    );
+    assert.equal(err.field, 'link', link);
+  }
+  const card = expectValidationError(
+    () =>
+      planCreatePost(
+        {
+          pageId: PAGE_ID,
+          link: 'https://e.example',
+          childAttachments: [
+            { link: 'https://e.example/1' },
+            { link: 'https://e.example/2', picture: 'media/card.png' },
+          ],
+        },
+        { nowMs: NOW_MS },
+      ),
+    'invalid_link',
+  );
+  assert.equal(card.field, 'child_attachments');
+  assert.match(card.message, /child_attachments\[1\]\.picture/);
+});
+
+test('planCreatePost still accepts http(s) and scheme-less web links', () => {
+  for (const link of ['https://e.example/a?b=1', 'http://e.example', 'e.example/path']) {
+    const plan = planCreatePost({ pageId: PAGE_ID, link }, { nowMs: NOW_MS });
+    assert.equal(plan.params['link'], link);
+  }
+});
+
 test('planCreatePost refuses a post with no message, link or photos', () => {
   const err = expectValidationError(
     () => planCreatePost({ pageId: PAGE_ID }, { nowMs: NOW_MS }),
@@ -391,6 +451,31 @@ test('planCreatePost accepts a message exactly at the ceiling', () => {
     { nowMs: NOW_MS },
   );
   assert.equal(plan.publishState, 'published');
+});
+
+// The ceiling is documented to the caller in CHARACTERS ("up to 63206
+// characters. Unicode and emoji pass through byte-for-byte"), so the local
+// check must count code points: an emoji is one character, not the two UTF-16
+// units `String.length` reports. Counting units refuses a message the schema
+// promises to accept and, worse, reports a count the caller cannot reconcile
+// with the text ("64000 characters" for 32000 emoji). Meta's own count remains
+// the truth on the wire (CC-PUB-7); the local check only stops lying about it.
+test('planCreatePost counts the ceiling in code points, not UTF-16 units', () => {
+  const plan = planCreatePost(
+    { pageId: PAGE_ID, message: '\u{1F600}'.repeat(POST_MESSAGE_MAX_CHARS) },
+    { nowMs: NOW_MS },
+  );
+  assert.equal(plan.publishState, 'published');
+
+  const err = expectValidationError(
+    () =>
+      planCreatePost(
+        { pageId: PAGE_ID, message: '\u{1F600}'.repeat(POST_MESSAGE_MAX_CHARS + 1) },
+        { nowMs: NOW_MS },
+      ),
+    'message_too_long',
+  );
+  assert.match(err.message, /message is 63207 characters/);
 });
 
 test('planCreatePost enforces the 2-5 child_attachments bounds', () => {
@@ -491,6 +576,52 @@ test('planCreatePost builds a scheduled post with the seconds wire value', () =>
   assert.equal(plan.schedule?.utc, '2026-08-01T06:30:00.000Z');
   assert.match(plan.summary, /2026-08-01T06:30:00.000Z \(UTC\)/);
   assert.match(plan.summary, /Europe\/Sofia/);
+});
+
+test('planCreatePost marks a SCHEDULED multi-photo post as such on the feed call', () => {
+  // A scheduled `/feed` post that carries `attached_media` needs
+  // `unpublished_content_type=SCHEDULED` on top of `published:false` +
+  // `scheduled_publish_time`: without it Graph files the post as a DRAFT and the
+  // scheduled instant is never honoured, so the operator's post silently never
+  // goes live (docs/ai/research/pages-api.md:25, docs/analysis/03-meta-api-landscape.md:51).
+  const plan = planCreatePost(
+    {
+      pageId: PAGE_ID,
+      message: 'gallery',
+      photoCount: 3,
+      scheduledPublishTime: '2026-08-01T09:30:00+03:00',
+    },
+    { nowMs: NOW_MS },
+  );
+  assert.equal(plan.publishState, 'scheduled');
+  assert.equal(plan.params['published'], false);
+  assert.equal(plan.params['unpublished_content_type'], 'SCHEDULED');
+});
+
+test('planCreatePost leaves unpublished_content_type off everything but a scheduled photo post', () => {
+  // The flag belongs to the `attached_media` feed call. A scheduled TEXT post is
+  // already scheduled by `published:false` + `scheduled_publish_time`, and an
+  // unscheduled photo post is a draft or a live post — neither may claim to be
+  // scheduled content.
+  const scheduledText = planCreatePost(
+    {
+      pageId: PAGE_ID,
+      message: 'soon',
+      scheduledPublishTime: '2026-08-01T09:30:00+03:00',
+    },
+    { nowMs: NOW_MS },
+  );
+  const draftPhotos = planCreatePost(
+    { pageId: PAGE_ID, message: 'gallery', photoCount: 3, published: false },
+    { nowMs: NOW_MS },
+  );
+  const livePhotos = planCreatePost(
+    { pageId: PAGE_ID, message: 'gallery', photoCount: 3 },
+    { nowMs: NOW_MS },
+  );
+  for (const plan of [scheduledText, draftPhotos, livePhotos]) {
+    assert.equal(plan.params['unpublished_content_type'], undefined);
+  }
 });
 
 test('planCreatePost refuses published:true together with a schedule', () => {
@@ -723,6 +854,71 @@ test('updatePostRequest and deletePostRequest address the node directly', () => 
   assert.equal(del.body, undefined);
 });
 
+// C2 verify tools: `/{post-id}` is a path core cannot name a read for (a comment
+// id has the same shape), so the builder must say which read shows the outcome.
+
+test('an ambiguous post update is verified via facebook_get_post', async () => {
+  const fake = createFakeFbRequest().on(() => true, fbOk({ success: true }));
+  await fake.fn(updatePostRequest(POST_ID, { message: 'edited' }));
+  assert.equal(fake.lastRequest()?.verifyTool, 'facebook_get_post');
+});
+
+test('an ambiguous post delete is verified via facebook_get_post', async () => {
+  const fake = createFakeFbRequest().on(() => true, fbOk({ success: true }));
+  await fake.fn(deletePostRequest(POST_ID));
+  assert.equal(fake.lastRequest()?.verifyTool, 'facebook_get_post');
+});
+
+test('an ambiguous video create by URL names no verify tool — the lost response held the only video id', () => {
+  const req = videoByUrlRequest(PAGE_ID, { file_url: 'https://e.example/v.mp4' });
+  assert.equal('verifyTool' in req, false);
+});
+
+test('a feed create leaves the verify tool to the core feed inference', () => {
+  const req = feedPostRequest(PAGE_ID, { message: 'hi' });
+  assert.equal('verifyTool' in req, false);
+});
+
+test('planCreatePost never tells a scheduled post or a draft to verify in facebook_list_posts', () => {
+  const scheduled = planCreatePost(
+    { pageId: PAGE_ID, message: 'later', scheduledPublishTime: isoAt(hours(2)) },
+    { nowMs: NOW_MS },
+  );
+  const draft = planCreatePost(
+    { pageId: PAGE_ID, message: 'draft', published: false },
+    { nowMs: NOW_MS },
+  );
+  const live = planCreatePost({ pageId: PAGE_ID, message: 'now' }, { nowMs: NOW_MS });
+  for (const plan of [scheduled, draft]) {
+    assert.ok(
+      plan.warnings.every((w) => !w.includes('facebook_list_posts')),
+      `${plan.publishState} plan points at facebook_list_posts: ${plan.warnings.join(' | ')}`,
+    );
+  }
+  assert.ok(scheduled.warnings.some((w) => w.includes('facebook_list_scheduled_posts')));
+  assert.ok(live.warnings.some((w) => w.includes('facebook_list_posts')));
+});
+
+test('planVideoPost never tells a scheduled or draft video to verify in facebook_list_posts', () => {
+  const base = {
+    pageId: PAGE_ID,
+    delivery: 'file-url' as const,
+    sourceLabel: 'https://e.example/v.mp4',
+  };
+  const scheduled = planVideoPost(
+    { ...base, scheduledPublishTime: isoAt(hours(2)) },
+    { nowMs: NOW_MS },
+  );
+  const draft = planVideoPost({ ...base, published: false }, { nowMs: NOW_MS });
+  for (const plan of [scheduled, draft]) {
+    assert.ok(
+      plan.warnings.every((w) => !w.includes('facebook_list_posts')),
+      `${plan.publishState} plan points at facebook_list_posts: ${plan.warnings.join(' | ')}`,
+    );
+    assert.ok(plan.warnings.some((w) => w.includes('facebook_get_video_status')));
+  }
+});
+
 test('postStateRequest asks only for the fields divergence compares', () => {
   const req = postStateRequest(POST_ID);
   assert.equal(req.method, 'GET');
@@ -902,6 +1098,19 @@ test('CarouselPostError stays readable when cleanup removed everything', () => {
   assert.deepEqual(err.cleanup.orphans, []);
 });
 
+test('CarouselPostError keeps the text of a non-Error cause and never throws building it', () => {
+  // The cause is whatever the feed POST rejected with (tools/posts.ts); a plain
+  // `{ message }` object must not read as "[object Object]", and a value with no
+  // string form must not turn the orphan report into a TypeError that loses it.
+  const cleanup = { deleted: [], orphans: ['2'], failures: [] };
+  const plain = new CarouselPostError({ cause: { message: 'feed refused' }, cleanup });
+  assert.match(plain.message, /could not be created: feed refused/);
+
+  const bare = new CarouselPostError({ cause: Object.create(null), cleanup });
+  assert.match(bare.message, /could not be created: unknown error \(no message\)/);
+  assert.deepEqual(bare.cleanup.orphans, ['2']);
+});
+
 // ---------------------------------------------------------------------------
 // planVideoPost — CC-MEDIA-6/7 plus the shared publish/schedule contract
 // ---------------------------------------------------------------------------
@@ -1028,4 +1237,101 @@ test('planVideoPost applies the post text ceiling to the description', () => {
       ),
     'message_too_long',
   );
+});
+
+test('a reschedule says so when Graph gave no creation time to bound it against', () => {
+  // `created_time` is read off the wire and may be absent, null or unparseable;
+  // `createdAtMsOf` then answers undefined and `resolveSchedule` simply skips
+  // the 29-day creation-relative bound. Silence reads as "checked and fine", so
+  // the operator confirms a spend-free but irreversible-feeling write that
+  // Facebook refuses on apply. Say which check did not run.
+  const plan = planUpdatePost(
+    {
+      postId: POST_ID,
+      action: 'reschedule',
+      scheduledPublishTime: isoAt(hours(24 * 40)),
+    },
+    { nowMs: NOW_MS },
+  );
+  assert.ok(plan.warnings.includes(RESCHEDULE_WINDOW_UNKNOWN_NOTE));
+});
+
+test('a reschedule with a known creation time carries no unknown-window notice', () => {
+  const plan = planUpdatePost(
+    {
+      postId: POST_ID,
+      action: 'reschedule',
+      scheduledPublishTime: isoAt(hours(24 * 5)),
+    },
+    { nowMs: NOW_MS, createdAtMs: NOW_MS - hours(24) },
+  );
+  assert.equal(plan.warnings.includes(RESCHEDULE_WINDOW_UNKNOWN_NOTE), false);
+});
+
+// ---------------------------------------------------------------------------
+// Window refusals must state a duration that is actually outside the window
+// ---------------------------------------------------------------------------
+
+test('a too-soon refusal never rounds the lead up to the minimum it failed', () => {
+  // 9 min 59.6 s is refused, so the message must not say "10 minute(s) away"
+  // next to "requires at least 10 minutes" — a caller cannot reconcile the two.
+  const err = expectValidationError(
+    () => resolveSchedule(isoAt(SCHEDULE_MIN_LEAD_MS - 400), { nowMs: NOW_MS }),
+    'schedule_too_soon',
+  );
+  assert.doesNotMatch(err.message, /only 10 minute/);
+  assert.match(err.message, /only 9 minutes 59 seconds away/);
+});
+
+test('a too-soon refusal for an instant in the past says it is in the past', () => {
+  const err = expectValidationError(
+    () => resolveSchedule(isoAt(-hours(1)), { nowMs: NOW_MS }),
+    'schedule_too_soon',
+  );
+  assert.doesNotMatch(err.message, /-\d+ minute/);
+  assert.match(err.message, /is 1 hour in the past/);
+});
+
+test('a too-far refusal never rounds the lead down to the maximum it exceeded', () => {
+  const err = expectValidationError(
+    () => resolveSchedule(isoAt(SCHEDULE_MAX_LEAD_MS + hours(1)), { nowMs: NOW_MS }),
+    'schedule_too_far',
+  );
+  assert.doesNotMatch(err.message, /is 75 days away/);
+  assert.match(err.message, /is 75 days 1 hour away/);
+  assert.match(err.message, /window ends 75 days from now/);
+});
+
+test('a reschedule-window refusal states a span past the creation cap, not the cap itself', () => {
+  const err = expectValidationError(
+    () =>
+      resolveSchedule(isoAt(RESCHEDULE_MAX_FROM_CREATION_MS + hours(1)), {
+        nowMs: NOW_MS,
+        window: { createdAtMs: NOW_MS },
+      }),
+    'schedule_reschedule_window',
+  );
+  assert.doesNotMatch(err.message, /is 29 days after/);
+  assert.match(err.message, /is 29 days 1 hour after the post was created/);
+});
+
+test('the far-out warning never rounds the lead down to the cap it warns about', () => {
+  const echo = resolveSchedule(isoAt(SCHEDULE_WARN_LEAD_MS + hours(1)), {
+    nowMs: NOW_MS,
+    pageTimezone: 'Europe/Sofia',
+  });
+  const warnings = scheduleWarnings(echo);
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(warnings[0] ?? '', /scheduled 30 days out/);
+  assert.match(warnings[0] ?? '', /scheduled 30 days 1 hour out/);
+});
+
+test('the publish verify note does not promise a time filter facebook_list_posts lacks', () => {
+  // facebook_list_posts takes no since/until, so "filtered to the last few minutes"
+  // sends the model after an argument that does not exist; it must match by the
+  // created_time and message text each listed item carries instead.
+  assert.doesNotMatch(PUBLISH_VERIFY_NOTE, /filtered to/);
+  assert.match(PUBLISH_VERIFY_NOTE, /facebook_list_posts/);
+  assert.match(PUBLISH_VERIFY_NOTE, /created_time/);
+  assert.match(PUBLISH_VERIFY_NOTE, /no time filter/);
 });

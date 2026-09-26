@@ -9,9 +9,11 @@
 //   * READING a Reel is free and safe, so it is covered unconditionally.
 //   * CREATING one is not. It consumes one of the Page's 30 API Reels per rolling
 //     24 h (hence `budget: 'reels'`, opt-in only), it needs a real video file the
-//     repository cannot contain and cannot synthesize (hence
-//     `requires: ['FB_SMOKE_REEL_PATH']`), and — this is the important part —
-//     **there is no delete tool for it.** The server ships no
+//     repository cannot contain and cannot synthesize, readable by the SERVER —
+//     the Reels upload protocol has no "fetch this URL" mode, so the bytes must
+//     come off local disk and local disk is OFF unless `FB_MEDIA_DIR` is set
+//     (C11) — hence `requires: ['FB_SMOKE_REEL_PATH', 'FB_MEDIA_DIR']` — and,
+//     the important part, **there is no delete tool for it.** The server ships no
 //     `facebook_delete_video`; `facebook_delete_post` takes a `{page-id}_{post-id}`
 //     composite and a Reel is a VIDEO node. So a created Reel CANNOT be swept.
 //     That is a leak by construction, not an oversight in the sweeper.
@@ -35,7 +37,14 @@
 
 import { registerSmoke } from '../registry.mjs';
 
-/** A bare Graph VIDEO id: digits only (`videoIdArg` in src/tools/insights.ts). */
+/**
+ * A bare Graph VIDEO id: digits only — `VIDEO_ID_SHAPE` / `videoIdArg()` in
+ * src/tools/shared.ts, the ONE definition every `video_id` argument is built
+ * from. It is shared on purpose: `facebook_reel_insights` and
+ * `facebook_get_video_status` once carried separate definitions, and the laxer
+ * of the two (in src/tools/posts.ts) checked no shape at all, which is what
+ * `reels/status-guardrail` below exists to catch.
+ */
 const VIDEO_ID_SHAPE = /^\d+$/;
 
 /** The states `facebook_get_video_status` may report (`videoStatusOutputSchema`). */
@@ -107,8 +116,13 @@ registerSmoke({
     if (reels.length === 0) {
       // Not a failure: most Pages have no Reels. Everything below needs at least
       // one, and inventing one is exactly what this smoke must not do.
-      ctx.log.step(
-        'read Page has no Reels — pagination and the absence check are skipped',
+      ctx.log.step('read Page has no Reels');
+      ctx.notExercised(
+        'everything past the empty listing never ran: no listed id was checked ' +
+          'against the VIDEO id space facebook_reel_insights accepts, the ' +
+          'nextCursor round-trip that keeps "page until empty" from looping forever ' +
+          'was never taken, and — the contract this smoke exists for — nothing ' +
+          'proved that Reels stay ABSENT from the facebook_list_posts timeline',
       );
       return;
     }
@@ -234,8 +248,19 @@ registerSmoke({
   // (`--include-budget` or `--only` is needed); `requires` keeps it from running
   // even then unless the operator pointed at a real video file. Both are needed:
   // the quota is finite AND the artifact cannot be cleaned up afterwards.
+  //
+  // FB_MEDIA_DIR is a REQUIREMENT, not a nicety. `facebook_create_reel` refuses a
+  // remote URL outright — the Reels upload protocol streams the bytes from the
+  // server — and local file access is disabled by default (C11): with
+  // FB_MEDIA_DIR unset the server is URL-only, so a perfectly valid
+  // FB_SMOKE_REEL_PATH is refused at the media layer. `env.mjs` inherits
+  // FB_MEDIA_DIR into the child verbatim, so the operator's value is the one that
+  // applies, and FB_SMOKE_REEL_PATH must resolve INSIDE it (realpath containment,
+  // symlink-safe) — a path outside is refused just as firmly as no path at all.
+  // Declaring it here turns that into an up-front refusal naming the variable,
+  // instead of a live failure after two opt-ins and a spent quota slot.
   budget: 'reels',
-  requires: ['FB_SMOKE_REEL_PATH'],
+  requires: ['FB_SMOKE_REEL_PATH', 'FB_MEDIA_DIR'],
   packages: ['posts'],
   run: async (ctx) => {
     const video = process.env.FB_SMOKE_REEL_PATH;

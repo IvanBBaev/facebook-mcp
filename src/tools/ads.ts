@@ -42,6 +42,7 @@
 
 import { z } from 'zod';
 
+import { GraphApiError, classifyGraphError, isProvablyNotSent } from '../core/index.js';
 import type {
   PackageSpec,
   ToolAnnotations,
@@ -73,8 +74,13 @@ import {
   applyAdObjectUpdate,
   planAdObjectUpdate,
 } from '../api/ads-control.js';
-import type { SettableStatus } from '../api/ads-control.js';
-import { defineTool } from '../mcp/index.js';
+import type { AdUpdateOutcome, SettableStatus } from '../api/ads-control.js';
+import {
+  APPLIED_VERDICT,
+  REFUSED_VERDICT,
+  defineTool,
+  type WriteResultVerdict,
+} from '../mcp/index.js';
 import {
   afterArg,
   applyArg,
@@ -192,7 +198,7 @@ const sinceArg = z
   .min(1)
   .optional()
   .describe(
-    'Window start as "YYYY-MM-DD" (inclusive, ad-account timezone). Must be paired with `until` — a lone end is rejected before the request.',
+    'Window start as "YYYY-MM-DD" (inclusive, ad-account timezone). Must be paired with `until` and may not be after it — a lone end, a reversed window or a date in any other form is rejected before the request. No per-call span cap: ads insights reach back up to 37 months.',
   );
 
 const untilArg = z
@@ -271,7 +277,7 @@ const dailyBudgetMinorArg = z
   .min(0)
   .optional()
   .describe(
-    'New daily budget in MINOR currency units of the ad account (1000 = 10.00, not 1000.00). Integers only — there is no float budget. Campaign or ad-set level only; an ad has no budget of its own. The previous value is overwritten and cannot be recovered through the API.',
+    'New daily budget in MINOR currency units of the ad account. The unit is the one Meta counts for that currency (its currency offset), which is not always the ISO subunit: USD or EUR 1000 = 10.00; a zero-decimal currency such as JPY, KRW, TWD, HUF, IDR, COP or CRC 1000 = 1000; BHD or JOD count hundredths, so 1000 = 10.00. Integers only — there is no float budget. Campaign or ad-set level only; an ad has no budget of its own. The previous value is overwritten and cannot be recovered through the API.',
   );
 
 const lifetimeBudgetMinorArg = z
@@ -280,7 +286,7 @@ const lifetimeBudgetMinorArg = z
   .min(0)
   .optional()
   .describe(
-    'New lifetime budget in MINOR currency units of the ad account (1000 = 10.00). Mutually exclusive with `daily_budget_minor`. A lifetime budget requires the object to have an end time — without one Graph rejects the write.',
+    'New lifetime budget in MINOR currency units of the ad account — the unit Meta counts for that currency, its currency offset (USD 1000 = 10.00; zero-decimal JPY or TWD 1000 = 1000). Mutually exclusive with `daily_budget_minor`. A lifetime budget requires the object to have an end time — without one Graph rejects the write.',
   );
 
 /** The fields the three listing tools share, spread into each tool's own object. */
@@ -315,6 +321,84 @@ interface ListAdInput {
 /** `signal` spread, present only when the call carries an abort seam. */
 function signalOf(ctx: ToolContext): { signal?: AbortSignal } {
   return ctx.signal !== undefined ? { signal: ctx.signal } : {};
+}
+
+/**
+ * Tell the write gate whether a resolved `POST /{object-id}` actually changed
+ * the ads object (`WriteAction.classifyResult`). `applyAdObjectUpdate` RETURNS
+ * a refusal (`success:false`, an empty `applied` list) rather than throwing, so
+ * without this hook the gate would stamp the very same call `applied` and
+ * journal a budget move the account never took — the one lie a spend-tier
+ * tool cannot afford. A Graph "no" on this edge changes nothing, so the
+ * verdict is a plain `failed`, never `attempted`.
+ */
+function adUpdateVerdict(outcome: AdUpdateOutcome): WriteResultVerdict {
+  return outcome.success ? APPLIED_VERDICT : REFUSED_VERDICT;
+}
+
+/**
+ * Journal classification for an update whose `perform` REJECTED (C2 /
+ * CC-LIFE-2), the same rule `moderation.ts` applies to its writes. A received
+ * Graph error envelope proves Facebook processed the POST and refused it, so
+ * nothing landed (`failed`). An `ambiguous` error (the answer was lost after
+ * the request went out), a 5xx or status-0 fault, or anything that is not a
+ * Graph error at all (an abort, a transport fault) leaves the outcome UNKNOWN:
+ * the resume or budget raise may be live and spending, so the honest entry is
+ * `attempted`. Without this hook the gate journals every rejection `failed`,
+ * telling the operator reconciling spend that nothing moved. An abort whose
+ * signal had already fired before the POST was issued is the exception, and
+ * the handler (which alone can see that moment) journals it `failed`.
+ */
+function classifyUpdateFailure(err: unknown): 'attempted' | 'failed' {
+  if (!(err instanceof GraphApiError)) return 'attempted';
+  if (err.action?.category === 'ambiguous') return 'attempted';
+  // A connect-phase fault (DNS, ECONNREFUSED) provably put no byte of the POST
+  // on the wire — the http layer retries it for exactly that reason — so the
+  // write cannot have landed and "may be live" would be false.
+  if (err.httpStatus === 0 && isProvablyNotSent(err.cause)) return 'failed';
+  return err.httpStatus === 0 || err.httpStatus >= 500 ? 'attempted' : 'failed';
+}
+
+/**
+ * The ad account an object names as its owner (`account_id`, bare digits or
+ * `act_<id>`), as an `act_<id>` id — or undefined when the read carried none.
+ */
+function ownerAccountOf(record: AdRecord): string | undefined {
+  const raw: unknown = record.account_id;
+  const owner =
+    typeof raw === 'string' || typeof raw === 'number' ? String(raw).trim() : '';
+  if (owner === '') return undefined;
+  return /^\d+$/.test(owner) ? `act_${owner}` : owner;
+}
+
+/**
+ * Refuse a write whose object, by its own `account_id`, lives in a different ad
+ * account than the one resolved for the call (the explicit argument or
+ * `FB_AD_ACCOUNT_ID`). That account supplies the currency every `*_minor` value
+ * in the preview is denominated in and the CC-ADS-6 health verdict, so
+ * previewing against the wrong one states the budget in a foreign currency
+ * (EUR vs a zero-decimal JPY is a hundredfold misstatement) and judges the
+ * health of an account the write never touches. Only a read that carries
+ * `account_id` (the per-level field sets do) can be checked; its absence is not
+ * evidence either way.
+ */
+function assertObjectInAccount(
+  objectId: string,
+  record: AdRecord,
+  account: AdAccountInfo | undefined,
+): void {
+  if (account === undefined) return;
+  const ownerId = ownerAccountOf(record);
+  if (ownerId === undefined || ownerId === account.id) return;
+  const message =
+    `Refused: ${objectId} belongs to ad account ${ownerId}, not ${account.id} (the ` +
+    'account this call resolved to). Its currency and health were read from the wrong ' +
+    `account, so no preview was built and nothing was changed. Pass ad_account_id:"${ownerId}".`;
+  throw new GraphApiError(message, {
+    code: 100,
+    httpStatus: 400,
+    action: classifyGraphError({ code: 100, message }),
+  });
 }
 
 /**
@@ -381,6 +465,31 @@ async function accountForWrite(
 }
 
 /**
+ * The fallback when no account was configured: read the account the object
+ * names as its owner. Best effort for the READ only — this path used to make no
+ * account request at all, so a token that can edit the object but not read its
+ * account keeps writing as before, just without the currency echo. A health
+ * verdict the read DID return is enforced like the configured path's.
+ */
+async function ownerAccountForWrite(
+  ctx: ToolContext,
+  record: AdRecord,
+  intent: AdWriteIntent,
+): Promise<AdAccountInfo | undefined> {
+  const owner = ownerAccountOf(record);
+  if (owner === undefined) return undefined;
+  let info: AdAccountInfo;
+  try {
+    info = await readAdAccount(ctx.fbRequest, { accountId: owner, ...signalOf(ctx) });
+  } catch (err) {
+    if (ctx.signal?.aborted === true) throw err;
+    return undefined;
+  }
+  assertAdAccountUsable(info, intent);
+  return info;
+}
+
+/**
  * Classify the pending update for {@link assertAdAccountUsable}. Pausing with no
  * budget field attached is the only shape that can only ever reduce spend, and
  * it is the one an account in payment trouble must never be locked out of.
@@ -408,6 +517,12 @@ function writeIntent(input: {
  * can move money should be opted into rather than out of.
  */
 export function createAdsPackage(): PackageSpec {
+  // None of the four plain reads below (the three listings and
+  // facebook_get_ad_object) declares `logFields`. Their arguments are the ad
+  // account — a constant the operator configured — plus paging and field
+  // selection, so the per-call line could only report that the configured
+  // account was read. Silence is the correct posture there; a padded allowlist
+  // is worse than none.
   const listCampaigns = defineTool({
     name: 'facebook_list_campaigns',
     title: 'List Campaigns',
@@ -415,7 +530,8 @@ export function createAdsPackage(): PackageSpec {
       'List campaigns under one ad account, a cursor page at a time. Each record ' +
       `carries the delivery truth, not just the configuration: ${EFFECTIVE_STATUS_NOTE} ` +
       'Budgets come back as integer `*_minor` fields in the account currency ' +
-      '(1000 = 10.00), never as floats. Filter server-side with effective_status; ' +
+      '(USD 1000 = 10.00; a zero-decimal currency such as JPY has no sub-unit, so ' +
+      '1000 = 1000), never as floats. Filter server-side with effective_status; ' +
       'archived and deleted campaigns are hidden by Graph unless you ask for them. ' +
       `${ADS_RATE_LIMIT_NOTE}`,
     inputSchema: z.object(listAdArgs),
@@ -495,9 +611,12 @@ export function createAdsPackage(): PackageSpec {
       'and a `reportRunId` and NO rows — poll it with facebook_ads_report_status ' +
       'rather than retrying this tool. Windows are either a `date_preset` or a ' +
       'since/until pair (both or neither). Breakdowns multiply rows, so add them ' +
-      'one at a time; use time_increment:"all_days" for totals. Empty rows mean ' +
-      'the object did not deliver in the window — that is data, not an error, and ' +
-      'attribution lags leave the last day or two incomplete.',
+      'one at a time; use time_increment:"all_days" for totals. Empty rows with no ' +
+      '`nextCursor` mean the object did not deliver in the window — that is data, ' +
+      'not an error; an empty page that still has a `nextCursor` means more pages ' +
+      'follow. Money metrics (spend, cpc, cpm, cost_per_*) are decimal amounts in ' +
+      "the row's `account_currency`, not minor units. Attribution lags leave the " +
+      'last day or two incomplete.',
     inputSchema: z.object({
       ad_account_id: adAccountIdArg,
       object_id: objectIdArg.optional(),
@@ -521,6 +640,23 @@ export function createAdsPackage(): PackageSpec {
     // large insights queries behind FB_WRITE_MODE and make a read-only server
     // unable to read — the opposite of what the tier protects.
     annotations: READ_ONLY,
+    // The one read in this package that earns a line on stderr. Insights is the
+    // throttled edge (ADS_RATE_LIMIT_NOTE) and the only read that can leave
+    // server-side state behind, since the async escape hatch POSTs a report run.
+    // An operator looking at a rate-limit wall needs the SHAPE of the query that
+    // built it: which object, at which level, over which window, and whether the
+    // model forced the async path. `fields` is a caller-composed field list,
+    // `breakdowns` an array the projection can only render as "[array]", and
+    // `after` an opaque cursor — none of them is evidence.
+    logFields: [
+      'ad_account_id',
+      'object_id',
+      'level',
+      'date_preset',
+      'since',
+      'until',
+      'force_async',
+    ],
     handler: async (input, ctx) => {
       // No object_id ⇒ account-level insights, which is the question most people
       // mean by "how are the ads doing".
@@ -548,6 +684,9 @@ export function createAdsPackage(): PackageSpec {
     },
   });
 
+  // No `logFields` on the poll below: the report run it polls was already
+  // recorded by facebook_ads_insights when it started one, and a
+  // `report_run_id` repeated every few seconds is volume, not evidence.
   const reportStatus = defineTool({
     name: 'facebook_ads_report_status',
     title: 'Ads Report Status',
@@ -610,7 +749,9 @@ export function createAdsPackage(): PackageSpec {
       'that preview, because both writes move money — resuming starts spending ' +
       'again, and a budget write OVERWRITES the previous value with no way to ' +
       'read it back afterwards. Budgets are MINOR currency units of the ad ' +
-      'account (1000 = 10.00, integers only) and are refused, never clamped, when ' +
+      'account — the unit Meta counts for that currency, its currency offset ' +
+      '(USD 1000 = 10.00; zero-decimal JPY or TWD 1000 = 1000), integers only — and are refused, never ' +
+      'clamped, when ' +
       'they exceed FB_ADS_BUDGET_CEILING. Only campaigns and ad sets have ' +
       'budgets; archived and deleted objects are read-only and are refused before ' +
       'the request. Setting status:"ACTIVE" sets the CONFIGURATION — check ' +
@@ -629,17 +770,39 @@ export function createAdsPackage(): PackageSpec {
       confirm_token: confirmTokenArg,
     }),
     annotations: UPDATE_ANNOTATIONS,
-    writeTier: 'irreversible',
-    logFields: ['object_id', 'level', 'status'],
+    // `spend`, not `irreversible`, because the declaration is a claim about the
+    // WORST tier any call can reach (see ToolSpec.writeTier) and this handler
+    // does not pass a constant: `planAdObjectUpdate` classifies a pause as
+    // `irreversible` and a resume or a budget raise as `spend`. Both are
+    // high-consequence, so the gate behaves identically either way — but this
+    // value is also what gen-metadata publishes as the tier column of the README
+    // table, and `irreversible` there does not tell an operator that the only
+    // money-spending tool in the server is the one they are reading about.
+    writeTier: 'spend',
+    // `apply` and `plan_id` are here for the same reason they are on every other
+    // write: the pre-handler line survives a crash the journal never gets to
+    // record, and without them this tool's line is identical whether the model
+    // previewed a resume or actually resumed delivery and started spending.
+    // `confirm_token` stays out — it is the operator's out-of-band secret.
+    logFields: ['object_id', 'level', 'status', 'apply', 'plan_id'],
     handler: async (input, ctx) => {
       // The account read comes first: a disabled account refuses the whole call
       // (CC-ADS-6) before an object read that could not lead anywhere.
-      const account = await accountForWrite(ctx, input.ad_account_id, writeIntent(input));
+      const intent = writeIntent(input);
+      const configured = await accountForWrite(ctx, input.ad_account_id, intent);
       const current = await getAdObject(ctx.fbRequest, {
         objectId: input.object_id,
         ...(input.level !== undefined ? { level: input.level } : {}),
         ...signalOf(ctx),
       });
+      assertObjectInAccount(input.object_id, current.object, configured);
+      // No account configured anywhere: the object names its own. Reading it is
+      // what supplies the currency every `*_minor` value in the preview is
+      // denominated in and the CC-ADS-6 health verdict — without it a JPY
+      // budget is previewed as bare "minor units" (read as hundredths) and a
+      // resume on a disabled account is previewed as if it could apply.
+      const account =
+        configured ?? (await ownerAccountForWrite(ctx, current.object, intent));
 
       // Pure: no request, so a refusal (read-only object, both budget kinds,
       // over-ceiling amount) happens with certainty that nothing was written.
@@ -682,12 +845,29 @@ export function createAdsPackage(): PackageSpec {
         return divergenceState(fresh.object);
       };
 
+      // Whether the caller's signal was ALREADY aborted when `perform` was
+      // entered. fetch refuses an aborted signal before a byte of the POST is
+      // sent, and the transport rethrows that AbortError raw — indistinguishable,
+      // by the error alone, from an abort that cut a request already on the
+      // wire. Only this moment can tell them apart: a cancel that won the race
+      // to the POST provably changed nothing, so its entry is `failed`, not
+      // "may be live". A cancel that lands later stays `attempted`.
+      let cancelledBeforeSend = false;
+
       return executeWrite(ctx, {
         tool: 'facebook_update_ad_object',
         // The PLAN's tier, not a constant: pausing is irreversible, resuming or
         // raising a budget is `spend` and pulls in the out-of-band confirmer.
         tier: plan.tier,
         params: {
+          // The RESOLVED account, not `input.ad_account_id`: it is optional and
+          // falls back to `FB_AD_ACCOUNT_ID`, so pinning the raw argument would
+          // let a preview that took the default be applied against an account
+          // named explicitly. The account decides which object the budget is
+          // read against and which currency the confirmed sentence is
+          // denominated in — it is part of what the preview promised, and an
+          // apply that changes it is a different write.
+          ...(account !== undefined ? { ad_account_id: account.id } : {}),
           object_id: input.object_id,
           ...(input.level !== undefined ? { level: input.level } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
@@ -704,7 +884,13 @@ export function createAdsPackage(): PackageSpec {
         notPerformedNotice:
           'This was a dry run — nothing was changed on the ads object and no money was spent.',
         readState,
-        perform: () => applyAdObjectUpdate(ctx.fbRequest, plan, ctx.signal),
+        perform: () => {
+          cancelledBeforeSend = ctx.signal?.aborted === true;
+          return applyAdObjectUpdate(ctx.fbRequest, plan, ctx.signal);
+        },
+        classifyResult: adUpdateVerdict,
+        classifyOutcome: (err) =>
+          cancelledBeforeSend ? 'failed' : classifyUpdateFailure(err),
         metadata: {
           objectId: input.object_id,
           ...(input.level !== undefined ? { level: input.level } : {}),
@@ -733,9 +919,17 @@ export function createAdsPackage(): PackageSpec {
       updateAdObject,
     ],
     enabledByDefault: false,
-    // Plan-first regardless of FB_WRITE_MODE (doc 06): `FB_WRITE_MODE=apply` is
-    // a convenience for cheap Page writes, and it must never silently promote a
-    // budget change into a one-shot spend.
+    // `writeModeDefault: 'plan'` is only the default for a server that did not
+    // choose: an explicitly set `FB_WRITE_MODE=apply` overrides a package
+    // default outright (see `effectiveWriteMode`). What makes the single write
+    // here plan-first whatever the mode says is the tier it hands the gate —
+    // `irreversible` for a pause, `spend` for a resume or a budget raise, never
+    // `reversible` — because both of those ignore the mode entirely and always
+    // demand the `plan_id` from a preceding preview. `FB_WRITE_MODE=apply` is a
+    // convenience for cheap Page writes and must never silently promote a budget
+    // change into a one-shot spend (doc 06). The default still earns its place
+    // for the day a reversible ads write is added, which would otherwise inherit
+    // the operator's global apply.
     writeModeDefault: 'plan',
   };
 }

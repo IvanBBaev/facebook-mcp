@@ -119,6 +119,42 @@ test('expandSelection throws PackageSelectionError listing every valid name', ()
   );
 });
 
+test('the source label is optional — a caller that has no variable to blame omits it', () => {
+  // setup-token expands FB_TOOL_PACKAGES defensively and swallows the failure, so
+  // not every caller has a variable worth naming. The message must still read as a
+  // sentence when none is supplied.
+  assert.throws(
+    () => expandSelection(['notaprofile']),
+    (err: unknown) => {
+      assert.ok(err instanceof PackageSelectionError);
+      assert.equal(err.source, undefined);
+      assert.match(
+        err.message,
+        /^Unknown tool package\/profile name\(s\): "notaprofile"\./,
+      );
+      return true;
+    },
+  );
+});
+
+test('the source label is folded into the message when supplied', () => {
+  assert.throws(
+    () => expandSelection(['notaprofile'], 'FB_PACKAGES_DENY'),
+    (err: unknown) => {
+      assert.ok(err instanceof PackageSelectionError);
+      assert.equal(err.source, 'FB_PACKAGES_DENY');
+      assert.match(
+        err.message,
+        /^Unknown tool package\/profile name\(s\) in FB_PACKAGES_DENY: "notaprofile"\./,
+      );
+      // The valid set still follows; naming the variable must not cost the operator
+      // the list of what they could have typed instead.
+      assert.match(err.message, /Valid names:/);
+      return true;
+    },
+  );
+});
+
 test('knownSelectionNames is the sorted union of profiles and packages', () => {
   const names = knownSelectionNames();
   // sorted

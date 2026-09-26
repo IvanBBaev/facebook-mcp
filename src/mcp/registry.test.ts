@@ -11,6 +11,7 @@ import { z } from 'zod';
 
 import { defineTool } from './define.js';
 import { createRegistry, effectiveWriteMode, RegistryError } from './registry.js';
+import { PackageSelectionError } from './packages.js';
 import type {
   PackageName,
   PackageSpec,
@@ -185,6 +186,32 @@ test('deny removes a whole package from the default surface', () => {
   assert.equal(reg.has('reader_get'), true);
 });
 
+test('`FB_PACKAGES_DENY=all` is a one-token kill switch down to read-only core', () => {
+  // Documented in docs/runbooks/kill-switch.md as the fastest in-process stop. It
+  // works because deny expands the `all` profile to every package and `core` is
+  // then forced back on — so the surface collapses to core's read-only tools
+  // without the operator having to enumerate the write packages under pressure,
+  // and without FB_TOOL_PACKAGES having to be correct.
+  const reg = createRegistry(
+    allPackages(),
+    makeSettings({ toolPackages: ['all'], packagesDeny: ['all'] }),
+  );
+  assert.deepEqual(reg.packageNames, ['core']);
+  assert.deepEqual(names(reg), ['core_whoami']);
+});
+
+test('deny expands profiles, so denying `core` empties the default surface', () => {
+  // The trap this pins: `core` is both a package name and a profile name, and
+  // `expandSelection` — which deny runs through just like the allow list — lets the
+  // PROFILE win. So this does not remove one package, it removes all six; the `core`
+  // package then comes back only because it is always-on. An operator reading
+  // "packages to exclude" would predict the exact opposite of what happens, which is
+  // why README says so explicitly now.
+  const reg = createRegistry(allPackages(), makeSettings({ packagesDeny: ['core'] }));
+  assert.deepEqual(reg.packageNames, ['core']);
+  assert.deepEqual(names(reg), ['core_whoami']);
+});
+
 // ---------------------------------------------------------------------------
 // Read-only: drop write-tier tools, keep read tools (CC-CFG-3)
 // ---------------------------------------------------------------------------
@@ -199,6 +226,41 @@ test('readonly drops write-tier tools but keeps read tools of the same package',
   assert.ok(reg.packageNames.includes('posts')); // package still present
   // Other packages keep their write tools.
   assert.equal(reg.has('msg_send'), true);
+});
+
+test('readonly drops a tool that declares a write in EITHER of its two signals', () => {
+  // `defineTool` cross-checks the two independent read-only signals, so a spec
+  // that disagrees with itself cannot come out of it — but `createRegistry`
+  // does not consume `defineTool`, it consumes an INJECTED `PackageSpec[]` that
+  // it never re-validates. A write tool that forgets `writeTier` (added later,
+  // copy-pasted off a read tool, hand-built in a fixture) still announces
+  // `readOnlyHint:false` to the client and still mutates.
+  //
+  // Keying the read-only drop on `writeTier` alone makes FB_PACKAGES_READONLY
+  // fail OPEN on exactly that fault: the operator asked for a deployment that
+  // cannot write and gets a mutating tool served. A read-only package is a
+  // containment control, so it must drop on the UNION of the signals — one
+  // missing field may cost a tool, never the guarantee.
+  const undertiered: ToolSpec = {
+    name: 'posts_delete',
+    description: 'write tool whose writeTier was never filled in',
+    inputSchema: z.object({}),
+    annotations: WRITE,
+    handler: () => Promise.resolve(ok()),
+  };
+  const reg = createRegistry(
+    [
+      pkg('core', [readTool('core_whoami')]),
+      pkg('posts', [readTool('posts_get'), undertiered]),
+    ],
+    makeSettings({ toolPackages: ['posts'], packagesReadonly: ['posts'] }),
+  );
+  assert.equal(reg.has('posts_get'), true, 'genuine read tools are still kept');
+  assert.equal(
+    reg.has('posts_delete'),
+    false,
+    'a read-only package may not serve a tool that announces itself as a write',
+  );
 });
 
 test('deny wins over readonly when a package is in both sets', () => {
@@ -237,6 +299,53 @@ test('an unknown selection name surfaces the valid-names error', () => {
   assert.throws(
     () => createRegistry(allPackages(), makeSettings({ toolPackages: ['nonsense'] })),
     /Unknown tool package\/profile name/,
+  );
+});
+
+// Three environment variables feed expandSelection and every one of them fails
+// the server closed. The message is the operator's only signal, and the runbook
+// (docs/runbooks/kill-switch.md) sends people to edit FB_PACKAGES_DENY under
+// incident pressure — so "which variable" has to be in the text, not inferred.
+test('a bad name in FB_TOOL_PACKAGES names FB_TOOL_PACKAGES', () => {
+  assert.throws(
+    () => createRegistry(allPackages(), makeSettings({ toolPackages: ['nonsense'] })),
+    (err: unknown) => {
+      assert.ok(err instanceof PackageSelectionError);
+      assert.equal(err.source, 'FB_TOOL_PACKAGES');
+      assert.match(err.message, /in FB_TOOL_PACKAGES/);
+      return true;
+    },
+  );
+});
+
+test('a bad name in FB_PACKAGES_DENY names FB_PACKAGES_DENY, not the allow list', () => {
+  assert.throws(
+    () =>
+      createRegistry(
+        allPackages(),
+        // The allow list is valid; only the deny list is typo'd. Reporting
+        // FB_TOOL_PACKAGES here would send the operator to edit a correct setting.
+        makeSettings({ toolPackages: ['all'], packagesDeny: ['reeder'] }),
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof PackageSelectionError);
+      assert.equal(err.source, 'FB_PACKAGES_DENY');
+      assert.match(err.message, /in FB_PACKAGES_DENY/);
+      assert.doesNotMatch(err.message, /FB_TOOL_PACKAGES/);
+      return true;
+    },
+  );
+});
+
+test('a bad name in FB_PACKAGES_READONLY names FB_PACKAGES_READONLY', () => {
+  assert.throws(
+    () => createRegistry(allPackages(), makeSettings({ packagesReadonly: ['red-only'] })),
+    (err: unknown) => {
+      assert.ok(err instanceof PackageSelectionError);
+      assert.equal(err.source, 'FB_PACKAGES_READONLY');
+      assert.match(err.message, /in FB_PACKAGES_READONLY/);
+      return true;
+    },
   );
 });
 
@@ -427,4 +536,180 @@ test('get returns the stamped spec for a known name and undefined for an unknown
 
   assert.equal(reg.get('mod_unhide'), undefined);
   assert.equal(reg.has('mod_unhide'), false);
+});
+
+// ---------------------------------------------------------------------------
+// `ads` is off unless it is NAMED — the whole-surface sweep
+// ---------------------------------------------------------------------------
+
+// The `ads` package can spend money, so "off by default" is not a preference,
+// it is the security boundary of this server (doc 06). One happy-path assertion
+// does not settle that: `ads` is INJECTED into every registry, so the question
+// is not whether the default list mentions it but whether ANY combination of the
+// three selection knobs can put it back. This sweeps the product of every
+// selection that does not name `ads`, every deny list, and every read-only list
+// — including the token forms that a careless `expandSelection` would fold into
+// something else (case, padding, duplicates, an empty segment) — and demands
+// that `ads` stay absent from `packageNames`, from `tools`, and from `get`/`has`.
+const ADS_TOOLS = ['ads_get', 'ads_spend'] as const;
+
+// Selections that never name `ads` or `all`. `undefined` is the deployed default.
+const ADS_FREE_SELECTIONS: readonly (readonly string[] | undefined)[] = [
+  undefined,
+  [],
+  [''],
+  ['   '],
+  ['core'],
+  ['CORE'],
+  ['  core  '],
+  ['core', 'core'],
+  ['core', ''],
+  ['reader'],
+  ['publisher'],
+  ['moderator'],
+  ['core', 'reader', 'posts', 'insights', 'moderation', 'messages'],
+];
+
+// Deny / read-only accept the same token grammar, so an operator token that
+// resolved sloppily here would be just as dangerous: `core` is BOTH a package
+// and a profile, and `all` names the ads-bearing profile.
+const KNOB_LISTS: readonly (readonly string[])[] = [
+  [],
+  ['core'],
+  ['all'],
+  ['posts'],
+  ['reader'],
+  ['moderation', 'messages'],
+  ['ADS'],
+  ['  ads  '],
+];
+
+test('ads never appears unless the selection names it — full knob sweep', () => {
+  for (const toolPackages of ADS_FREE_SELECTIONS) {
+    for (const packagesDeny of KNOB_LISTS) {
+      for (const packagesReadonly of KNOB_LISTS) {
+        const where = `selection=${JSON.stringify(toolPackages)} deny=${JSON.stringify(
+          packagesDeny,
+        )} readonly=${JSON.stringify(packagesReadonly)}`;
+        const reg = createRegistry(
+          allPackages(),
+          makeSettings({
+            ...(toolPackages !== undefined ? { toolPackages } : {}),
+            packagesDeny,
+            packagesReadonly,
+          }),
+        );
+        assert.equal(reg.packageNames.includes('ads'), false, where);
+        for (const tool of ADS_TOOLS) {
+          assert.equal(reg.has(tool), false, `${where} has(${tool})`);
+          assert.equal(reg.get(tool), undefined, `${where} get(${tool})`);
+        }
+        assert.equal(
+          names(reg).some((n) => n.startsWith('ads_')),
+          false,
+          where,
+        );
+      }
+    }
+  }
+});
+
+test('ads comes back on ONLY when a token names the package or the all profile', () => {
+  for (const token of ['ads', 'ADS', '  ads  ', 'all']) {
+    const reg = createRegistry(allPackages(), makeSettings({ toolPackages: [token] }));
+    assert.equal(reg.packageNames.includes('ads'), true, token);
+    assert.equal(reg.has('ads_spend'), true, token);
+  }
+  // And deny still beats an explicit selection, so the kill switch is real.
+  const denied = createRegistry(
+    allPackages(),
+    makeSettings({ toolPackages: ['all'], packagesDeny: ['ads'] }),
+  );
+  assert.equal(denied.packageNames.includes('ads'), false);
+  assert.equal(denied.has('ads_get'), false);
+});
+
+test('a duplicate tool name is caught even when read-only drops one of the twins', () => {
+  // `posts` owns the write-tier twin, `reader` the read-only one. Without
+  // read-only this is the wiring fault the test above pins. Naming `posts` in
+  // FB_PACKAGES_READONLY deletes the write twin BEFORE the collision check, so
+  // a survivors-only check would start clean and silently serve `reader`'s
+  // tool under a name two packages claim — a packaging fault that shows up in
+  // some deployments and not others is the one shape it must never take.
+  const injected = [
+    pkg('core', [readTool('core_whoami')]),
+    pkg('posts', [writeTool('dup_tool')]),
+    pkg('reader', [readTool('dup_tool')]),
+  ];
+  assert.throws(
+    () =>
+      createRegistry(
+        injected,
+        makeSettings({
+          toolPackages: ['posts', 'reader'],
+          packagesReadonly: ['posts'],
+        }),
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof RegistryError);
+      assert.match(err.message, /duplicate tool name 'dup_tool'/);
+      return true;
+    },
+  );
+});
+
+test('a duplicate tool name is caught even when one twin sits in an unselected package', () => {
+  // `ads` is off by default, so a survivors-only (or selected-only) check lets
+  // the default install boot clean over a packaging fault that crashes the very
+  // first deployment to enable `ads` — the fault must not depend on config.
+  const injected = [
+    pkg('core', [readTool('core_whoami')]),
+    pkg('posts', [readTool('dup_tool')]),
+    pkg('ads', [readTool('dup_tool')]),
+  ];
+  assert.throws(
+    () => createRegistry(injected, makeSettings({ toolPackages: ['posts'] })),
+    (err: unknown) => {
+      assert.ok(err instanceof RegistryError);
+      assert.match(err.message, /duplicate tool name 'dup_tool'/);
+      return true;
+    },
+  );
+});
+
+test('a duplicate tool name is caught even when FB_PACKAGES_DENY removes one twin', () => {
+  const injected = [
+    pkg('core', [readTool('core_whoami')]),
+    pkg('posts', [readTool('dup_tool')]),
+    pkg('reader', [readTool('dup_tool')]),
+  ];
+  assert.throws(
+    () =>
+      createRegistry(
+        injected,
+        makeSettings({ toolPackages: ['posts', 'reader'], packagesDeny: ['reader'] }),
+      ),
+    (err: unknown) => {
+      assert.ok(err instanceof RegistryError);
+      assert.match(err.message, /duplicate tool name 'dup_tool'/);
+      return true;
+    },
+  );
+});
+
+test('a duplicate tool name error names BOTH packages that claim it', () => {
+  const injected = [
+    pkg('core', [readTool('core_whoami')]),
+    pkg('reader', [readTool('dup_tool')]),
+    pkg('posts', [readTool('dup_tool')]),
+  ];
+  assert.throws(
+    () => createRegistry(injected, makeSettings({ toolPackages: ['reader', 'posts'] })),
+    (err: unknown) => {
+      assert.ok(err instanceof RegistryError);
+      assert.match(err.message, /'posts'/);
+      assert.match(err.message, /'reader'/);
+      return true;
+    },
+  );
 });

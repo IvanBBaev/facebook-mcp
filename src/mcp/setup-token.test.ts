@@ -11,7 +11,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -23,6 +32,7 @@ import {
   fbOk,
   type FakeFbRequest,
 } from '../core/fakes/index.js';
+import { loadEnvFile } from '../core/index.js';
 import type {
   AtomicWriteResult,
   FbRequest,
@@ -34,6 +44,7 @@ import type {
 import { withEnv } from '../testing/index.js';
 import {
   parseSetupTokenArgs,
+  renderEnvFile,
   renderSetupTokenReport,
   runSetupToken,
   SETUP_NEXT_COMMAND,
@@ -261,6 +272,22 @@ test('parses --page, --env-file, --force and --no-write, noting unknown options'
   assert.ok(input.notes.some((n) => n.includes('--wat')));
 });
 
+test('--page <id> and --env-file <path> take their value from the next argument', () => {
+  // The space-separated form is what most CLIs accept. Read as an unknown
+  // `--page` plus a positional, the Page ID became the TOKEN: FB_SETUP_TOKEN was
+  // silently ignored, the ID was sent to Graph as a credential, and the operator
+  // was told their token sat in the process list.
+  const input = parseSetupTokenArgs(['--page', '111', '--env-file', '/tmp/x.env'], {
+    [SETUP_TOKEN_ENV_VAR]: PASTED,
+  });
+
+  assert.equal(input.pageId, '111');
+  assert.equal(input.envFilePath, '/tmp/x.env');
+  assert.equal(input.token, PASTED);
+  assert.equal(input.tokenSource, 'env');
+  assert.deepEqual(input.notes, []);
+});
+
 test('an unknown option is echoed by name only — never its value', () => {
   // `--token=…` is the flag an operator reaches for before finding the positional
   // form; it is not supported, so it lands on the unknown-option path. The note it
@@ -319,6 +346,18 @@ test('refuses without a token and makes no Graph call at all', async () => {
   assert.equal(result.write.status, 'skipped');
 });
 
+test('the no-token instruction names the blocking scope, not an unshipped docs path', async () => {
+  // `docs/` is not in package.json's `files`, so an operator who reached this
+  // message through `npx @ivanbaev/facebook-mcp setup-token` has no runbook to
+  // open — and this is the first thing the flow ever prints.
+  const { deps } = makeDeps({ input: { token: undefined, tokenSource: 'none' } });
+
+  const detail = step(await runSetupToken(deps), 'input').detail ?? '';
+
+  assert.match(detail, /pages_show_list/, 'the blocking scope must be named inline');
+  assert.doesNotMatch(detail, /docs\//, 'points at a path the npm package omits');
+});
+
 test('registers the pasted token with the redactor before any Graph call', async () => {
   const { fb, deps } = makeDeps();
   const redactor = createFakeRedactor();
@@ -329,6 +368,31 @@ test('registers the pasted token with the redactor before any Graph call', async
   assert.ok(redactor.secrets.includes(PASTED), 'pasted token was not registered');
   assert.ok(redactor.secrets.includes(LONG_LIVED), 'long-lived token was not registered');
   assert.ok(redactor.secrets.includes(PAGE_TOKEN), 'Page token was not registered');
+});
+
+test('registers every Page token the listing carried, not only the selected one', async () => {
+  // The unselected Pages' tokens are live credentials sitting in the parsed
+  // payload for the rest of the run. Value-based redaction is the primary
+  // strategy (the `EAA…` pattern scan is only a backup), so each one has to be
+  // registered — the header promises it for "every derived Page token".
+  const otherPageToken = 'EAA-unselected-page';
+  const { deps, fb } = makeDeps({ input: { pageId: '222' } });
+  const redactor = createFakeRedactor();
+  withHappyPath(fb, {
+    pages: [
+      { id: '111', name: 'Acme Page', access_token: otherPageToken },
+      { id: '222', name: 'Other Page', access_token: PAGE_TOKEN },
+    ],
+  });
+
+  const result = await runSetupToken({ ...deps, redactor });
+
+  assert.equal(result.selectedPageId, '222');
+  assert.ok(redactor.secrets.includes(PAGE_TOKEN), 'selected Page token');
+  assert.ok(
+    redactor.secrets.includes(otherPageToken),
+    'the unselected Page token was never registered with the redactor',
+  );
 });
 
 test('refuses a Page token with the direct FB_PAGE_TOKEN instruction', async () => {
@@ -552,6 +616,64 @@ test('warns when Graph reports no expiry for the exchanged token', async () => {
   assertNoSecrets(result);
 });
 
+test('an exchange whose token dies within the day is flagged, not called long-lived', async () => {
+  const now = 1_700_000_000_000;
+  const { deps, fb, writes } = makeDeps({ nowMs: now });
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: ['pages_show_list'] });
+  // Graph answered the exchange with a token that lives 90 minutes — the
+  // lifetime of the Explorer token that went in, not the ~60 days that make a
+  // token long-lived. The step used to call it "long-lived token obtained
+  // (~0 days)" with nothing else said, and the file was written as usual.
+  fb.on(
+    (req) => req.path === '/oauth/access_token',
+    fbOk({ access_token: LONG_LIVED, expires_in: 5_400 }),
+  );
+  fb.on(
+    (req) => req.path === '/me/accounts',
+    fbOk({ data: [{ id: '111', name: 'Acme Page', access_token: PAGE_TOKEN }] }),
+  );
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.ok, true, 'a short lifetime is a warning, never a refusal');
+  assert.equal(result.exchange?.expiresAt, now + 5_400 * 1000);
+  assert.equal(result.exchange?.expiresInDays, 0);
+  assert.equal(
+    writes.length,
+    1,
+    'the token still works until it expires, so it is written',
+  );
+  const summary = step(result, 'exchange').summary;
+  assert.doesNotMatch(summary, /long-lived/, 'a 90-minute token is not long-lived');
+  assert.match(summary, /expires in ~1 hour/);
+  const warning = result.warnings.find((w) => w.includes('not a long-lived token')) ?? '';
+  assert.match(warning, /~1 hour/);
+  assert.match(warning, /re-run/);
+  const text = renderSetupTokenReport(result);
+  assert.match(text, /token: {12}expires .+ \(under a day — NOT long-lived\)/);
+  assert.doesNotMatch(text, /long-lived token: expires/);
+  assertNoSecrets(result);
+});
+
+test('an exchange whose token dies within the hour states the minutes left', async () => {
+  const now = 1_700_000_000_000;
+  const { deps, fb } = makeDeps({ nowMs: now });
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: ['pages_show_list'] });
+  fb.on(
+    (req) => req.path === '/oauth/access_token',
+    fbOk({ access_token: LONG_LIVED, expires_in: 20 }),
+  );
+  fb.on(
+    (req) => req.path === '/me/accounts',
+    fbOk({ data: [{ id: '111', name: 'Acme Page', access_token: PAGE_TOKEN }] }),
+  );
+
+  const result = await runSetupToken(deps);
+
+  assert.match(step(result, 'exchange').summary, /expires in ~1 minute/);
+  assert.ok(result.warnings.some((w) => w.includes('not a long-lived token')));
+});
+
 test('reports an exchange failure without throwing', async () => {
   const { deps, fb } = makeDeps();
   withDebugToken(fb, { type: 'USER', is_valid: true, scopes: ['pages_show_list'] });
@@ -617,6 +739,46 @@ test('renders a non-expiring System-User token without the rotation note', async
     text.includes(SYSTEM_USER_GUIDANCE),
     false,
     'a token that never expires needs no "mint a System-User token" note',
+  );
+});
+
+test('a System-User token whose expiry Graph never stated is not written as non-expiring', async () => {
+  // `debug_token` answers `expires_at: 0` for a token that never expires; an
+  // answer with no usable `expires_at` at all says nothing. The two used to
+  // collapse into the same "non-expiring (System-User token, used verbatim)"
+  // line, so a credential the operator must rotate was filed as one they never
+  // need to touch.
+  const { deps, fb, writes } = makeDeps();
+  withDebugToken(fb, {
+    type: 'SYSTEM_USER',
+    is_valid: true,
+    scopes: ['pages_show_list'],
+  });
+  fb.on(
+    (req) => req.path === '/me/accounts',
+    fbOk({ data: [{ id: '111', name: 'Acme Page', access_token: PAGE_TOKEN }] }),
+  );
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.ok, true, 'an unknown expiry is a warning, not a failure');
+  assert.equal(result.token.expiry, 'unknown');
+  assert.equal(result.exchange?.performed, false);
+  assert.equal(result.exchange?.neverExpiring, false, 'unknown is not "never expires"');
+  assert.equal(result.exchange?.expiresAt, undefined);
+  assert.ok(
+    result.warnings.some((w) =>
+      /did not report an expiry for this System-User token/.test(w),
+    ),
+    `expected an unknown-expiry warning, got ${JSON.stringify(result.warnings)}`,
+  );
+  const text = renderSetupTokenReport(result);
+  assert.doesNotMatch(text, /non-expiring \(System-User token/);
+  assert.match(text, /System-User token: used verbatim, expiry not reported by Graph/);
+  assert.match(
+    writes[0]?.contents ?? '',
+    /FB_SYSTEM_TOKEN="EAA-pasted"/,
+    'still written',
   );
 });
 
@@ -713,6 +875,33 @@ test('does not select a Page when several exist and none was requested', async (
   assert.ok(result.warnings.some((w) => w.includes('--page=<id>')));
 });
 
+test('the "pin a Page" advice admits the re-run needs --force', async () => {
+  const { deps, fb } = makeDeps();
+  withHappyPath(fb, {
+    pages: [
+      { id: '111', name: 'Acme Page' },
+      { id: '222', name: 'Other Page' },
+    ],
+  });
+
+  const result = await runSetupToken(deps);
+  const warning = result.warnings.find((w) => w.includes('--page=<id>')) ?? '';
+
+  assert.equal(result.write.status, 'written', 'this run leaves an env file behind');
+  assert.match(warning, /--force/, 'the suggested re-run is refused without it');
+
+  // The trap the warning has to describe: the exact command it suggests, run
+  // against the file this run just wrote, does not complete.
+  const second = makeDeps({ input: { pageId: '222' }, fileExists: true });
+  withHappyPath(second.fb, {
+    pages: [
+      { id: '111', name: 'Acme Page' },
+      { id: '222', name: 'Other Page', access_token: PAGE_TOKEN },
+    ],
+  });
+  assert.equal((await runSetupToken(second.deps)).write.status, 'needs-force');
+});
+
 test('--page= pins the requested Page and leaves the others unselected', async () => {
   const { deps, fb, writes } = makeDeps({ input: { pageId: '222' } });
   withHappyPath(fb, {
@@ -784,6 +973,28 @@ test('ignores account entries without an id and labels a nameless Page', async (
   assert.match(renderSetupTokenReport(result), /\(unnamed Page\)/);
 });
 
+test('an account entry with unexpected field types cannot crash the renderer', async () => {
+  // `/me/accounts` is untrusted JSON, not a validated shape. `tasks` is joined
+  // by the renderer, so a non-array arriving there threw AFTER the credentials
+  // had already been written to disk — the operator lost the report of a run
+  // that had in fact succeeded.
+  const { deps, fb, writes } = makeDeps();
+  withHappyPath(fb, {
+    pages: [
+      { id: '111', name: 42, category: null, tasks: 'MANAGE', access_token: PAGE_TOKEN },
+    ],
+  });
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(writes.length, 1, 'the write happens before the render');
+  assert.doesNotThrow(() => renderSetupTokenReport(result));
+  assert.deepEqual(result.pages[0]?.tasks, []);
+  assert.equal(result.pages[0]?.name, '(unnamed Page)');
+  assert.equal(result.pages[0]?.category, undefined, 'a null category is not "[null]"');
+  assert.equal(result.pages[0]?.hasToken, true);
+});
+
 test('warns when no Page token could be derived for the selected Page', async () => {
   const { deps, fb, writes } = makeDeps();
   withHappyPath(fb, { pages: [{ id: '111', name: 'Acme Page' }] });
@@ -806,6 +1017,101 @@ test('warns when no Page token could be derived for the selected Page', async ()
   assert.equal((writes[0]?.contents ?? '').includes('FB_PAGE_TOKEN'), false);
 });
 
+test('a failed Page-token derivation names the reason, redacted, not only a role hint', async () => {
+  // Every failure used to collapse into "confirm your role on the Page" — also a
+  // network timeout or a dead token, where checking the role fixes nothing and
+  // the one fact that would (Graph's own message) had been thrown away.
+  const { deps, fb } = makeDeps();
+  withHappyPath(fb, { pages: [{ id: '111', name: 'Acme Page' }] });
+  fb.on(
+    (req) => req.path === '/111',
+    fbErr(new Error(`connect ETIMEDOUT graph.facebook.com token=${LONG_LIVED}`)),
+  );
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.ok, true, 'still a warning, never a refusal');
+  const warning = result.warnings.find((w) =>
+    w.includes('No Page token could be derived'),
+  );
+  assert.ok(warning, 'expected the derivation warning');
+  assert.match(warning, /ETIMEDOUT/, 'the reason for the failed derivation was dropped');
+  assertNoSecrets(result);
+});
+
+test('a failed Page-token derivation never claims a write the write step did not make', async () => {
+  // The derivation warning is composed during the pages step, before the write
+  // step has run. It used to say "only the runtime token was written" even when
+  // that step then refused (an existing file without --force), failed, or was a
+  // dry run — so the operator was told a credential had landed on disk when
+  // nothing had.
+  const cases: readonly {
+    readonly label: string;
+    readonly opts: Parameters<typeof makeDeps>[0];
+    readonly expected: RegExp;
+  }[] = [
+    {
+      label: 'existing file, no --force',
+      opts: { fileExists: true },
+      expected: /nothing was written/,
+    },
+    {
+      label: 'write error',
+      opts: { writeError: new Error('EACCES: permission denied') },
+      expected: /nothing was written/,
+    },
+    {
+      label: 'dry run',
+      opts: { input: { write: false } },
+      expected: /dry run wrote nothing/,
+    },
+  ];
+  for (const { label, opts, expected } of cases) {
+    const { deps, fb, writes } = makeDeps(opts);
+    withHappyPath(fb, { pages: [{ id: '111', name: 'Acme Page' }] });
+    fb.on((req) => req.path === '/111', fbErr(new Error('(#200) requires Page role')));
+
+    const result = await runSetupToken(deps);
+
+    assert.equal(writes.length, 0, `${label}: nothing may be written`);
+    const warning =
+      result.warnings.find((w) => w.includes('No Page token could be derived')) ?? '';
+    assert.doesNotMatch(
+      warning,
+      /only the runtime token was written/,
+      `${label}: the warning claims a write that never happened: ${warning}`,
+    );
+    assert.match(warning, expected, `${label}: ${warning}`);
+  }
+
+  // The write that does happen is still described as such.
+  const { deps, fb } = makeDeps();
+  withHappyPath(fb, { pages: [{ id: '111', name: 'Acme Page' }] });
+  fb.on((req) => req.path === '/111', fbErr(new Error('(#200) requires Page role')));
+  const written = await runSetupToken(deps);
+  assert.match(
+    written.warnings.find((w) => w.includes('No Page token could be derived')) ?? '',
+    /only the runtime token was written/,
+  );
+});
+
+test('a token that sees no Pages never claims its runtime token was written when it was not', async () => {
+  const { deps, fb, writes } = makeDeps({ fileExists: true });
+  withHappyPath(fb, { pages: [] });
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.write.status, 'needs-force');
+  assert.equal(writes.length, 0);
+  const warning = result.warnings.find((w) => w.includes('No Pages were returned')) ?? '';
+  assert.doesNotMatch(
+    warning,
+    /runtime token is still written/,
+    `the warning claims a write that never happened: ${warning}`,
+  );
+  assert.match(warning, /nothing was written/i);
+});
+
 test('explains that the token sees no Pages at all when --page= matches nothing', async () => {
   const { deps, fb } = makeDeps({ input: { pageId: '999' } });
   withHappyPath(fb, { pages: [] });
@@ -818,6 +1124,63 @@ test('explains that the token sees no Pages at all when --page= matches nothing'
   assert.match(step(result, 'pages').detail ?? '', /pages_show_list/);
   assert.deepEqual(result.pages, []);
   assert.equal(result.write.status, 'skipped');
+});
+
+test('an unreadable FB_TOOL_PACKAGES is reported, not silently defaulted', async () => {
+  // The scope cross-reference is computed against "the packages this install will
+  // run". With an invalid FB_TOOL_PACKAGES the install runs NOTHING — the server
+  // refuses to start on it. Falling back to the default profile in silence let the
+  // operator finish onboarding with a green report describing a configuration that
+  // cannot boot, and nothing in the output pointed at the variable to fix.
+  const { deps, fb } = makeDeps({
+    settings: makeSettings({ toolPackages: ['reader', 'notaprofile'] }),
+  });
+  withHappyPath(fb);
+
+  const result = await runSetupToken(deps);
+
+  const warning = result.warnings.find((w) => w.includes('FB_TOOL_PACKAGES')) ?? '';
+  assert.match(warning, /could not be read/);
+  // The offending token, so the fix does not need a second run to locate.
+  assert.match(warning, /notaprofile/);
+  // And the consequence, which is what makes it worth interrupting a green run.
+  assert.match(warning, /refuse to start/);
+});
+
+test('a valid FB_TOOL_PACKAGES adds no such warning', async () => {
+  const { deps, fb } = makeDeps({
+    settings: makeSettings({ toolPackages: ['reader'] }),
+  });
+  withHappyPath(fb);
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(
+    result.warnings.some((w) => w.includes('FB_TOOL_PACKAGES')),
+    false,
+  );
+});
+
+test('never blames pages_show_list after classify verified it was granted', async () => {
+  // classify refuses any token missing pages_show_list, so by the time the
+  // pages step speaks, "the scope was not granted" is a cause the flow itself
+  // has already ruled out — and it sends the operator back to the Explorer to
+  // re-tick a box that is already ticked.
+  const { deps, fb } = makeDeps();
+  withHappyPath(fb, { pages: [] });
+
+  const empty = await runSetupToken(deps);
+  const warning = empty.warnings.find((w) => w.includes('No Pages were returned')) ?? '';
+
+  assert.doesNotMatch(warning, /pages_show_list was not granted/);
+  assert.match(warning, /pages_show_list IS granted/);
+
+  const pinned = makeDeps({ input: { pageId: '999' } });
+  withHappyPath(pinned.fb, { pages: [] });
+  const detail = step(await runSetupToken(pinned.deps), 'pages').detail ?? '';
+
+  assert.doesNotMatch(detail, /pages_show_list was granted/);
+  assert.match(detail, /pages_show_list IS granted/);
 });
 
 test('passes the caller AbortSignal to every Graph call it makes', async () => {
@@ -852,6 +1215,68 @@ test('fails when the requested Page is not visible, listing the available IDs', 
   assert.equal(step(result, 'pages').status, 'failed');
   assert.match(step(result, 'pages').detail ?? '', /111, 222/);
   assert.equal(result.write.status, 'skipped');
+});
+
+test('admits the Page listing was truncated instead of denying the Page exists', async () => {
+  // The flow reads ONE page of /me/accounts (limit 100) and never follows
+  // `paging.next`. With more Pages than that, "not among the Pages this token
+  // can see" is false — the Page is simply outside the window this run read.
+  const truncated = {
+    data: [{ id: '111', name: 'Acme Page', access_token: PAGE_TOKEN }],
+    paging: { next: 'https://graph.facebook.com/v23.0/me/accounts?after=cursor' },
+  };
+  const pinned = makeDeps({ input: { pageId: '999' } });
+  withDebugToken(pinned.fb, {
+    type: 'USER',
+    is_valid: true,
+    scopes: ['pages_show_list'],
+  });
+  pinned.fb.on(
+    (req) => req.path === '/oauth/access_token',
+    fbOk({ access_token: LONG_LIVED, expires_in: 5_184_000 }),
+  );
+  pinned.fb.on((req) => req.path === '/me/accounts', fbOk(truncated));
+
+  const missed = await runSetupToken(pinned.deps);
+
+  assert.equal(step(missed, 'pages').status, 'failed');
+  assert.match(step(missed, 'pages').summary, /first 100 Pages/);
+  assert.match(step(missed, 'pages').summary, /Graph reported more/);
+});
+
+test('a truncated listing never auto-selects its only visible Page', async () => {
+  // Auto-selection rests on uniqueness: ONE Page, so it must be the one. When
+  // Graph's own `paging.next` says more exist, the entry this run happened to
+  // see is not unique — pinning it wrote FB_PAGE_ID for a Page the operator
+  // never chose, reported as "1 Page(s) found; selected 111", and every later
+  // write went to it.
+  const { deps, fb, writes } = makeDeps();
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: ['pages_show_list'] });
+  fb.on(
+    (req) => req.path === '/oauth/access_token',
+    fbOk({ access_token: LONG_LIVED, expires_in: 5_184_000 }),
+  );
+  fb.on(
+    (req) => req.path === '/me/accounts',
+    fbOk({
+      data: [{ id: '111', name: 'Acme Page', access_token: PAGE_TOKEN }],
+      paging: { next: 'https://graph.facebook.com/v23.0/me/accounts?after=cursor' },
+    }),
+  );
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.selectedPageId, undefined, 'a non-unique Page was pinned');
+  assert.equal(result.write.keys.includes('FB_PAGE_ID'), false);
+  assert.equal((writes[0]?.contents ?? '').includes('FB_PAGE_ID'), false);
+  assert.ok(
+    result.warnings.some((w) => w.includes('Graph reported more Pages')),
+    'a truncated listing was never disclosed',
+  );
+  assert.ok(
+    result.warnings.some((w) => w.includes('--page=<id>')),
+    'the operator is not told how to pin the Page',
+  );
 });
 
 test('derives the Page token explicitly when /me/accounts omits it', async () => {
@@ -925,6 +1350,139 @@ test('--no-write reports the keys it would write without touching the file', asy
   assert.ok(result.write.keys.includes('FB_PAGE_TOKEN'));
   assert.equal(writes.length, 0);
   assert.match(step(result, 'write').detail ?? '', /--no-write/);
+});
+
+test('--no-write over an existing env file says the real run needs --force', async () => {
+  // The dry run exists to answer "what will the real run do?". Promising
+  // "re-run without --no-write to write …" while that exact re-run is refused
+  // (the file exists, no --force) sends the operator into a failing command.
+  const { deps, fb, writes } = makeDeps({ fileExists: true, input: { write: false } });
+  withHappyPath(fb);
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.write.status, 'skipped');
+  assert.equal(writes.length, 0);
+  const detail = step(result, 'write').detail ?? '';
+  assert.match(detail, /already exists/);
+  assert.match(detail, /--force/);
+});
+
+test(
+  '--no-write over a symlinked env file reports the refusal the real run would hit',
+  { skip: process.platform === 'win32' ? 'POSIX symlinks only' : false },
+  async (t) => {
+    // A symbolic link at the env path is refused even with --force, so no
+    // re-run of this command can ever write there. A dry run that reports
+    // success and promises the write is telling the operator something false.
+    const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-setup-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const real = path.join(dir, 'managed.env');
+    await writeFile(real, 'FB_ACCESS_TOKEN="EAA-old"\n', { mode: 0o600 });
+    const target = path.join(dir, '.env');
+    await symlink(real, target);
+    const fb = createFakeFbRequest();
+    withHappyPath(fb);
+
+    const result = await runSetupToken({
+      fbRequest: fb.fn,
+      settings: makeSettings(),
+      clock: createFakeClock(1_000_000),
+      logger: makeLogger(),
+      redactor: createFakeRedactor(),
+      input: makeInput({ envFilePath: target, write: false }),
+    });
+
+    assert.equal(result.ok, false, 'a write no re-run can perform is not a success');
+    assert.equal(result.write.status, 'failed');
+    assert.match(result.write.error ?? '', /symbolic link/);
+    assert.match(step(result, 'write').detail ?? '', /--env-file=/);
+    assert.equal((await lstat(target)).isSymbolicLink(), true, 'the link survives');
+    assert.equal(await readFile(real, 'utf8'), 'FB_ACCESS_TOKEN="EAA-old"\n');
+  },
+);
+
+/**
+ * An existing env file holding keys this command never writes. The values are
+ * distinctive so a report that echoed one would be caught.
+ */
+const OLD_ENV_FILE =
+  'FB_APP_ID="1234567890"\n' +
+  'FB_ACCESS_TOKEN="EAA-old"\n' +
+  'FB_CONFIRM_TOKEN="old-confirm-value"\n' +
+  'FB_WRITE_MODE=live\n' +
+  'FB_TOOL_PACKAGES="core,posts"\n';
+
+async function runOverExistingFile(
+  t: { after: (fn: () => Promise<void>) => void },
+  input: Partial<SetupTokenInput>,
+): Promise<{ result: SetupTokenResult; writes: Written[] }> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-setup-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envPath = path.join(dir, '.env');
+  await writeFile(envPath, OLD_ENV_FILE, { mode: 0o600 });
+  const fb = createFakeFbRequest();
+  withHappyPath(fb);
+  const writes: Written[] = [];
+  const result = await runSetupToken({
+    fbRequest: fb.fn,
+    settings: makeSettings(),
+    clock: createFakeClock(1_000_000),
+    logger: makeLogger(),
+    redactor: createFakeRedactor(),
+    input: makeInput({ envFilePath: envPath, ...input }),
+    writeEnvFile: (filePath, contents): Promise<AtomicWriteResult> => {
+      writes.push({ path: filePath, contents });
+      return Promise.resolve({ path: filePath, restricted: true, mode: 0o600 });
+    },
+  });
+  return { result, writes };
+}
+
+function assertNamesDroppedKeys(result: SetupTokenResult): void {
+  const detail = step(result, 'write').detail ?? '';
+  const text = renderSetupTokenReport(result);
+  for (const haystack of [detail, text]) {
+    assert.match(haystack, /FB_CONFIRM_TOKEN, FB_WRITE_MODE, FB_TOOL_PACKAGES/);
+  }
+  // Keys this run re-writes are not "dropped".
+  assert.equal(/dropped[^\n]*FB_ACCESS_TOKEN/i.test(text), false);
+  // Names only — never a value from the old file.
+  for (const value of ['EAA-old', 'old-confirm-value', 'core,posts']) {
+    assert.equal(text.includes(value), false, `old value ${value} leaked`);
+    assert.equal(
+      JSON.stringify(result).includes(value),
+      false,
+      `old value ${value} leaked`,
+    );
+  }
+}
+
+test('--force over an existing env file names the keys the replacement drops', async (t) => {
+  // The file is replaced wholesale: a confirm token, a write mode or a package
+  // selection the operator set by hand silently vanished, and the next server
+  // start ran in a different mode with no hint why.
+  const { result, writes } = await runOverExistingFile(t, { force: true });
+
+  assert.equal(result.write.status, 'written');
+  assert.equal(writes.length, 1);
+  assertNamesDroppedKeys(result);
+});
+
+test('a --force dry run over an existing env file names the keys it would drop', async (t) => {
+  const { result, writes } = await runOverExistingFile(t, { force: true, write: false });
+
+  assert.equal(result.write.status, 'skipped');
+  assert.equal(writes.length, 0);
+  assertNamesDroppedKeys(result);
+});
+
+test('the overwrite refusal names the keys --force would drop', async (t) => {
+  const { result, writes } = await runOverExistingFile(t, {});
+
+  assert.equal(result.write.status, 'needs-force');
+  assert.equal(writes.length, 0);
+  assertNamesDroppedKeys(result);
 });
 
 test('reports a write failure with a redacted message', async () => {
@@ -1166,6 +1724,242 @@ test(
   },
 );
 
+test(
+  'a dangling symlink at the env path is an existing entry, not a free slot',
+  { skip: process.platform === 'win32' ? 'POSIX symlinks only' : false },
+  async (t) => {
+    // `.env -> <a file on a volume that is not mounted yet>`: `stat` follows the
+    // link, answers ENOENT, and the overwrite guard waved the write through
+    // without --force — then `rename` replaced the operator's link with a
+    // regular file. The guard exists precisely so nothing at the path is
+    // replaced unasked.
+    const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-setup-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const target = path.join(dir, '.env');
+    const linkTarget = path.join(dir, 'unmounted', 'fb.env');
+    await symlink(linkTarget, target);
+    const fb = createFakeFbRequest();
+    withHappyPath(fb);
+
+    const result = await runSetupToken({
+      fbRequest: fb.fn,
+      settings: makeSettings(),
+      clock: createFakeClock(1_000_000),
+      logger: makeLogger(),
+      redactor: createFakeRedactor(),
+      input: makeInput({ envFilePath: target }),
+    });
+
+    assert.notEqual(result.write.status, 'written', 'nothing may be written unasked');
+    assert.equal(result.ok, false);
+    assert.equal((await lstat(target)).isSymbolicLink(), true, 'the link survives');
+    assert.equal(await readlink(target), linkTarget);
+  },
+);
+
+test(
+  'refuses to replace a symlinked env file even with --force, and says why',
+  { skip: process.platform === 'win32' ? 'POSIX symlinks only' : false },
+  async (t) => {
+    // With --force the atomic `rename` replaces the LINK, not the file it points
+    // to: the operator's managed file keeps the stale credential, the link they
+    // set up is gone, and the report claims the keys were written "to" a path
+    // that no longer means what they configured.
+    const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-setup-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const real = path.join(dir, 'managed.env');
+    await writeFile(real, 'FB_ACCESS_TOKEN="EAA-old"\n', { mode: 0o600 });
+    const target = path.join(dir, '.env');
+    await symlink(real, target);
+    const fb = createFakeFbRequest();
+    withHappyPath(fb);
+
+    const result = await runSetupToken({
+      fbRequest: fb.fn,
+      settings: makeSettings(),
+      clock: createFakeClock(1_000_000),
+      logger: makeLogger(),
+      redactor: createFakeRedactor(),
+      input: makeInput({ envFilePath: target, force: true }),
+    });
+
+    assert.equal(result.write.status, 'failed');
+    assert.equal(result.ok, false);
+    assert.match(result.write.error ?? '', /symbolic link/);
+    assert.match(step(result, 'write').detail ?? '', /--env-file=/);
+    assert.match(renderSetupTokenReport(result), /symbolic link/);
+    assert.equal((await lstat(target)).isSymbolicLink(), true, 'the link survives');
+    assert.equal(await readFile(real, 'utf8'), 'FB_ACCESS_TOKEN="EAA-old"\n');
+  },
+);
+
+// ---------------------------------------------------------------------------
+// The env file has to read back as the value that was written
+// ---------------------------------------------------------------------------
+
+/** Every key this flow can write — scoped away so a load cannot leak into the run. */
+const ENV_KEYS_UNDER_TEST = [
+  'FB_APP_ID',
+  'FB_APP_SECRET',
+  'FB_ACCESS_TOKEN',
+  'FB_SYSTEM_TOKEN',
+  'FB_PAGE_ID',
+  'FB_PAGE_TOKEN',
+] as const;
+
+/**
+ * Render `entries` with {@link renderEnvFile}, write them to a real file and
+ * load it back through `core`'s `loadEnvFile` — the exact path the server takes
+ * on the next start. What comes out of `process.env` is what the server will
+ * actually authenticate with.
+ */
+async function roundTripEnvFile(
+  entries: readonly (readonly [string, string])[],
+): Promise<{
+  readonly seen: Readonly<Record<string, string | undefined>>;
+  readonly parsedKeys: readonly string[];
+}> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-envfile-'));
+  const target = path.join(dir, '.env');
+  await writeFile(target, renderEnvFile(entries, 1_000_000), { mode: 0o600 });
+  const seen: Record<string, string | undefined> = {};
+  let parsedKeys: readonly string[] = [];
+  try {
+    await withEnv(
+      Object.fromEntries(ENV_KEYS_UNDER_TEST.map((key) => [key, undefined])),
+      () => {
+        parsedKeys = loadEnvFile({ path: target, override: true }).parsedKeys;
+        for (const key of ENV_KEYS_UNDER_TEST) seen[key] = process.env[key];
+      },
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+  return { seen, parsedKeys };
+}
+
+test('a written value containing a backslash or a quote reads back unchanged', async () => {
+  // dotenv — the parser `loadEnvFile` hands the file to — strips ONE layer of
+  // quotes and expands only \n and \r inside double quotes. It never unescapes
+  // \\ or \", so a defensively escaped value loads with the escapes still in it
+  // and the server authenticates with a credential Graph never issued.
+  const { seen } = await roundTripEnvFile([
+    ['FB_PAGE_TOKEN', 'EAA-back\\slash'],
+    ['FB_APP_SECRET', 'quote"inside'],
+  ]);
+
+  assert.equal(seen.FB_PAGE_TOKEN, 'EAA-back\\slash');
+  assert.equal(seen.FB_APP_SECRET, 'quote"inside');
+});
+
+test('a value with #, $ or trailing spaces survives and injects no second key', async () => {
+  const { seen, parsedKeys } = await roundTripEnvFile([
+    ['FB_ACCESS_TOKEN', 'EAA #not-a-comment $HOME  '],
+    ['FB_PAGE_ID', 'x\nFB_APP_SECRET=injected'],
+  ]);
+
+  assert.equal(seen.FB_ACCESS_TOKEN, 'EAA #not-a-comment $HOME  ');
+  assert.equal(seen.FB_PAGE_ID, 'x\nFB_APP_SECRET=injected');
+  // A crafted value must never become a second variable in the file it lands in.
+  assert.deepEqual([...parsedKeys].sort(), ['FB_ACCESS_TOKEN', 'FB_PAGE_ID']);
+  assert.equal(seen.FB_APP_SECRET, undefined);
+});
+
+test('a value no env file can represent is refused instead of silently mangled', () => {
+  // Both quote styles in one value: a double-quoted line cannot carry the `"`,
+  // a single-quoted one cannot carry the `'`, and dotenv unescapes neither. No
+  // encoding is left, and writing a file that loads as a DIFFERENT credential is
+  // not an acceptable substitute for saying so.
+  assert.throws(
+    () => renderEnvFile([['FB_APP_SECRET', `mixed'and"quotes`]], 1_000_000),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /FB_APP_SECRET/);
+      assert.doesNotMatch(err.message, /mixed/, 'the value must never be printed');
+      return true;
+    },
+  );
+});
+
+test('a value ending in a backslash neither swallows the next line nor lets it inject a key', async () => {
+  // dotenv matches a single-quoted value with `'(?:\\'|[^'])*'`: a trailing
+  // backslash turns the closing quote into an "escaped" one, so the match runs
+  // on to the next single quote that ends a line — here the one opening the
+  // Page token. Everything in between, following keys included, becomes this
+  // value, and the Page token's own lines are then parsed as fresh keys.
+  const entries = [
+    ['FB_APP_SECRET', 'ends-with\\'],
+    ['FB_PAGE_ID', '111'],
+    ['FB_PAGE_TOKEN', '\nFB_ACCESS_TOKEN=injected\n"x'],
+  ] as const;
+  const { seen, parsedKeys } = await roundTripEnvFile(entries);
+
+  assert.equal(seen.FB_APP_SECRET, 'ends-with\\');
+  assert.equal(seen.FB_PAGE_ID, '111');
+  assert.equal(seen.FB_PAGE_TOKEN, '\nFB_ACCESS_TOKEN=injected\n"x');
+  assert.equal(seen.FB_ACCESS_TOKEN, undefined, 'no key may be injected');
+  assert.deepEqual([...parsedKeys].sort(), [
+    'FB_APP_SECRET',
+    'FB_PAGE_ID',
+    'FB_PAGE_TOKEN',
+  ]);
+});
+
+test('a trailing-backslash value that cannot be written bare is refused, not mangled', () => {
+  // Every quote style mis-reads a trailing backslash, and a bare value loses its
+  // leading/trailing whitespace, `#…` tail and line breaks. No encoding is left.
+  for (const value of [' lead-space\\', 'has #hash\\', 'line\nbreak\\']) {
+    assert.throws(
+      () => renderEnvFile([['FB_PAGE_TOKEN', value]], 1_000_000),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /FB_PAGE_TOKEN/);
+        assert.doesNotMatch(err.message, /lead-space|hash|break/);
+        return true;
+      },
+      `expected ${JSON.stringify(value)} to be refused`,
+    );
+  }
+});
+
+test('a carriage return in a value reads back as a carriage return', async () => {
+  // dotenv folds every CR / CRLF in the file to LF before parsing, so a raw CR
+  // written inside quotes loads back as a line feed — a different credential.
+  const { seen } = await roundTripEnvFile([
+    ['FB_PAGE_TOKEN', 'EAA\rtail'],
+    ['FB_APP_SECRET', 'crlf\r\nend'],
+  ]);
+
+  assert.equal(seen.FB_PAGE_TOKEN, 'EAA\rtail');
+  assert.equal(seen.FB_APP_SECRET, 'crlf\r\nend');
+});
+
+test('a carriage return next to a backslash or a double quote is refused', () => {
+  // Single quotes are the only carrier for `\` / `"`, and they cannot carry a CR.
+  assert.throws(
+    () => renderEnvFile([['FB_APP_SECRET', 'back\\slash\rcr']], 1_000_000),
+    /FB_APP_SECRET/,
+  );
+});
+
+test('--no-write refuses a value no env file can hold instead of promising the write', async () => {
+  // A dry run exists to say what the real run will do. The real run refuses
+  // this secret; the dry run must not report success and "re-run to write it".
+  const { deps, fb, writes } = makeDeps({
+    settings: makeSettings({ appSecret: `mixed'and"quotes` }),
+    input: { write: false },
+  });
+  withHappyPath(fb);
+
+  const result = await runSetupToken(deps);
+
+  assert.equal(result.ok, false);
+  assert.equal(step(result, 'write').status, 'failed');
+  assert.match(step(result, 'write').detail ?? '', /FB_APP_SECRET/);
+  assert.doesNotMatch(renderSetupTokenReport(result), /mixed'and/);
+  assert.equal(writes.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------
@@ -1195,4 +1989,63 @@ test('renders the failure path with its actionable detail', async () => {
   assert.match(text, /\[FAIL] input/);
   assert.match(text, new RegExp(SETUP_TOKEN_ENV_VAR));
   assert.ok(text.trimEnd().endsWith(SETUP_NEXT_COMMAND));
+});
+
+test('an expires_in that cannot be turned into a date is dropped, not carried', async () => {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, {
+    type: 'USER',
+    is_valid: true,
+    app_id: '1234567890',
+    scopes: ['pages_show_list', 'pages_read_engagement'],
+    expires_at: 1200,
+    user_id: '42',
+  });
+  // Graph does not have to be malicious for this to arrive, only wrong:
+  // `JSON.parse('{"expires_in":1e400}')` yields `Infinity`. `now + Infinity` is
+  // `Infinity`, `new Date(Infinity)` is an Invalid Date, and `toISOString()` on
+  // one throws `RangeError: Invalid time value` — from inside the report
+  // renderer, so the whole setup report is lost over a single bad number.
+  fb.on(
+    (req) => req.path === '/oauth/access_token',
+    fbOk({ access_token: LONG_LIVED, expires_in: Number.POSITIVE_INFINITY }),
+  );
+  fb.on((req) => req.path === '/me/accounts', fbOk({ data: [] }));
+
+  const result = await runSetupToken(deps);
+  // An expiry we cannot express is an expiry we did not get. Saying so is
+  // honest and already has wording; inventing one is not.
+  assert.equal(result.exchange?.expiresAt, undefined);
+  assert.match(renderSetupTokenReport(result), /expiry not reported by Graph/);
+});
+
+/** Types a deliberately non-Error throwable so it can be thrown or rejected. */
+function notAnError(value: object): Error {
+  return value as Error;
+}
+
+test('a non-Error { message } or null-prototype rejection from the writer is reported, not thrown', async () => {
+  const run = (failure: object): Promise<SetupTokenResult> => {
+    const fb = createFakeFbRequest();
+    withHappyPath(fb, { pages: [{ id: '111', name: 'Acme Page' }] });
+    return runSetupToken({
+      fbRequest: fb.fn,
+      settings: makeSettings(),
+      clock: createFakeClock(1_000_000),
+      logger: makeLogger(),
+      redactor: createFakeRedactor(),
+      input: makeInput(),
+      envFilePath: ENV_PATH,
+      fileExists: () => Promise.resolve(false),
+      writeEnvFile: (): Promise<AtomicWriteResult> => Promise.reject(notAnError(failure)),
+    });
+  };
+
+  const plain = await run({ message: 'EROFS: read-only file system' });
+  assert.equal(plain.write.status, 'failed');
+  assert.equal(plain.write.error, 'EROFS: read-only file system');
+
+  const bare = await run(Object.create(null) as object);
+  assert.equal(bare.write.status, 'failed');
+  assert.equal(bare.write.error, 'unknown error (no message)');
 });

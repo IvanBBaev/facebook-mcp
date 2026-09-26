@@ -47,7 +47,12 @@
 //     `status` object onto a small discriminated union so a caller can poll
 //     instead of assuming success.
 
-import { GraphApiError, parseFileOffset, planRuploadChunks } from '../core/index.js';
+import {
+  errorMessageOf,
+  GraphApiError,
+  parseFileOffset,
+  planRuploadChunks,
+} from '../core/index.js';
 import type {
   Clock,
   ErrorAction,
@@ -85,6 +90,14 @@ export const DEFAULT_MAX_RESUME_ATTEMPTS = 4;
 export const DEFAULT_RESUME_BACKOFF_MS = 250;
 
 /**
+ * Longest server-named wait (`retryAfterMs`, from a `Retry-After`) a resume
+ * sleeps through before re-driving a chunk. Matches the transport's own cap: a
+ * longer one surfaces at once with the wait attached, so the caller schedules
+ * the retry instead of this call re-driving into the announced window.
+ */
+export const MAX_RESUME_WAIT_MS = 30_000;
+
+/**
  * How long an untouched upload session is kept before eviction (1 hour).
  * Eviction is keyed on the LAST ACTIVITY timestamp, which starts equal to
  * `createdAt` — so a session nobody touches disappears exactly `ttlMs` after
@@ -101,6 +114,15 @@ export const SESSION_LOST_NOTE = 'upload session lost — restart the upload';
 /** Model-facing note when client and server disagree about the session/offsets — CC-MEDIA-3. */
 export const SESSION_DESYNC_NOTE =
   'upload session desynced — restart the upload (do not re-create silently)';
+
+/**
+ * Model-facing note when a session that already went through `finish` is used
+ * again. `finish` is NOT idempotent — Graph can mint a second post for the same
+ * bytes — so the session is kept as a tombstone and refused, rather than dropped
+ * (a "session lost" answer would say "restart the upload", i.e. duplicate it).
+ */
+export const SESSION_FINISHED_NOTE =
+  'upload session already finished — poll the video status instead of finishing it again';
 
 /** Model-facing note attached to every successful create: created is not ready — CC-MEDIA-7. */
 export const CREATED_NOT_READY_NOTE =
@@ -385,10 +407,23 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * A Graph node id off the wire (CC-NET-2). Strings only, and never coerced.
+ *
+ * `fbRequest` CASTS the body, so an id arriving as a JSON number is a thing this
+ * edge can do — and a number cannot be rescued. Graph ids run past the
+ * safe-integer range, so the low digits are gone before `JSON.parse` hands the
+ * value over, and `String(n)` would mint a plausible-looking id for a node that
+ * does not exist: an `upload_session_id` the whole file is then uploaded into,
+ * or a `video_id` the caller polls and publishes while the video they actually
+ * uploaded goes unwatched. Reporting no id is the only honest answer, and both
+ * callers already fail closed on it — `start` refuses before a byte moves, and
+ * `finish` keeps the id the start phase assigned.
+ */
 function readId(raw: unknown): string | undefined {
-  if (typeof raw === 'string') return raw.trim().length > 0 ? raw.trim() : undefined;
-  if (typeof raw === 'number' && Number.isFinite(raw)) return String(raw);
-  return undefined;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 /** Non-negative integer offsets, whether Graph sent them as numbers or strings. */
@@ -401,12 +436,6 @@ function readOffset(raw: unknown): number | undefined {
     return Number.isInteger(n) && n >= 0 ? n : undefined;
   }
   return undefined;
-}
-
-function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err;
-  return 'unknown error';
 }
 
 /** `JSON.stringify` that never throws (a cyclic body must not break offset parsing). */
@@ -430,6 +459,18 @@ function offsetFromResponse(res: FbResponse<unknown>): number | undefined {
   if (fromHeaders !== undefined) return fromHeaders;
   const text = safeStringify(res.data);
   return text === undefined ? undefined : parseFileOffset(res.headers, text);
+}
+
+/**
+ * Did a 2xx chunk response explicitly decline the bytes? `fbRequest` casts the
+ * body unvalidated, so only a `success` flag that is present and not `true`
+ * (`false`, `"false"`, `0`, `null`) counts as a refusal — the same rule the
+ * finish phase applies.
+ */
+function chunkRefused(res: FbResponse<unknown>): boolean {
+  const rec = asRecord(res.data);
+  if (rec === undefined || !('success' in rec)) return false;
+  return rec['success'] !== true;
 }
 
 function endOffsetFromResponse(res: FbResponse<unknown>): number | undefined {
@@ -475,6 +516,19 @@ function desyncError(detail: string): GraphApiError {
   });
 }
 
+/** The session already produced a video; a second `finish` could produce a second post (CC-MEDIA-3). */
+function alreadyFinishedError(session: VideoUploadSession): GraphApiError {
+  const video = session.videoId !== undefined ? ` as video '${session.videoId}'` : '';
+  return uploadError(
+    `upload session '${session.uploadSessionId}' is already finished${video} — ${SESSION_FINISHED_NOTE}`,
+    {
+      category: 'validation',
+      retryable: false,
+      operatorText: SESSION_FINISHED_NOTE,
+    },
+  );
+}
+
 /** A caller-side argument problem — never retryable, never a wire call. */
 function invalidInputError(detail: string): GraphApiError {
   return uploadError(`invalid video upload input (${detail})`, {
@@ -484,23 +538,113 @@ function invalidInputError(detail: string): GraphApiError {
   });
 }
 
-/** The resume budget is spent. Not retryable HERE — the caller must check status first. */
+/** ` for video '<id>'` when the start phase assigned one, else empty. */
+function videoRef(videoId: string | undefined): string {
+  return videoId !== undefined ? ` for video '${videoId}'` : '';
+}
+
+/** Verify-tool for a video whose upload may have progressed (CC-MEDIA-7). */
+const VIDEO_STATUS_TOOL = 'facebook_get_video_status';
+
+/**
+ * The status-check step of a failed upload's guidance. The status read takes the
+ * video id, so it is named — in the text and as `nextTool` — only when the start
+ * phase assigned one; without an id the caller cannot run it, and the guidance
+ * sends them where the video would show instead.
+ */
+function statusCheckStep(videoId: string | undefined): string {
+  return videoId !== undefined
+    ? `check the video status with ${VIDEO_STATUS_TOOL}${videoRef(videoId)}`
+    : "the start phase returned no video id to poll, so check the Page's video library in Meta Business Suite";
+}
+
+/** `{ nextTool }` for a failed upload's action — only when the caller holds the id it needs. */
+function statusNextTool(videoId: string | undefined): { nextTool?: string } {
+  return videoId !== undefined ? { nextTool: VIDEO_STATUS_TOOL } : {};
+}
+
+/** `{ verifyTool }` for a write that runs once the start phase assigned a video id (C2). */
+function statusVerifyTool(videoId: string | undefined): { verifyTool?: string } {
+  return videoId !== undefined ? { verifyTool: VIDEO_STATUS_TOOL } : {};
+}
+
+/**
+ * The resume budget is spent. Not retryable HERE — the caller must check status
+ * first. The video id rides on the error: the operator text sends the caller to
+ * the video status, and a per-call registry (the tools layer builds one per
+ * upload) is gone by the time the caller reads this, so the error is the only
+ * place left that still knows which video to poll.
+ */
 function resumeExhaustedError(
   detail: string,
   resumes: number,
+  videoId: string | undefined,
   cause?: unknown,
 ): GraphApiError {
+  const ref = videoRef(videoId);
   return uploadError(
-    `video upload could not be resumed after ${resumes} attempt(s) (${detail})`,
+    `video upload could not be resumed after ${resumes} attempt(s) (${detail})${ref}`,
     {
       category: 'transient',
       retryable: false,
-      operatorText:
-        'the upload kept failing — check the video status before re-uploading, then restart the upload',
+      operatorText: `the upload kept failing — ${statusCheckStep(videoId)} before re-uploading, then restart the upload`,
+      ...statusNextTool(videoId),
     },
     0,
     cause,
   );
+}
+
+/**
+ * A `finish` fault that may have landed (ambiguous, 5xx, or no HTTP status at
+ * all) re-raised with the video id in its guidance. The generic ambiguous-write
+ * action points at the feed, which cannot say whether THIS video was finished;
+ * the video status can, but only with the id `start` assigned — which nothing
+ * else hands back once the call fails. The Graph line (`message`), code, status
+ * and category are kept verbatim; the original fault is the `cause`. A clean
+ * rejection (4xx) did not create anything and propagates untouched.
+ */
+function withFinishVideoId(err: unknown, videoId: string | undefined): unknown {
+  if (videoId === undefined || !(err instanceof GraphApiError)) return err;
+  const action = err.action;
+  // With no HTTP status, only an ambiguous (or unclassified) fault may have
+  // landed. Core classifies a connect-phase fault as `transient` precisely
+  // because the request provably never reached Facebook, and an auth or
+  // validation refusal at status 0 was raised before the wire — telling the
+  // caller "the finish may have gone through" would contradict both.
+  const unsentAtStatusZero =
+    err.httpStatus === 0 &&
+    action !== undefined &&
+    action.category !== 'ambiguous' &&
+    action.category !== 'unknown';
+  const mayHaveLanded =
+    action?.category === 'ambiguous' ||
+    err.httpStatus >= 500 ||
+    (err.httpStatus === 0 && !unsentAtStatusZero);
+  if (!mayHaveLanded) return err;
+  const guidance =
+    `the finish for video '${videoId}' may have gone through — poll ${VIDEO_STATUS_TOOL} ` +
+    `with that id before finishing or uploading again`;
+  return new GraphApiError(err.message, {
+    code: err.code,
+    httpStatus: err.httpStatus,
+    ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
+    ...(err.type !== undefined ? { type: err.type } : {}),
+    ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+    ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+    ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
+    action: {
+      category: action?.category ?? 'ambiguous',
+      retryable: action?.retryable ?? false,
+      operatorText:
+        action !== undefined ? `${action.operatorText} — ${guidance}` : guidance,
+      nextTool: VIDEO_STATUS_TOOL,
+      ...(action?.retryAfterMs !== undefined
+        ? { retryAfterMs: action.retryAfterMs }
+        : {}),
+    },
+    cause: err,
+  });
 }
 
 /**
@@ -613,7 +757,7 @@ function reportProgress(
     deps.logger?.warn('progress sink threw — the upload continues', {
       sent,
       total,
-      error: errorMessage(err),
+      error: errorMessageOf(err),
     });
   }
 }
@@ -784,6 +928,15 @@ export async function startVideoUpload(
   }
 
   const startOffset = readOffset(rec?.['start_offset']) ?? 0;
+  if (startOffset > input.totalBytes) {
+    // Same rule as an acknowledged chunk offset (CC-MEDIA-3): a session for
+    // `totalBytes` cannot start past them. Registering it would read as
+    // "already transferred", so finish would close a video with none of the
+    // caller's bytes while reporting them as sent.
+    throw desyncError(
+      `start offset ${startOffset} is past the ${input.totalBytes}-byte file end`,
+    );
+  }
   const endOffset = clampWindow(
     startOffset,
     readOffset(rec?.['end_offset']) ?? -1,
@@ -816,15 +969,64 @@ export async function startVideoUpload(
 // Phase 2 — transfer
 // ---------------------------------------------------------------------------
 
-/** Wait before a resume attempt, honouring the caller's abort signal (CC-MCP-2). */
+/**
+ * Wait before a resume attempt, honouring the caller's abort signal (CC-MCP-2).
+ * A server-named wait is a minimum (RFC 9110): the longer of it and the local
+ * backoff is slept, and it is honoured even when the local backoff is off.
+ */
 async function backoff(
   deps: VideoUploadDeps,
   attempt: number,
   signal: AbortSignal | undefined,
+  serverWaitMs?: number,
 ): Promise<void> {
-  const base = normalizeBackoff(deps.resumeBackoffMs);
-  if (base === 0) return;
-  await deps.clock.sleep(base * attempt, signal);
+  const waitMs = Math.max(
+    normalizeBackoff(deps.resumeBackoffMs) * attempt,
+    serverWaitMs ?? 0,
+  );
+  if (waitMs === 0) return;
+  await deps.clock.sleep(waitMs, signal);
+}
+
+/** The server-named wait a chunk fault carries (`Retry-After`), when it names one. */
+function serverWaitOf(err: unknown): number | undefined {
+  if (!(err instanceof GraphApiError)) return undefined;
+  const ms = err.action?.retryAfterMs;
+  return ms !== undefined && Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+/**
+ * A resumable chunk fault whose server-named wait exceeds {@link MAX_RESUME_WAIT_MS},
+ * re-raised at once with that wait and the video id. The Graph identity and
+ * category are kept verbatim; the original fault is the `cause`. No resume
+ * attempt is spent and the session stays resumable.
+ */
+function deferredResumeError(
+  err: GraphApiError,
+  waitMs: number,
+  videoId: string | undefined,
+): GraphApiError {
+  const guidance =
+    `the upload host asked to wait ${String(Math.ceil(waitMs / 1000))} s before the next chunk — ` +
+    `longer than one upload call holds open; wait at least that long, ${statusCheckStep(videoId)}, ` +
+    `then restart the upload`;
+  return new GraphApiError(err.message, {
+    code: err.code,
+    httpStatus: err.httpStatus,
+    ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
+    ...(err.type !== undefined ? { type: err.type } : {}),
+    ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+    ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+    ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
+    action: {
+      category: err.action?.category ?? 'transient',
+      retryable: true,
+      operatorText: guidance,
+      retryAfterMs: waitMs,
+      ...statusNextTool(videoId),
+    },
+    cause: err,
+  });
 }
 
 /**
@@ -838,6 +1040,7 @@ export async function transferVideoUpload(
   input: TransferVideoUploadInput,
 ): Promise<VideoUploadSession> {
   const opened = requireSession(deps.sessions, input.uploadSessionId);
+  if (opened.phase === 'finished') throw alreadyFinishedError(opened);
   if (input.data.byteLength !== opened.totalBytes) {
     throw desyncError(
       `data is ${input.data.byteLength} byte(s) but the session declared ${opened.totalBytes}`,
@@ -869,6 +1072,9 @@ export async function transferVideoUpload(
       chunk: plan.chunk,
       headers: { file_size: String(total) },
       pageId: session.pageId,
+      // The video id rides on the session from `start`, so the status read can
+      // show how far the bytes got; without one no read can (C2).
+      ...statusVerifyTool(session.videoId),
       ...scope,
     };
 
@@ -880,35 +1086,52 @@ export async function transferVideoUpload(
       // or report progress. Whether the in-flight chunk landed is unknowable, but
       // chunks are offset-idempotent, so re-reading the offset later resolves it.
       if (isAbortError(err)) {
-        deps.sessions.update(input.uploadSessionId, { lastError: errorMessage(err) });
+        deps.sessions.update(input.uploadSessionId, { lastError: errorMessageOf(err) });
         throw err;
       }
       if (!isResumableUploadError(err)) {
         deps.sessions.update(input.uploadSessionId, {
           phase: 'failed',
-          lastError: errorMessage(err),
+          lastError: errorMessageOf(err),
         });
         throw err;
+      }
+      // A server-named wait longer than this call may hold the upload open is
+      // surfaced, not re-driven into: the next chunk would land inside the very
+      // window the server just announced, and every resume would repeat it.
+      const serverWaitMs = serverWaitOf(err);
+      if (
+        err instanceof GraphApiError &&
+        serverWaitMs !== undefined &&
+        serverWaitMs > MAX_RESUME_WAIT_MS
+      ) {
+        deps.sessions.update(input.uploadSessionId, { lastError: errorMessageOf(err) });
+        throw deferredResumeError(err, serverWaitMs, session.videoId);
       }
       if (resumes >= maxResumes) {
         deps.sessions.update(input.uploadSessionId, {
           phase: 'failed',
-          lastError: errorMessage(err),
+          lastError: errorMessageOf(err),
         });
-        throw resumeExhaustedError(`offset ${start} of ${total}`, resumes, err);
+        throw resumeExhaustedError(
+          `offset ${start} of ${total}`,
+          resumes,
+          session.videoId,
+          err,
+        );
       }
 
       resumes += 1;
       session = requireUpdate(deps.sessions, input.uploadSessionId, {
         resumes,
-        lastError: errorMessage(err),
+        lastError: errorMessageOf(err),
       });
       deps.logger?.warn('video chunk failed — resuming from the server offset', {
         uploadSessionId: session.uploadSessionId,
         attempt: resumes,
         offset: start,
       });
-      await backoff(deps, resumes, input.signal);
+      await backoff(deps, resumes, input.signal, serverWaitMs);
 
       // Re-read the authoritative offset instead of replaying the chunk. A probe
       // fault leaves `start` alone (the same window is simply re-sent) so a broken
@@ -935,31 +1158,78 @@ export async function transferVideoUpload(
       continue;
     }
 
-    const acked = offsetFromResponse(res) ?? window;
+    // A silent 2xx is taken as "the sent window landed", but a body that says
+    // `success` is anything other than `true` refused the chunk: counting it as
+    // landed would skip bytes and report a transfer Graph never received. With
+    // no offset to follow, it is a stall at `start` (bounded by the budget).
+    const acked = offsetFromResponse(res) ?? (chunkRefused(res) ? start : window);
+    if (acked > total) {
+      // A session that declared `total` bytes cannot have received more: the
+      // server is describing some other file or some other session. Clamping
+      // this to "done" would finish — and possibly publish — a video that is
+      // not the caller's (CC-MEDIA-3).
+      const detail = `server offset ${acked} is past the ${total}-byte file end`;
+      deps.sessions.update(input.uploadSessionId, { phase: 'failed', lastError: detail });
+      throw desyncError(detail);
+    }
     if (acked <= start) {
-      // No forward progress. Treat it exactly like a transient failure so the
-      // resume budget — not the loop — decides when to give up.
+      // No forward progress: a stall (the same offset again) or a rewind (the
+      // server wants an EARLIER window again — its offset is authoritative,
+      // CC-MEDIA-2). Both consume a resume attempt, so the budget — not the
+      // loop — decides when to give up; a rewind additionally moves `start`
+      // back to the server's word so the next chunk re-sends what it lost.
+      const stalled = acked === start;
+      const detail = stalled
+        ? `server offset did not advance past ${start}`
+        : `server offset rewound from ${start} to ${acked}`;
       if (resumes >= maxResumes) {
         deps.sessions.update(input.uploadSessionId, {
           phase: 'failed',
-          lastError: `server offset did not advance past ${start}`,
+          lastError: detail,
         });
         throw resumeExhaustedError(
-          `server offset stuck at ${start} of ${total}`,
+          stalled
+            ? `server offset stuck at ${start} of ${total}`
+            : `${detail} of ${total}`,
           resumes,
+          session.videoId,
         );
       }
       resumes += 1;
+      if (stalled) {
+        session = requireUpdate(deps.sessions, input.uploadSessionId, {
+          resumes,
+          lastError: detail,
+        });
+        await backoff(deps, resumes, input.signal);
+        end = 0;
+        continue;
+      }
+      start = acked;
+      end = clampWindow(
+        start,
+        endOffsetFromResponse(res) ?? -1,
+        total,
+        session.chunkSize,
+      );
       session = requireUpdate(deps.sessions, input.uploadSessionId, {
+        startOffset: start,
+        endOffset: end,
         resumes,
-        lastError: `server offset did not advance past ${start}`,
+        lastError: detail,
       });
-      await backoff(deps, resumes, input.signal);
-      end = 0;
+      deps.logger?.warn(
+        'video chunk window rewound by the server — re-sending from its offset',
+        {
+          uploadSessionId: session.uploadSessionId,
+          attempt: resumes,
+          offset: start,
+        },
+      );
       continue;
     }
 
-    start = Math.min(acked, total);
+    start = acked;
     end = clampWindow(start, endOffsetFromResponse(res) ?? -1, total, session.chunkSize);
     session = requireUpdate(deps.sessions, input.uploadSessionId, {
       startOffset: start,
@@ -992,6 +1262,7 @@ export async function finishVideoUpload(
   input: FinishVideoUploadInput,
 ): Promise<FinishVideoUploadResult> {
   const session = requireSession(deps.sessions, input.uploadSessionId);
+  if (session.phase === 'finished') throw alreadyFinishedError(session);
   if (session.startOffset < session.totalBytes) {
     throw desyncError(
       `only ${session.startOffset} of ${session.totalBytes} byte(s) transferred`,
@@ -1014,6 +1285,9 @@ export async function finishVideoUpload(
         : {}),
     },
     pageId: session.pageId,
+    // A lost finish answer is checked on the video status, which needs the id
+    // `start` assigned; without it the transport's guidance stays neutral (C2).
+    ...statusVerifyTool(session.videoId),
     ...scopeOf(input),
   };
 
@@ -1027,9 +1301,9 @@ export async function finishVideoUpload(
     // duplicate video (CC-MEDIA-3).
     deps.sessions.update(input.uploadSessionId, {
       phase: 'failed',
-      lastError: errorMessage(err),
+      lastError: errorMessageOf(err),
     });
-    throw err;
+    throw withFinishVideoId(err, session.videoId);
   }
 
   const rec = asRecord(res.data);
@@ -1042,12 +1316,32 @@ export async function finishVideoUpload(
     throw desyncError('finish returned no video id');
   }
 
+  // `fbRequest` casts the body without validating it, so `success` is whatever
+  // the wire sent. A refusal reaches us as `false`, but just as plausibly as the
+  // string `"false"`, as `0` or as `null`; coercing those to `true` reports
+  // `accepted: true` for a video the edge declined. Only an explicit `true`
+  // confirms — absence still confirms, because a bodiless 2xx carries no verdict
+  // and the transport has already turned an error payload into a throw.
   const rawSuccess = rec?.['success'];
-  const success = typeof rawSuccess === 'boolean' ? rawSuccess : true;
-  const finished = requireUpdate(deps.sessions, input.uploadSessionId, {
+  const success = rawSuccess === undefined || rawSuccess === true;
+  // The video EXISTS from here on; the session record is only bookkeeping. If
+  // the record has gone — the TTL is measured from `updatedAt`, so a `finish`
+  // issued near the end of an idle window can straddle the boundary and be
+  // evicted between the entry check and this update — the caller must still be
+  // handed the id. Failing with `SESSION_LOST_NOTE` would tell them to restart
+  // an upload that succeeded, which is exactly the duplicate video CC-MEDIA-3
+  // exists to prevent. Fall back to the snapshot taken on entry.
+  const stored = deps.sessions.update(input.uploadSessionId, {
     phase: 'finished',
     videoId,
   });
+  if (stored === undefined) {
+    deps.logger?.warn('upload session record gone after a successful finish', {
+      uploadSessionId: session.uploadSessionId,
+      videoId,
+    });
+  }
+  const finished = stored ?? session;
   deps.logger?.info('video upload finished', {
     uploadSessionId: finished.uploadSessionId,
     videoId,
@@ -1182,7 +1476,12 @@ export function mapVideoStatus(videoId: string, raw: unknown): VideoStatus {
   const processing = status['processing_phase'];
   const publishing = status['publishing_phase'];
 
+  // `expired` is terminal too: Meta discarded the video (typically an upload
+  // session that was never finished). It must not read as `processing`, which
+  // would send the caller polling a node that can never become ready.
+  const expired = videoStatus === 'expired';
   const failed =
+    expired ||
     videoStatus === 'error' ||
     videoStatus === 'upload_failed' ||
     videoStatus === 'failed' ||
@@ -1194,7 +1493,9 @@ export function mapVideoStatus(videoId: string, raw: unknown): VideoStatus {
       phaseErrorMessage(processing) ??
       phaseErrorMessage(uploading) ??
       phaseErrorMessage(publishing) ??
-      'video upload or processing failed';
+      (expired
+        ? 'video expired — Meta discarded it before it was finished; upload it again'
+        : 'video upload or processing failed');
     return { kind: 'error', videoId, message, note: STATUS_NOTES.error };
   }
 
@@ -1220,7 +1521,21 @@ export function mapVideoStatus(videoId: string, raw: unknown): VideoStatus {
     };
   }
 
-  return { kind: 'processing', videoId, note: STATUS_NOTES.processing };
+  // Still `processing` (poll again, never "done"), but the PROCESSING note is a
+  // claim — only make it when the payload actually says so. A status object
+  // carrying nothing recognized (empty, or a `video_status` Meta added later)
+  // gets the note written for exactly that case.
+  const processingStatus = phaseStatus(processing);
+  const saysProcessing =
+    videoStatus === 'processing' ||
+    processingStatus === 'in_progress' ||
+    processingStatus === 'not_started' ||
+    uploadingStatus === 'complete';
+  return {
+    kind: 'processing',
+    videoId,
+    note: saysProcessing ? STATUS_NOTES.processing : STATUS_NOTES.unknown,
+  };
 }
 
 /** `GET /{video-id}?fields=status` — the one wire call both probes share. */
@@ -1271,7 +1586,7 @@ export async function readUploadOffset(
   } catch (err) {
     deps.logger?.debug('upload offset probe failed — keeping the current offset', {
       videoId: input.videoId,
-      error: errorMessage(err),
+      error: errorMessageOf(err),
     });
     return undefined;
   }

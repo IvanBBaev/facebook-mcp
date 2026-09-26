@@ -27,8 +27,9 @@ import {
   type FakePageResolver,
   type MemoryJournal,
 } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, classifyNetworkError, isProvablyNotSent } from '../core/index.js';
 import type {
+  Confirmer,
   FbRequest,
   JsonRequest,
   Logger,
@@ -53,6 +54,15 @@ import { TAINT_BEGIN, TAINT_END, TAINT_WARNING, createWriteGate } from '../mcp/i
 
 import { createModerationPackage } from './moderation.js';
 import type { WriteToolContext } from './shared.js';
+
+/**
+ * The gate requires an out-of-band confirmation seam to exist. These suites never
+ * reach a high-consequence apply, so they hand in one that always approves rather
+ * than leaving the seam missing — which the gate now (correctly) refuses.
+ */
+const ALWAYS_CONFIRMS: Confirmer = {
+  confirm: () => Promise.resolve({ confirmed: true, method: 'operator_token' }),
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -126,6 +136,27 @@ function permissionError(): GraphApiError {
   });
 }
 
+/**
+ * The C2 ambiguous write: the request reached Facebook and the answer was lost,
+ * so the id may ALREADY be applied. `core/http.ts` raises exactly this shape on
+ * a write for a 5xx, a network fault, and a body lost after a 200 —
+ * `retryVerdict('transient' | 'network', isWrite)` returns `'ambiguous'`.
+ */
+function ambiguousWriteError(): GraphApiError {
+  return new GraphApiError(
+    'ambiguous write outcome (response body lost after HTTP 200) — do NOT retry; verify first',
+    {
+      code: 0,
+      httpStatus: 200,
+      action: {
+        category: 'ambiguous',
+        retryable: false,
+        operatorText: 'the write may already have landed — verify before retrying',
+      },
+    },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Test scaffolding
 // ---------------------------------------------------------------------------
@@ -181,6 +212,7 @@ function makeHarness(
   const journal = createMemoryJournal(clock);
   let planSeq = 0;
   const writeGate = createWriteGate({
+    confirmer: ALWAYS_CONFIRMS,
     clock,
     journal,
     defaultWriteMode: opts.writeMode ?? 'apply',
@@ -329,6 +361,74 @@ test('every moderation tool carries the annotation quadruple doc 06 specifies', 
   }
 });
 
+/**
+ * The arguments this package has cleared for the per-call stderr line: the Page
+ * selector, the write-gate flags, the ids Graph itself puts in the URL, and the
+ * enum/boolean knobs that say WHICH mutation was armed. Comment text and the
+ * blocked person's identity are absent by construction — the first is
+ * attacker-authored, the second is exactly the PII a moderation log must not
+ * accumulate — so a new entry has to be argued into this set first.
+ */
+const SAFE_TO_LOG: ReadonlySet<string> = new Set([
+  'profile',
+  'apply',
+  'plan_id',
+  'object_id',
+  'comment_id',
+  'filter',
+  'order',
+  'hidden',
+]);
+
+test('every moderation log allowlist names real, non-content arguments', () => {
+  // `logFields` is the ONLY thing that reaches the per-call log line
+  // (04 §"Log hygiene"), so the declarations are audited rather than trusted:
+  // this table IS the reviewed decision. The two bulk writes log no ids at all
+  // because `comment_ids` is an array, which the projection flattens to
+  // `[array]` — a useless field, and one that would grow into a list of
+  // moderated comments if the projection ever learned to render arrays.
+  const expected: Record<string, readonly string[]> = {
+    facebook_list_comments: ['profile', 'object_id', 'filter', 'order'],
+    facebook_get_comment: ['profile', 'comment_id'],
+    facebook_reply_to_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
+    facebook_hide_comment: ['profile', 'apply', 'plan_id', 'hidden'],
+    facebook_delete_comment: ['profile', 'apply', 'plan_id'],
+    facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
+    facebook_block_user: ['profile', 'apply', 'plan_id'],
+    facebook_unblock_user: ['profile', 'apply', 'plan_id'],
+  };
+
+  for (const spec of createModerationPackage().tools) {
+    const want = expected[spec.name];
+    assert.ok(want, `${spec.name} started logging without being audited here`);
+    assert.deepEqual(
+      [...(spec.logFields ?? [])],
+      [...want],
+      `${spec.name}'s allowlist changed without this audit changing with it`,
+    );
+
+    // The zod shape is the argument list: a key that is not in it would log
+    // nothing at all while reading like a control.
+    const { shape } = spec.inputSchema as unknown as {
+      readonly shape: Record<string, unknown>;
+    };
+    for (const key of want) {
+      assert.ok(key in shape, `${spec.name} logs ${key}, which is not an argument`);
+      assert.ok(
+        SAFE_TO_LOG.has(key),
+        `${spec.name} logs ${key}, which is not cleared for stderr`,
+      );
+    }
+  }
+
+  // The named dangers, spelled out so the reason survives a refactor of the set:
+  // visitor-authored text, the identity behind a block, and the operator's
+  // out-of-band secret.
+  for (const banned of ['message', 'psids', 'comment_ids', 'confirm_token']) {
+    assert.ok(!SAFE_TO_LOG.has(banned), `${banned} must never be cleared for stderr`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 2. facebook_list_comments
 // ---------------------------------------------------------------------------
@@ -465,6 +565,57 @@ test('facebook_list_comments fetches the summary in its own limit=0 call', async
   });
 });
 
+test('facebook_list_comments keeps the comments when only the summary call fails', async () => {
+  const { fb, ctx } = makeHarness();
+  // The page of comments is already in hand when the opt-in count is asked
+  // for; a refusal of that second call must not throw the comments away.
+  fb.on(
+    (r) => r.method === 'GET' && paramsOf(r).summary === 'true',
+    fbErr(
+      new GraphApiError('(#4) Application request limit reached', {
+        code: 4,
+        httpStatus: 400,
+        action: {
+          category: 'rate_limit',
+          retryable: true,
+          operatorText: 'the app is rate limited',
+        },
+      }),
+    ),
+  );
+  fb.on((r) => r.method === 'GET', fbOk({ data: [rawComment()] }));
+
+  const payload = body(
+    await tool('facebook_list_comments').handler(
+      { object_id: OBJECT_ID, include_summary: true },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.count, 1, 'the comments already read are returned');
+  assert.equal(payload.summary, undefined, 'no count is invented');
+  assert.match(str(payload.note), /summary/i);
+  assert.match(str(payload.note), /request limit reached/);
+});
+
+test('facebook_list_comments still fails loudly when the summary call finds the token dead', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(
+    (r) => r.method === 'GET' && paramsOf(r).summary === 'true',
+    fbErr(tokenDeadError()),
+  );
+  fb.on((r) => r.method === 'GET', fbOk({ data: [rawComment()] }));
+
+  await assert.rejects(
+    () =>
+      tool('facebook_list_comments').handler(
+        { object_id: OBJECT_ID, include_summary: true },
+        ctx,
+      ),
+    /validating access token/,
+  );
+});
+
 test('the profile argument selects the Page whose token signs the call', async () => {
   const { fb, pages, ctx } = makeHarness();
   fb.on((r) => r.method === 'GET', fbOk({ data: [] }));
@@ -526,6 +677,75 @@ test('facebook_get_comment expands replies and taints each one separately', asyn
   assert.ok(replyContent.includes(NESTED_INJECTION));
   // CC-MOD-3: an author Graph declined to return must not read as a real name.
   assert.ok(replyContent.includes('(author not returned)'));
+});
+
+test('a comment Graph sent without a message field is not rendered as empty text', async () => {
+  const { fb, ctx } = makeHarness();
+  // A sticker-, GIF- or photo-only comment has no `message` on the wire. An
+  // empty string inside the envelope reads as "the author wrote nothing",
+  // which is a different comment from "Facebook returned no text" — the
+  // absence has to survive to the model, the way the author's does.
+  const withoutMessage: RawComment = {
+    id: 'c1',
+    created_time: CREATED,
+    from: { id: 'u1', name: 'Ann Author' },
+  };
+  fb.on((r) => r.method === 'GET' && r.path === '/c1', fbOk(withoutMessage));
+
+  const payload = body(
+    await tool('facebook_get_comment').handler({ comment_id: 'c1' }, ctx),
+  );
+
+  const content = str(obj(payload.comment).content);
+  assert.ok(content.includes('"message":null'), `expected a null body, got: ${content}`);
+  assert.ok(!content.includes('"message":""'), 'an absent body must not become ""');
+});
+
+test('facebook_get_comment says when the reply expansion was cut short, and how to read the rest', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(
+    (r) => r.method === 'GET' && r.path === '/c1',
+    fbOk({
+      ...rawComment({ comment_count: 9 }),
+      comments: {
+        data: [rawComment({ id: 'c1_r1', parent: { id: 'c1' } })],
+        paging: {
+          cursors: { before: 'B', after: 'A' },
+          next: 'https://graph.facebook.com/v23.0/c1/comments?access_token=SECRET&after=A',
+        },
+      },
+    }),
+  );
+
+  const payload = body(
+    await tool('facebook_get_comment').handler({ comment_id: 'c1', reply_limit: 1 }, ctx),
+  );
+
+  const comment = obj(payload.comment);
+  assert.equal(arr(comment.replies).length, 1);
+  assert.equal(comment.repliesHasMore, true);
+  const note = str(payload.note);
+  assert.ok(note.includes('facebook_list_comments'), note);
+  assert.ok(note.includes('c1'), note);
+  assert.ok(!JSON.stringify(payload).includes('access_token'));
+
+  // An expansion that returned every reply carries neither the flag nor the note.
+  const whole = makeHarness();
+  whole.fb.on(
+    (r) => r.method === 'GET' && r.path === '/c1',
+    fbOk({
+      ...rawComment({ comment_count: 1 }),
+      comments: { data: [rawComment({ id: 'c1_r1' })], paging: { cursors: {} } },
+    }),
+  );
+  const complete = body(
+    await tool('facebook_get_comment').handler(
+      { comment_id: 'c1', reply_limit: 5 },
+      whole.ctx,
+    ),
+  );
+  assert.equal(obj(complete.comment).repliesHasMore, undefined);
+  assert.equal(complete.note, undefined);
 });
 
 test('facebook_get_comment reports the private-reply window open at exactly seven days', async () => {
@@ -625,6 +845,78 @@ test('the package apply default carries a reversible reply through without a pla
   assert.deepEqual(entry.metadata, { commentId: 'c1', messageChars: 24 });
 });
 
+test('a reply acknowledged without an id is not applied and journalled attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  // Graph answered 200 without the new comment's id. The reply may well be
+  // public by now, so this is neither a failure nor a confirmed write: the
+  // gate must be told the outcome is open (C2 / CC-LIFE-2), and the model
+  // must be sent to facebook_list_comments instead of a second POST.
+  fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({}));
+
+  const payload = body(
+    await tool('facebook_reply_to_comment').handler(
+      { comment_id: 'c1', message: 'Thanks for the feedback!' },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'not_applied');
+  assert.equal(payload.applied, false);
+  assert.equal(payload.outcome, 'attempted');
+  assert.ok(str(payload.notPerformedNotice).includes('ATTEMPTED'));
+  const result = obj(payload.result);
+  assert.equal(result.id, undefined, 'an id Graph never returned must not be echoed');
+  assert.ok(str(result.note).includes('facebook_list_comments'));
+  assert.ok(anyCall(fb, 'POST', '/c1/comments'), 'the reply was really attempted');
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('a reply whose answer was lost is journaled attempted, not failed', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  // C2: the POST reached Facebook and the response was lost, so the reply may
+  // already be public. A `failed` entry tells the operator reconciling the
+  // journal that nothing was posted — the dangerous direction of the two lies.
+  fb.on(
+    (r) => r.method === 'POST' && r.path === '/c1/comments',
+    fbErr(ambiguousWriteError()),
+  );
+
+  await assert.rejects(
+    () =>
+      tool('facebook_reply_to_comment').handler(
+        { comment_id: 'c1', message: 'Thanks for the feedback!' },
+        ctx,
+      ),
+    (err: unknown) =>
+      err instanceof GraphApiError && err.action?.category === 'ambiguous',
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('a reply Facebook refused with an error envelope stays journaled failed', async () => {
+  // Regression coverage for the other side of the classifier: a received error
+  // envelope proves the reply was not posted.
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => r.method === 'POST' && r.path === '/c1/comments',
+    fbErr(permissionError()),
+  );
+
+  await assert.rejects(() =>
+    tool('facebook_reply_to_comment').handler(
+      { comment_id: 'c1', message: 'Thanks for the feedback!' },
+      ctx,
+    ),
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
 // ---------------------------------------------------------------------------
 // 5. Bulk semantics (CC-MOD-5, CC-MOD-1)
 // ---------------------------------------------------------------------------
@@ -634,6 +926,8 @@ test('facebook_hide_comment gives every id its own outcome and never fails the b
   fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
   fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(permissionError()));
   fb.on((r) => r.method === 'POST' && r.path === '/c3', fbErr(goneError()));
+  // The confirming read: c3 is gone to a GET as well, so the hide is a no-op.
+  fb.on((r) => r.method === 'GET' && r.path === '/c3', fbErr(goneError()));
 
   const payload = body(
     await tool('facebook_hide_comment').handler(
@@ -656,12 +950,163 @@ test('facebook_hide_comment gives every id its own outcome and never fails the b
   assert.ok(str(result.note).includes('only retry the failures'));
 
   const calls = jsonCalls(fb);
-  assert.equal(calls.length, 3, 'one request per id, sequentially');
   assert.deepEqual(
-    calls.map((r) => r.path),
-    ['/c1', '/c2', '/c3'],
+    calls.map((r) => `${r.method} ${r.path}`),
+    ['POST /c1', 'POST /c2', 'POST /c3', 'GET /c3'],
+    'one write per id, sequentially, plus the read that confirms the gone one',
   );
   assert.deepEqual(bodyOf(callAt(fb, 0)), { is_hidden: true });
+});
+
+test('a bulk hide where every id fails does not claim the rest were applied', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST', fbErr(permissionError()));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2'], hidden: true },
+      ctx,
+    ),
+  );
+
+  const result = obj(payload.result);
+  assert.equal(result.total, 2);
+  assert.equal(result.ok, 0);
+  assert.equal(result.failed, 2);
+
+  // A bulk verb returns its per-id outcomes rather than throwing (CC-MOD-5), so
+  // nothing about the call itself tells the gate that not one id moved — the
+  // action has to say so. All three places a reader could look must agree:
+  assert.equal(payload.applied, false, 'the envelope may not claim a write landed');
+  // `status` is the first thing a model reads, and it used to be hardcoded to
+  // 'applied' regardless — so the same envelope answered the same question two
+  // opposite ways, loudest lie first.
+  assert.equal(
+    payload.status,
+    'not_applied',
+    'the status line must agree with the applied flag beside it',
+  );
+  assert.equal(
+    journal.entries[0]?.outcome,
+    'failed',
+    'the journal is the audit trail an operator reconciles against (CC-LIFE-2)',
+  );
+  // ...and the note carries the same statement in prose, with what to do next.
+  // Telling the model "the rest were applied" when there is no rest reports a
+  // change that never happened.
+  const note = str(result.note);
+  assert.ok(
+    !note.includes('the rest were'),
+    `an all-failed batch must not promise a remainder was applied; got: ${note}`,
+  );
+  assert.ok(note.includes('nothing was applied'), note);
+});
+
+test('a partially failed bulk hide stays applied — some ids really did land', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(permissionError()));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2'], hidden: true },
+      ctx,
+    ),
+  );
+
+  const result = obj(payload.result);
+  assert.equal(result.ok, 1);
+  assert.equal(result.failed, 1);
+  // Deliberately NOT downgraded to failed. c1 is hidden, and for the delete verb
+  // the equivalent id would be gone for good; recording the batch as a failure
+  // would tell an operator reconciling the journal that the world is untouched,
+  // which is the more dangerous of the two possible lies. `outcomes` says which.
+  assert.equal(payload.applied, true);
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+  assert.equal(arr(result.outcomes).length, 2);
+});
+
+test('a bulk hide whose ids all came back ambiguous is not journaled as a failure', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST', fbErr(ambiguousWriteError()));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2'], hidden: true },
+      ctx,
+    ),
+  );
+
+  const result = obj(payload.result);
+  assert.equal(result.failed, 2);
+  assert.equal(result.ambiguous, 2, 'the api layer flags an outcome it could not prove');
+
+  // `failed === total` holds, but the condition that licenses the `failed`
+  // verdict — provably nothing to reconcile — does not: every request reached
+  // Facebook and only the answer was lost, so each hide may have landed. The
+  // journal is what an operator reconciles a mutation against (CC-LIFE-2), and
+  // `failed` there means "the world is untouched", the dangerous direction.
+  assert.equal(
+    journal.entries[0]?.outcome,
+    'attempted',
+    'an unproven outcome is neither a change nor a failure',
+  );
+  assert.equal(payload.status, 'not_applied');
+  assert.match(
+    str(payload.notPerformedNotice),
+    /unconfirmed/i,
+    'the envelope must carry the ATTEMPTED notice, not the refusal one',
+  );
+});
+
+test('a bulk note never calls an unproven id "still to do"', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbErr(permissionError()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(ambiguousWriteError()));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2'], hidden: true },
+      ctx,
+    ),
+  );
+
+  // c1 is safe to redo; c2 may already be hidden. One sentence covering both
+  // sends the model to repeat a write it cannot see the outcome of — and the
+  // identical sentence fronts `facebook_delete_comment`, where that repeat is
+  // permanent.
+  const note = str(obj(payload.result).note);
+  assert.ok(
+    !note.includes('every id is still to do'),
+    `an unproven id may not be described as untouched work; got: ${note}`,
+  );
+  assert.match(note, /unproven|ambiguous/i, note);
+});
+
+test('facebook_hide_comment refuses an absent or undefined `hidden` before any request', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  // `hidden` carries the hide/unhide direction, so an absent one has no sane
+  // default to fall back to. The schema makes it required and `defineTool`
+  // strict-parses before the handler runs, so neither an omitted key nor an
+  // explicit `undefined` can reach the api layer. (The api layer no longer
+  // treats a missing field as "delete" either — the verb is named there now —
+  // but this tool must still refuse the call rather than guess a direction.)
+  await assert.rejects(
+    () => tool('facebook_hide_comment').handler({ comment_ids: ['c1'] }, ctx),
+    /hidden/i,
+  );
+  await assert.rejects(
+    () =>
+      tool('facebook_hide_comment').handler(
+        { comment_ids: ['c1'], hidden: undefined },
+        ctx,
+      ),
+    /hidden/i,
+  );
+
+  assert.equal(fb.calls.length, 0, 'no request escaped — least of all a DELETE');
 });
 
 test('facebook_hide_comment unhides through the same tool with hidden:false', async () => {
@@ -765,6 +1210,19 @@ test('the apply default never deletes: irreversible needs apply:true AND a plan_
   assert.equal(journal.entries[0]?.outcome, 'applied');
 });
 
+test('a preview counts each distinct comment once, as the apply acts on it once', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'nice post', is_hidden: false }));
+
+  const preview = await tool('facebook_delete_comment').handler(
+    { comment_ids: ['c1', 'c2', 'c1'] },
+    ctx,
+  );
+
+  assert.match(text(preview), /PERMANENTLY delete 2 comment\(s\)/);
+  assert.ok(!anyCall(fb, 'DELETE'));
+});
+
 test('a plan_id cannot be replayed against a different set of comment ids', async () => {
   const { fb, ctx } = makeHarness();
   fb.on(isStateRead, fbOk({ id: 'c1', message: 'nice post', is_hidden: false }));
@@ -818,6 +1276,80 @@ test('a comment edited between preview and apply diverges without leaking its te
   assert.ok(text(result).includes('fingerprint'));
   assert.ok(!text(result).includes('the original body'));
   assert.ok(!text(result).includes('edited after the preview'));
+});
+
+test('one unreadable comment does not fail a bulk preview, and apply never acts on it', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => isStateRead(r) && r.path === '/c1',
+    fbOk({ id: 'c1', message: 'nice post', is_hidden: false }),
+  );
+  fb.on((r) => isStateRead(r) && r.path === '/c2', fbErr(permissionError()));
+  fb.on((r) => r.method === 'DELETE', fbOk({ success: true }));
+  const del = tool('facebook_delete_comment');
+
+  const preview = body(await del.handler({ comment_ids: ['c1', 'c2'] }, ctx));
+  assert.equal(preview.status, 'preview');
+  // The preview names the id it could not read and says it will not be touched.
+  const unread = arr(preview.warnings)
+    .map(str)
+    .filter((w) => w.includes('could not be read'));
+  assert.equal(unread.length, 1);
+  assert.match(unread[0] ?? '', /\bc2 \(\(#200\) Permissions error\)/);
+  assert.ok(!(unread[0] ?? '').includes('c1'));
+
+  const applied = body(
+    await del.handler(
+      { comment_ids: ['c1', 'c2'], apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+  assert.equal(applied.status, 'applied');
+  assert.ok(anyCall(fb, 'DELETE', '/c1'));
+  assert.ok(!anyCall(fb, 'DELETE', '/c2'), 'an id never read must never be deleted');
+  const outcomes = arr(obj(applied.result).outcomes).map(obj);
+  assert.deepEqual(outcomes[0], { id: 'c1', ok: true });
+  assert.equal(outcomes[1]?.id, 'c2');
+  assert.equal(outcomes[1]?.ok, false);
+  assert.match(str(outcomes[1]?.error), /not acted on/i);
+  assert.equal(obj(applied.result).failed, 1);
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+});
+
+test('an id unreadable at preview but readable at apply diverges instead of being acted on', async () => {
+  const { fb, ctx } = makeHarness({ writeMode: 'plan' });
+  fb.on(
+    (r) => isStateRead(r) && r.path === '/c1',
+    fbOk({ id: 'c1', message: 'nice post', is_hidden: false }),
+  );
+  fb.on((r) => isStateRead(r) && r.path === '/c2', fbErr(permissionError()), 1);
+  fb.on(
+    (r) => isStateRead(r) && r.path === '/c2',
+    fbOk({ id: 'c2', message: 'never previewed', is_hidden: false }),
+  );
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+  const hide = tool('facebook_hide_comment');
+
+  const preview = body(
+    await hide.handler({ comment_ids: ['c1', 'c2'], hidden: true }, ctx),
+  );
+  assert.equal(preview.status, 'preview');
+
+  const applied = body(
+    await hide.handler(
+      {
+        comment_ids: ['c1', 'c2'],
+        hidden: true,
+        apply: true,
+        plan_id: str(preview.planId),
+      },
+      ctx,
+    ),
+  );
+  // The previewed state of c2 was never seen, so the plan did not approve it.
+  assert.equal(applied.status, 'diverged');
+  assert.equal(obj(arr(applied.diverged)[0]).field, 'c2');
+  assert.ok(!anyCall(fb, 'POST'));
 });
 
 // ---------------------------------------------------------------------------
@@ -922,7 +1454,38 @@ test('an applied private reply posts to the Page messages edge and journals the 
   assert.equal(obj(journal.entries[0]?.metadata).commentAgeMs, 2 * DAY_MS);
 });
 
-test('an exhausted one-shot maps to a terminal do-not-retry refusal journaled as attempted', async () => {
+test('a private reply acknowledged without a message id is not applied and journalled attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  // A 200 with no `message_id`: the one-shot may already be spent and the
+  // message may already be in the inbox, or neither. Stamping `applied` here
+  // tells the model the send is done; stamping `failed` invites a retry. The
+  // honest verdict is ATTEMPTED — verify in the inbox before anything else.
+  fb.on((r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/messages`, fbOk({}));
+  const pr = tool('facebook_private_reply');
+
+  const preview = body(await pr.handler(PRIVATE_REPLY_ARGS, ctx));
+  const payload = body(
+    await pr.handler(
+      { ...PRIVATE_REPLY_ARGS, apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'not_applied');
+  assert.equal(payload.applied, false);
+  assert.equal(payload.outcome, 'attempted');
+  assert.ok(str(payload.notPerformedNotice).includes('ATTEMPTED'));
+  const result = obj(payload.result);
+  assert.equal(result.messageId, undefined);
+  assert.ok(str(result.note).includes('facebook_list_conversations'));
+  assert.ok(anyCall(fb, 'POST', `/${PAGE.pageId}/messages`), 'the send really went out');
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('an exhausted one-shot maps to a terminal do-not-retry refusal journaled as failed', async () => {
   const { fb, ctx, journal } = makeHarness();
   fb.on((r) => r.method === 'GET', fbOk(rawComment()));
   fb.on(
@@ -955,10 +1518,50 @@ test('an exhausted one-shot maps to a terminal do-not-retry refusal journaled as
     },
   );
 
-  // C2: the request reached the wire, so the journal records an ATTEMPT — a
-  // lost response may still have delivered the message.
+  // Facebook ANSWERED, and the answer is a refusal: nothing was delivered by
+  // this call, so the journal records a failure. `attempted` would send an
+  // operator hunting the inbox for a message that provably never went out.
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('a private reply whose answer was lost is journaled attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  fb.on((r) => r.method === 'POST', fbErr(ambiguousWriteError()));
+  const pr = tool('facebook_private_reply');
+
+  const preview = body(await pr.handler(PRIVATE_REPLY_ARGS, ctx));
+  await assert.rejects(() =>
+    pr.handler({ ...PRIVATE_REPLY_ARGS, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+
+  // C2: the send reached Facebook and the answer was lost — it may be delivered.
   assert.equal(journal.entries.length, 1);
   assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test("a private reply to the Page's own comment is refused before anything is sent", async () => {
+  const { fb, ctx, journal } = makeHarness();
+  // The Page wrote this comment itself: there is no other person to message,
+  // so the one-shot send can never succeed and a preview promising it is false.
+  fb.on(
+    (r) => r.method === 'GET',
+    fbOk(rawComment({ from: { id: PAGE.pageId, name: PAGE.name } })),
+  );
+
+  await assert.rejects(
+    () => tool('facebook_private_reply').handler(PRIVATE_REPLY_ARGS, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.ok(err.message.includes('written by the Page itself'), err.message);
+      assert.equal(err.action?.retryable, false);
+      assert.equal(err.action?.category, 'validation');
+      return true;
+    },
+  );
+  assert.ok(!anyCall(fb, 'POST'), 'nothing may be sent');
+  assert.equal(journal.entries.length, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -988,25 +1591,65 @@ test('facebook_block_user posts the PSIDs and reports one outcome per PSID', asy
     { id: 'psid-1', ok: true },
     { id: 'psid-2', ok: false, error: 'Invalid user id' },
   ]);
-  assert.deepEqual(bodyOf(firstCall(fb)), { psids: ['psid-1', 'psid-2'] });
+  assert.deepEqual(bodyOf(firstCall(fb)), { psid: ['psid-1', 'psid-2'] });
 });
 
-test('facebook_unblock_user deletes with the PSIDs on the query and forgives a never-blocked id', async () => {
+test('facebook_unblock_user issues one DELETE per PSID and forgives a never-blocked id', async () => {
   const { fb, ctx } = makeHarness();
   fb.on(
+    (r) =>
+      r.method === 'DELETE' &&
+      r.path === `/${PAGE.pageId}/blocked` &&
+      paramsOf(r).psid === 'psid-9',
+    fbErr(
+      new GraphApiError('(#100) The user is not blocked', { code: 100, httpStatus: 400 }),
+    ),
+  );
+  fb.on(
     (r) => r.method === 'DELETE' && r.path === `/${PAGE.pageId}/blocked`,
-    fbOk({ 'psid-9': { success: false, error: { message: 'The user is not blocked' } } }),
+    fbOk({ success: true }),
   );
 
   const payload = body(
-    await tool('facebook_unblock_user').handler({ psids: ['psid-9'] }, ctx),
+    await tool('facebook_unblock_user').handler({ psids: ['psid-8', 'psid-9'] }, ctx),
   );
 
+  assert.equal(payload.status, 'applied');
   const result = obj(payload.result);
-  assert.equal(result.ok, 1);
+  assert.equal(result.total, 2);
+  assert.equal(result.ok, 2);
   assert.equal(result.failed, 0);
-  assert.deepEqual(result.outcomes, [{ id: 'psid-9', ok: true, note: NOT_BLOCKED_NOTE }]);
-  assert.equal(paramsOf(firstCall(fb)).psids, JSON.stringify(['psid-9']));
+  assert.deepEqual(result.outcomes, [
+    { id: 'psid-8', ok: true },
+    { id: 'psid-9', ok: true, note: NOT_BLOCKED_NOTE },
+  ]);
+  // The DELETE form of the edge takes ONE `psid` and answers `{success}`, so the
+  // batch is one call per PSID on the documented singular parameter.
+  assert.equal(fb.calls.length, 2, 'one DELETE per PSID');
+  assert.deepEqual(
+    [0, 1].map((i) => [callAt(fb, i).method, paramsOf(callAt(fb, i)).psid]),
+    [
+      ['DELETE', 'psid-8'],
+      ['DELETE', 'psid-9'],
+    ],
+  );
+});
+
+test('a block whose answer was lost is journaled attempted, not failed', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  // Blocking is ONE POST for the whole list, so a lost answer is not caught per
+  // id by the bulk runner: it rejects the call. Every PSID may now be blocked.
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/blocked`,
+    fbErr(ambiguousWriteError()),
+  );
+
+  await assert.rejects(() =>
+    tool('facebook_block_user').handler({ psids: ['psid-1', 'psid-2'] }, ctx),
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
 });
 
 test('blocking previews under plan mode and names the inverse verb', async () => {
@@ -1019,4 +1662,527 @@ test('blocking previews under plan mode and names the inverse verb', async () =>
   assert.equal(payload.status, 'preview');
   assert.ok(str(payload.summary).includes('facebook_unblock_user'));
   assert.equal(fb.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Path containment — an id must never be able to address another Graph node
+// ---------------------------------------------------------------------------
+
+test('every moderation id that reaches a path refuses a value addressing another node', async () => {
+  // Each of these ids is interpolated into a Graph edge (`/{comment_id}`,
+  // `/{object_id}/comments`, …) and `containPathname` only ever sees the joined
+  // path, so it cannot tell an id from a structural segment: a `/` inside the id
+  // is a new segment and retargets the call under the same token and method.
+  // The fake answers ANY path, so an escape that got through would be recorded.
+  const cases: readonly (readonly [string, (id: string) => Record<string, unknown>])[] = [
+    ['facebook_list_comments', (id) => ({ object_id: id })],
+    ['facebook_get_comment', (id) => ({ comment_id: id })],
+    ['facebook_reply_to_comment', (id) => ({ comment_id: id, message: 'thanks!' })],
+    ['facebook_private_reply', (id) => ({ comment_id: id, message: 'thanks!' })],
+    ['facebook_hide_comment', (id) => ({ comment_ids: [id], hidden: true })],
+    ['facebook_delete_comment', (id) => ({ comment_ids: [id] })],
+  ];
+
+  for (const [name, args] of cases) {
+    const { fb, ctx } = makeHarness();
+    fb.on(() => true, fbOk({ id: 'c1', data: [], success: true }));
+
+    for (const escaped of [
+      `${PAGE.pageId}/conversations`,
+      'me/accounts',
+      'c1?fields=from',
+      '..',
+      '.',
+    ]) {
+      await assert.rejects(
+        () => tool(name).handler(args(escaped), ctx),
+        /bare Graph ID/,
+        `${name} must refuse the id ${JSON.stringify(escaped)}`,
+      );
+    }
+    assert.equal(fb.calls.length, 0, `${name} let an escaped id reach Graph`);
+  }
+});
+
+test('the moderation id shapes still accept every id Graph actually mints', () => {
+  // Regression coverage: containment must not narrow Graph's ID space.
+  for (const id of [OBJECT_ID, 'c1', '123456_789012', '1234567890', 'act_123']) {
+    for (const [name, args] of [
+      ['facebook_list_comments', { object_id: id }],
+      ['facebook_get_comment', { comment_id: id }],
+      ['facebook_reply_to_comment', { comment_id: id, message: 'thanks!' }],
+      ['facebook_private_reply', { comment_id: id, message: 'thanks!' }],
+      ['facebook_hide_comment', { comment_ids: [id], hidden: true }],
+      ['facebook_delete_comment', { comment_ids: [id] }],
+    ] as readonly (readonly [string, Record<string, unknown>])[]) {
+      assert.equal(
+        tool(name).inputSchema.safeParse(args).success,
+        true,
+        `${name} must accept the id ${JSON.stringify(id)}`,
+      );
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave 16 — cancellation mid-sweep, and the permissions the descriptions name
+// ---------------------------------------------------------------------------
+
+/**
+ * Stand in for a caller cancelling a sweep while one write is on the wire.
+ * `core/http.ts` rethrows a caller abort RAW (no GraphApiError, no category),
+ * both for the request that was in flight and for every later one, which fetch
+ * rejects at once because the signal is already aborted. `inFlight` picks the
+ * write that was mid-flight when the cancel arrived: it may have landed.
+ */
+function cancelMidFlight(
+  ctx: WriteToolContext,
+  fb: FakeFbRequest,
+  inFlight: (req: JsonRequest) => boolean,
+): { readonly ctx: WriteToolContext; readonly sent: JsonRequest[] } {
+  const controller = new AbortController();
+  const sent: JsonRequest[] = [];
+  const abortError = () => new DOMException('This operation was aborted', 'AbortError');
+  const fbRequest = (async (req: FbRequest) => {
+    if (isJson(req) && req.method !== 'GET') {
+      if (controller.signal.aborted) throw abortError();
+      if (inFlight(req)) {
+        sent.push(req);
+        controller.abort();
+        throw abortError();
+      }
+    }
+    return fb.fn(req);
+  }) as WriteToolContext['fbRequest'];
+  return { ctx: { ...ctx, fbRequest, signal: controller.signal }, sent };
+}
+
+test('a delete sweep cancelled while a DELETE is on the wire is journaled attempted, not failed', async () => {
+  const harness = makeHarness();
+  harness.fb.on(isStateRead, fbOk({ id: 'c1', message: 'nice post', is_hidden: false }));
+  const del = tool('facebook_delete_comment');
+  const preview = body(await del.handler({ comment_ids: ['c1', 'c2'] }, harness.ctx));
+
+  const { ctx, sent } = cancelMidFlight(
+    harness.ctx,
+    harness.fb,
+    (r) => r.method === 'DELETE' && r.path === '/c1',
+  );
+  const payload = body(
+    await del.handler(
+      { comment_ids: ['c1', 'c2'], apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+
+  assert.equal(sent.length, 1, 'the DELETE for c1 reached the wire');
+  const result = obj(payload.result);
+  const outcomes = arr(result.outcomes).map(obj);
+  // c1 was sent and its answer was cut off: it may be gone for good.
+  assert.equal(outcomes[0]?.ambiguous, true, 'the in-flight delete is unproven');
+  // c2 was never sent — the signal was already aborted — so it stays provable.
+  assert.equal(outcomes[1]?.ambiguous, undefined, 'a never-sent id is not unproven');
+  assert.equal(
+    harness.journal.entries.at(-1)?.outcome,
+    'attempted',
+    'a permanent delete that may have landed must not be journaled as failed',
+  );
+  assert.ok(
+    !str(result.note).includes('nothing was applied'),
+    `the note may not say nothing was applied; got: ${str(result.note)}`,
+  );
+});
+
+test('an unblock sweep cancelled while a DELETE is on the wire is journaled attempted', async () => {
+  const harness = makeHarness();
+  harness.fb.on((r) => r.method === 'DELETE', fbOk({ success: true }));
+  const { ctx, sent } = cancelMidFlight(
+    harness.ctx,
+    harness.fb,
+    (r) => r.method === 'DELETE' && paramsOf(r).psid === 'psid-1',
+  );
+
+  const payload = body(
+    await tool('facebook_unblock_user').handler({ psids: ['psid-1', 'psid-2'] }, ctx),
+  );
+
+  assert.equal(sent.length, 1);
+  const outcomes = arr(obj(payload.result).outcomes).map(obj);
+  assert.equal(outcomes[0]?.ambiguous, true);
+  assert.equal(outcomes[1]?.ambiguous, undefined);
+  assert.equal(harness.journal.entries[0]?.outcome, 'attempted');
+});
+
+test('facebook_private_reply names the read permission its pre-flight comment read needs', () => {
+  // Meta: sending a private reply needs pages_messaging and the MESSAGING task.
+  // The tool ALSO reads the comment first (the 7-day window and author check),
+  // and that GET needs pages_read_engagement — without it the call fails before
+  // any send, which the description must not leave the model to discover.
+  const description = tool('facebook_private_reply').description;
+  assert.match(description, /pages_messaging/);
+  assert.match(description, /MESSAGING task/);
+  assert.match(description, /pages_read_engagement/);
+});
+
+test('facebook_get_comment names the permissions it needs, as its siblings do', () => {
+  const description = tool('facebook_get_comment').description;
+  assert.match(description, /pages_read_engagement/);
+  assert.match(description, /pages_read_user_content/);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 17 — a connect-phase fault provably never sent the write
+// ---------------------------------------------------------------------------
+
+/**
+ * The exact error `core/http.ts` `networkError` throws once a write's
+ * connect-phase retries are exhausted: status 0, a transient (not ambiguous)
+ * action, and the raw fetch rejection as `cause`. `code` picks the undici/Node
+ * error code on that cause: ECONNREFUSED proves no byte left the machine,
+ * ECONNRESET (a mid-flight reset) proves nothing.
+ */
+function transportFaultError(code: string): GraphApiError {
+  const cause = new TypeError('fetch failed', {
+    cause: Object.assign(new Error(`connect ${code} 157.240.0.35:443`), { code }),
+  });
+  return new GraphApiError('network request failed: fetch failed', {
+    code: 0,
+    httpStatus: 0,
+    action: classifyNetworkError({
+      phase: isProvablyNotSent(cause) ? 'connect' : 'response',
+      isWrite: true,
+      reason: 'fetch failed',
+    }),
+    cause,
+  });
+}
+
+test('a reply refused at connect time is journaled failed, not attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  // ECONNREFUSED: the POST never left the machine, so no reply can be public.
+  // `attempted` would send an operator reconciling the journal hunting for a
+  // reply that provably does not exist.
+  fb.on(
+    (r) => r.method === 'POST' && r.path === '/c1/comments',
+    fbErr(transportFaultError('ECONNREFUSED')),
+  );
+
+  await assert.rejects(() =>
+    tool('facebook_reply_to_comment').handler(
+      { comment_id: 'c1', message: 'Thanks for the feedback!' },
+      ctx,
+    ),
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('a private reply refused at connect time is journaled failed, not attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  fb.on((r) => r.method === 'POST', fbErr(transportFaultError('ENOTFOUND')));
+  const pr = tool('facebook_private_reply');
+
+  const preview = body(await pr.handler(PRIVATE_REPLY_ARGS, ctx));
+  await assert.rejects(() =>
+    pr.handler({ ...PRIVATE_REPLY_ARGS, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+
+  // DNS failed: the one-shot send never reached Facebook and is not spent.
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('a block refused at connect time is journaled failed, not attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/blocked`,
+    fbErr(transportFaultError('ECONNREFUSED')),
+  );
+
+  await assert.rejects(() =>
+    tool('facebook_block_user').handler({ psids: ['psid-1', 'psid-2'] }, ctx),
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('a private reply cut off by a mid-flight reset stays journaled attempted', async () => {
+  // The other side of the connect-phase rule: a reset carries no proof the
+  // send stayed local, so the one-shot may be spent and the entry must say so.
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  fb.on((r) => r.method === 'POST', fbErr(transportFaultError('ECONNRESET')));
+  const pr = tool('facebook_private_reply');
+
+  const preview = body(await pr.handler(PRIVATE_REPLY_ARGS, ctx));
+  await assert.rejects(() =>
+    pr.handler({ ...PRIVATE_REPLY_ARGS, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+// ---------------------------------------------------------------------------
+// Dead Page token inside a bulk sweep (C1 eviction)
+// ---------------------------------------------------------------------------
+
+/** Graph calling the Page token itself dead (190), as core/http.ts raises it. */
+function tokenDeadError(code = 190): GraphApiError {
+  return new GraphApiError('Error validating access token: Session has expired', {
+    code,
+    httpStatus: 400,
+    action: {
+      category: 'auth',
+      retryable: false,
+      operatorText: 'the Page token is no longer valid',
+    },
+  });
+}
+
+test('a hide sweep that hits a dead Page token evicts the cached token', async () => {
+  const { fb, ctx, pages } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(tokenDeadError()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c3', fbOk({ success: true }));
+
+  await tool('facebook_hide_comment').handler(
+    { comment_ids: ['c1', 'c2', 'c3'], hidden: true },
+    ctx,
+  );
+
+  // A per-id failure is folded into an outcome row, so the server's
+  // invalidate-on-190 hook never sees it; the sweep has to evict itself or every
+  // later call keeps replaying the dead token until the cache TTL.
+  assert.deepEqual(pages.invalidated, [PAGE.pageId]);
+});
+
+test('a hide sweep stops at a dead Page token and reports the rest as not attempted', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(tokenDeadError()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c3', fbOk({ success: true }));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2', 'c3'], hidden: true },
+      ctx,
+    ),
+  );
+
+  assert.deepEqual(
+    jsonCalls(fb).map((r) => `${r.method} ${r.path}`),
+    ['POST /c1', 'POST /c2'],
+    'no further write may ride a token Graph just called dead',
+  );
+  const result = obj(payload.result);
+  assert.equal(result.ok, 1);
+  assert.equal(result.failed, 2);
+  const outcomes = arr(result.outcomes).map(obj);
+  const c3 = outcomes[2];
+  assert.equal(c3?.id, 'c3');
+  assert.equal(c3.ok, false);
+  assert.equal(c3.ambiguous, undefined, 'a never-sent id is provable, not unproven');
+  assert.match(str(c3.error), /not attempted/i);
+  // c1 really was hidden, so the batch stays applied (partial success).
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+});
+
+test('an unblock sweep that hits a 102 session error evicts the cached token', async () => {
+  const { fb, ctx, pages } = makeHarness();
+  fb.on(
+    (r) => r.method === 'DELETE' && r.path === `/${PAGE.pageId}/blocked`,
+    fbErr(tokenDeadError(102)),
+  );
+
+  const payload = body(
+    await tool('facebook_unblock_user').handler({ psids: ['psid-1', 'psid-2'] }, ctx),
+  );
+
+  assert.deepEqual(pages.invalidated, [PAGE.pageId]);
+  assert.equal(fb.calls.length, 1, 'the second PSID is not sent on a dead token');
+  assert.match(str(obj(arr(obj(payload.result).outcomes)[1]).error), /not attempted/i);
+});
+
+test('an unblock of a never-blocked PSID answered 100/33 neither evicts the token nor stops the sweep', async () => {
+  const { fb, ctx, pages } = makeHarness();
+  // Graph answers the DELETE for a PSID that is not on the list with its stock
+  // 100/33 text. On the /{page}/blocked edge that subcode names the PSID, not
+  // the Page: the confirming read of the blocked list proves the Page is fine.
+  fb.on(
+    (r) => r.method === 'DELETE' && isJson(r) && paramsOf(r).psid === 'psid-1',
+    fbErr(
+      new GraphApiError(
+        "Unsupported delete request. Object with ID 'psid-1' does not exist, cannot be " +
+          'loaded due to missing permissions, or does not support this operation.',
+        { code: 100, subcode: 33, httpStatus: 400 },
+      ),
+    ),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${PAGE.pageId}/blocked`,
+    fbOk({ data: [] }),
+  );
+  fb.on((r) => r.method === 'DELETE', fbOk({ success: true }));
+
+  const payload = body(
+    await tool('facebook_unblock_user').handler({ psids: ['psid-1', 'psid-2'] }, ctx),
+  );
+
+  assert.deepEqual(pages.invalidated, [], 'a live Page token must not be evicted');
+  assert.deepEqual(arr(obj(payload.result).outcomes), [
+    { id: 'psid-1', ok: true, note: NOT_BLOCKED_NOTE },
+    { id: 'psid-2', ok: true },
+  ]);
+});
+
+test('a delete sweep whose confirming read hits a dead token evicts it', async () => {
+  const harness = makeHarness();
+  harness.fb.on(isStateRead, fbOk({ id: 'c1', message: 'nice post', is_hidden: false }));
+  const del = tool('facebook_delete_comment');
+  const preview = body(await del.handler({ comment_ids: ['c1'] }, harness.ctx));
+  // The DELETE answers "does not exist"; the read that must confirm it is where
+  // Graph reveals the token is dead — and that answer is swallowed by the probe.
+  harness.fb.on(
+    (r) => r.method === 'DELETE' && r.path === '/c1',
+    fbErr(goneError('Object with ID c1 does not exist')),
+  );
+  harness.fb.on(
+    (r) => r.method === 'GET' && r.path === '/c1' && !isStateRead(r),
+    fbErr(tokenDeadError()),
+  );
+
+  await del.handler(
+    { comment_ids: ['c1'], apply: true, plan_id: str(preview.planId) },
+    harness.ctx,
+  );
+
+  assert.deepEqual(harness.pages.invalidated, [PAGE.pageId]);
+});
+
+test('a comment that is merely gone does not evict the Page token', async () => {
+  const { fb, ctx, pages } = makeHarness();
+  // 100/33 on a COMMENT path is about the comment, not the Page, even though the
+  // same subcode on the Page object marks the Page token stale.
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbErr(goneError()));
+  fb.on((r) => r.method === 'GET' && r.path === '/c1', fbErr(goneError()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbOk({ success: true }));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2'], hidden: true },
+      ctx,
+    ),
+  );
+
+  assert.deepEqual(pages.invalidated, []);
+  assert.equal(obj(payload.result).ok, 2, 'the sweep carries on past a gone comment');
+});
+
+test('a block cut off mid-flight does not send the model to facebook_get_comment', async () => {
+  const harness = makeHarness();
+  harness.fb.on((r) => r.method === 'POST', fbOk({ 'psid-1': true }));
+  const { ctx, sent } = cancelMidFlight(
+    harness.ctx,
+    harness.fb,
+    (r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/blocked`,
+  );
+
+  let thrown: unknown;
+  await assert.rejects(async () => {
+    try {
+      await tool('facebook_block_user').handler({ psids: ['psid-1'] }, ctx);
+    } catch (err) {
+      thrown = err;
+      throw err;
+    }
+  });
+
+  assert.equal(sent.length, 1, 'the block POST reached the wire');
+  assert.ok(thrown instanceof GraphApiError, 'an interrupted write is the C2 error');
+  assert.equal(thrown.action?.category, 'ambiguous');
+  // No comment read can show a PSID's blocked state, so naming one sends the
+  // model to verify a block in a place that can never show it.
+  assert.equal(thrown.action.nextTool, undefined);
+  assert.ok(
+    !thrown.action.operatorText.includes('facebook_get_comment'),
+    thrown.action.operatorText,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Rate limit inside a bulk sweep, and the summary's non-Page 100/33
+// ---------------------------------------------------------------------------
+
+/** A throttle whose retries core/http.ts has already exhausted (code 32). */
+function rateLimitError(): GraphApiError {
+  return new GraphApiError('(#32) Page request limit reached', {
+    code: 32,
+    httpStatus: 400,
+    action: {
+      category: 'rate_limit',
+      retryable: false,
+      retryAfterMs: 300_000,
+      operatorText: 'the Page is rate limited',
+    },
+  });
+}
+
+test('a hide sweep stops at a rate limit and reports the rest as not attempted', async () => {
+  const { fb, ctx, pages, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
+  fb.on((r) => r.method === 'POST' && r.path === '/c2', fbErr(rateLimitError()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c3', fbOk({ success: true }));
+
+  const payload = body(
+    await tool('facebook_hide_comment').handler(
+      { comment_ids: ['c1', 'c2', 'c3'], hidden: true },
+      ctx,
+    ),
+  );
+
+  // Every later write rides the same throttled bucket: sending it only spends
+  // more of a budget Facebook already said is gone, each one after the http
+  // layer's own retries and back-offs.
+  assert.deepEqual(
+    jsonCalls(fb).map((r) => `${r.method} ${r.path}`),
+    ['POST /c1', 'POST /c2'],
+    'no further write may be sent into a rate limit Facebook just reported',
+  );
+  const result = obj(payload.result);
+  assert.equal(result.ok, 1);
+  assert.equal(result.failed, 2);
+  const c3 = arr(result.outcomes).map(obj)[2];
+  assert.equal(c3?.id, 'c3');
+  assert.equal(c3.ok, false);
+  assert.equal(c3.ambiguous, undefined, 'a never-sent id is provable, not unproven');
+  assert.match(str(c3.error), /not attempted/i);
+  assert.match(str(c3.error), /rate limit/i);
+  assert.deepEqual(pages.invalidated, [], 'a rate limit says nothing about the token');
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+});
+
+test('facebook_list_comments keeps the comments when the summary read answers 100/33 for the object', async () => {
+  const { fb, ctx } = makeHarness();
+  // 100/33 on a post's comments edge is about that object, not the Page token
+  // (the same rule the bulk fence applies): the comments already read stay.
+  fb.on(
+    (r) => r.method === 'GET' && paramsOf(r).summary === 'true',
+    fbErr(goneError('Unsupported get request. Object with ID 900_17841 does not exist')),
+  );
+  fb.on((r) => r.method === 'GET', fbOk({ data: [rawComment()] }));
+
+  const payload = body(
+    await tool('facebook_list_comments').handler(
+      { object_id: OBJECT_ID, include_summary: true },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.count, 1, 'the comments already read are returned');
+  assert.equal(payload.summary, undefined, 'no count is invented');
+  assert.match(str(payload.note), /summary could not be read/);
 });

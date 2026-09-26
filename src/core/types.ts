@@ -144,11 +144,11 @@ export interface Settings {
  */
 export type ErrorCategory =
   | 'auth' // 190 + 460/463/467/102 — token dead/invalid; refresh credential
-  | 'permission' // 200/10/803 — missing scope or Page role
+  | 'permission' // 200/10 — missing scope or Page role
   | 'rate_limit' // throttle families 4/17/32/613 + 80000–80099
   | 'transient' // 5xx / network fault — retryable on GET only
   | 'duplicate' // 506 — duplicate post; never retried
-  | 'not_found' // 100 (object gone / already deleted)
+  | 'not_found' // 100/803 (object gone, already deleted, or id/alias unresolvable)
   | 'validation' // client/param error; not retryable
   | 'ambiguous' // C2 — request may have landed; NEVER retry, verify instead
   | 'cursor_expired' // pagination cursor expiry (CC-PAGE-2)
@@ -182,6 +182,10 @@ export interface GraphApiErrorInit {
   readonly httpStatus: number;
   /** Classification attached by the F06 matrix once known. */
   readonly action?: ErrorAction;
+  /** Graph's `error_user_title`: the human-readable headline of a refusal, when sent. */
+  readonly userTitle?: string;
+  /** Graph's `error_user_msg`: the human-readable reason for a refusal, when sent. */
+  readonly userMessage?: string;
   readonly cause?: unknown;
 }
 
@@ -199,6 +203,14 @@ export class GraphApiError extends Error {
   readonly fbtraceId?: string;
   readonly httpStatus: number;
   readonly action?: ErrorAction;
+  /**
+   * Graph's `error_user_title` / `error_user_msg`, when the envelope carried
+   * them. On an ads or publishing refusal `message` is usually the generic
+   * "Invalid parameter" and these two are the only human-readable reason; they
+   * ride as their own fields so `message` stays the greppable Graph line.
+   */
+  readonly userTitle?: string;
+  readonly userMessage?: string;
 
   constructor(message: string, init: GraphApiErrorInit) {
     super(message, init.cause !== undefined ? { cause: init.cause } : undefined);
@@ -209,6 +221,8 @@ export class GraphApiError extends Error {
     this.fbtraceId = init.fbtraceId;
     this.httpStatus = init.httpStatus;
     this.action = init.action;
+    this.userTitle = init.userTitle;
+    this.userMessage = init.userMessage;
     // Restore the prototype chain so `instanceof GraphApiError` holds after
     // transpilation to a target that breaks native subclassing.
     Object.setPrototypeOf(this, GraphApiError.prototype);
@@ -241,6 +255,13 @@ export interface FbRequestBase {
   readonly token?: string;
   /** Page whose token should be resolved (per-page token resolver — C1). */
   readonly pageId?: string;
+  /**
+   * The read tool that can show whether this write landed, named on the C2
+   * ambiguous-outcome guidance (`nextTool`) when the response is lost. Only the
+   * api layer knows what a path like `/{id}` points at; absent, the transport
+   * names a tool only when the request itself proves one (a feed post).
+   */
+  readonly verifyTool?: string;
 }
 
 /** JSON / query-string protocol: GETs and simple writes. */
@@ -539,9 +560,36 @@ export interface ToolSpec {
   readonly inputSchema: ZodTypeAny;
   readonly outputSchema?: ZodTypeAny;
   readonly annotations: ToolAnnotations;
-  /** Write blast-radius tier; absent ⇒ a read-only tool. */
+  /**
+   * Write blast-radius tier; absent ⇒ a read-only tool.
+   *
+   * Only PRESENCE is load-bearing at runtime: the registry reads it to drop
+   * writes under a read-only package (registry.ts), and `defineTool` requires it
+   * to agree with `annotations.readOnlyHint`. Nothing reads the VALUE to decide
+   * gating — the gate is handed a tier per call by the handler, which for a tool
+   * whose consequence depends on its arguments is not a constant at all
+   * (`facebook_update_ad_object` pauses at `irreversible` and resumes at
+   * `spend`).
+   *
+   * The value is therefore a CLAIM about the worst case: the highest tier any
+   * call to this tool can hand the gate. It is published — `tierOf` in
+   * scripts/gen-metadata.mjs turns it into the tier column operators read in the
+   * README — so understating it is a documentation defect, not a harmless
+   * mismatch, and it is invisible to the type system either way.
+   */
   readonly writeTier?: WriteTier;
-  /** Whitelisted field names safe to log for this tool (redaction-audited). */
+  /**
+   * The argument names whose values this tool is allowed to put in its per-call
+   * log line (04 §"Log hygiene"). The `tools/call` dispatcher logs the tool name
+   * plus the values of exactly these keys — each passed through the
+   * {@link Redactor}, and reduced to a bare type tag unless it is a
+   * string/number/boolean, because a reviewed KEY says nothing about the shape
+   * or the content a caller actually sent.
+   *
+   * Absent (or empty) ⇒ the call logs NOTHING. There is no default key set and
+   * the argument object is never logged wholesale: an allowlist nobody wrote is
+   * not permission to log everything.
+   */
   readonly logFields?: readonly string[];
   readonly handler: ToolHandler;
 }
@@ -646,6 +694,14 @@ export interface ApplyResult<T = unknown> {
   readonly result?: T;
   readonly diverged?: readonly DivergenceDiff[];
   readonly journalStatus?: JournalStatus;
+  /**
+   * What the audit journal recorded for this apply, when the gate computed a
+   * verdict. `applied:false` alone cannot tell a refusal (`failed`: nothing
+   * changed at Graph) from an ambiguous write (`attempted`: the request reached
+   * the wire and something may exist that an operator must reconcile), and the
+   * caller-facing notice has to say which. Absent on a diverged apply.
+   */
+  readonly outcome?: JournalOutcome;
 }
 
 // ---------------------------------------------------------------------------

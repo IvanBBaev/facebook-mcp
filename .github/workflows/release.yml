@@ -151,6 +151,10 @@ jobs:
       resume: ${{ steps.resolve.outputs.resume }}
       dist-tag: ${{ steps.resolve.outputs.dist-tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
+      # The commit this gate actually validated. Every later job resolves the same
+      # tag NAME again and independently, so they assert against this rather than
+      # trusting the name a second time.
+      commit: ${{ steps.resolve.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -274,9 +278,15 @@ jobs:
           # to — the exact failure the dist-tag derivation above prevents on npm.
           if [ "$dist_tag" = "latest" ]; then prerelease=false; else prerelease=true; fi
 
+          # The exact commit everything downstream must match. `github.sha` is not
+          # it: on a resume that is the default branch's HEAD, not the tag's.
+          commit="$(git rev-parse HEAD)"
+          echo "Gate validated commit $commit."
+
           {
             echo "version=$pkg_version"
             echo "release-tag=$release_tag"
+            echo "commit=$commit"
             echo "publish=$publish"
             echo "registry=$registry"
             echo "resume=$resume"
@@ -313,10 +323,22 @@ jobs:
           // nothing before this point catches it - and the symptom downstream is
           // `npx <pkg>` failing for every user, long after the release looked green.
           for (const [name, target] of Object.entries(pkg.bin ?? {})) {
-            if (typeof target === 'string' && target.startsWith('./')) {
+            if (typeof target !== 'string') continue;
+            if (target.startsWith('./')) {
               problems.push(
                 `package.json bin["${name}"] is "${target}". npm would strip this entry at ` +
                   `publish time and ship a package with no executable. Drop the leading "./".`,
+              );
+            }
+            // The same outcome reached the other way. npm does NOT check that a bin
+            // target exists: `npm pack` on a package whose bin points at a missing
+            // file exits 0 with no warning at all, so a renamed or unshipped
+            // launcher publishes clean and `npx <pkg>` is broken for every user of a
+            // version that can never be republished.
+            if (!fs.existsSync(target)) {
+              problems.push(
+                `package.json bin["${name}"] points at "${target}", which is not in this ` +
+                  'checkout. npm publishes that without a warning and every `npx` fails.',
               );
             }
           }
@@ -430,10 +452,28 @@ jobs:
   # ---------------------------------------------------------------------------
   # 2. npm publish via Trusted Publishing (OIDC), with NODE_AUTH_TOKEN as the
   #    bootstrap-only fallback for the first publish of a not-yet-existing name.
+  #    Numbered second, but it now RUNS after the bundle (section 3): of the two
+  #    artifacts this rail ships, only this one cannot be taken back.
   # ---------------------------------------------------------------------------
   npm-publish:
     name: npm publish (trusted publishing)
-    needs: gate
+    # Both this job and `bundle` used to hang off `gate` alone, so they raced.
+    # A bundle that failed to pack, attest or verify could still lose that race
+    # to a successful `npm publish`, leaving the version spent on npm with no
+    # Release to go with it - and an npm version, once taken, is never reusable.
+    # Ordering the irreversible step last turns that failure back into a re-run.
+    #
+    # The result test, rather than a bare `needs: [gate, bundle]`: `bundle` is
+    # deliberately skipped on a resume, and a skipped dependency skips its
+    # dependants, which would disable the one mode whose entire purpose is to
+    # finish an interrupted publish. So: publish when the bundle succeeded, or
+    # when it was skipped on purpose; never when it failed. `!cancelled()` is
+    # what stops a cancelled run from publishing anyway - `always()` would not.
+    needs: [gate, bundle]
+    if: >-
+      !cancelled()
+      && needs.gate.result == 'success'
+      && (needs.bundle.result == 'success' || needs.bundle.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -447,6 +487,27 @@ jobs:
           # falls through to the ref the run was started on.
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -471,7 +532,13 @@ jobs:
           }
           NODE
 
-      - run: npm ci
+      # `--ignore-scripts`: this job holds `id-token: write` and, during the
+      # bootstrap window, the npm token. A postinstall from anywhere in the dev
+      # tree would therefore execute in the most privileged step of the rail, and
+      # the tree does contain one today (unrs-resolver, pulled in by ESLint's
+      # import resolver). Nothing here needs it: the build is `tsc`, and ESLint
+      # runs in `gate`, which is why that job keeps a plain `npm ci`.
+      - run: npm ci --ignore-scripts
       - run: npm run build
 
       # --tag is always explicit. `npm publish` defaults to `latest`, and the
@@ -522,7 +589,9 @@ jobs:
     name: mcpb bundle
     needs: gate
     # Skipped on a resume, which skips `github-release` with it (a skipped
-    # dependency skips its dependants). The reason is the attestation below: it is
+    # dependency skips its dependants). `npm-publish` also depends on this job,
+    # but tests its result explicitly instead of inheriting the skip, so a resume
+    # still publishes. The reason for skipping is the attestation below: it is
     # derived from the run's own context, and a resume runs on the default branch,
     # so the statement would claim a source ref and commit that are not where the
     # bytes came from. See the header note.
@@ -541,11 +610,38 @@ jobs:
           # falls through to the ref the run was started on.
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-      - run: npm ci
+      # `--ignore-scripts` for the same reason as `npm-publish`, plus one specific
+      # to this job: it holds `attestations: write`, so anything that could tamper
+      # with the tree before `pack-mcpb` runs would be tampering with bytes this
+      # workflow then signs a provenance statement over. The packer already stages
+      # the bundle's own dependencies with `--ignore-scripts`; this makes the
+      # install that precedes it consistent with that.
+      - run: npm ci --ignore-scripts
       - run: npm run build
 
       # --json-out, not `--json | tee`: the packer shells out to `npm ci` to stage
@@ -678,6 +774,27 @@ jobs:
           # falls through to the ref the run was started on.
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}

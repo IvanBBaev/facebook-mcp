@@ -70,8 +70,11 @@ it against a person who has not agreed in advance to be messaged and blocked.
    every one of the three tools previews first and needs `apply: true` plus the
    `plan_id` from that preview.
 
-**Verify by:** `facebook_whoami` reports the test Page, and its `writeMode` is
-`plan`.
+**Verify by:** `facebook_whoami` reports the test Page, and a moderation write
+called without `apply: true` comes back as a plan preview carrying a `plan_id`
+rather than mutating. The effective write mode is not a field on any tool's
+output and the doctor does not print it — the preview response is the observable
+check.
 
 ---
 

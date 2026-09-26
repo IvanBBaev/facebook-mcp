@@ -20,6 +20,7 @@
 // for the rest (C10).
 
 import {
+  errorMessageOf,
   GraphApiError,
   type FbRequestFn,
   type JsonRequest,
@@ -70,7 +71,40 @@ export const CHILD_ATTACHMENTS_MAX = 5;
 export const MAX_LOCAL_VIDEO_BYTES = 256 * 1024 * 1024;
 
 export const PUBLISH_VERIFY_NOTE =
-  'A publish that times out may still have landed. Never re-send it blindly — verify with facebook_list_posts filtered to the last few minutes, matching the exact message text in this plan (CC-PUB-1).';
+  "A publish that times out may still have landed. Never re-send it blindly — verify with facebook_list_posts, matching each item's created_time and exact message text against this plan (the tool has no time filter; the newest posts come first, follow nextCursor if needed) (CC-PUB-1).";
+
+/**
+ * {@link PUBLISH_VERIFY_NOTE} for `publish_now` on an existing post. That write
+ * sends only `is_published:true`: the plan carries no message text or creation
+ * time to match on a listing, and the post id is already known — so the check
+ * is the post itself, not the published listing.
+ */
+export const PUBLISH_NOW_VERIFY_NOTE =
+  "A publish_now that times out may still have published the post. Never re-send it blindly — verify with facebook_get_post using this plan's post_id: is_published true means it is live (CC-PUB-1).";
+
+/**
+ * {@link PUBLISH_VERIFY_NOTE} for a post that is NOT live on create. A
+ * scheduled post sits on the scheduled queue until its publish time, so the
+ * published listing can never show it — pointing there reads as "it did not
+ * land" and invites the duplicate CC-PUB-1 exists to prevent.
+ */
+export const SCHEDULED_PUBLISH_VERIFY_NOTE =
+  'A scheduled post whose create times out may still have been created. Never re-send it blindly — until its publish time it sits only on the scheduled queue, not on the published listing, so verify with facebook_list_scheduled_posts, matching the exact message text in this plan (CC-PUB-1).';
+
+/** The same for an unpublished draft, which sits on no listing this server reads. */
+export const DRAFT_PUBLISH_VERIFY_NOTE =
+  "A draft whose create times out may still have been created. Never re-send it blindly — an unpublished draft is on neither the published listing nor the scheduled queue, so check the Page's drafts in Meta Business Suite before sending it again (CC-PUB-1).";
+
+/** The same for a scheduled or draft video, which no post listing shows yet. */
+export const VIDEO_UNPUBLISHED_VERIFY_NOTE =
+  "A video create that times out may still have created the video. Never re-send it blindly — a scheduled or unpublished video is not on the published post listing; if a videoId came back, check it with facebook_get_video_status, otherwise check the Page's video library in Meta Business Suite before sending it again (CC-PUB-1).";
+
+/** The create-time verify note that matches where the new post can be seen. */
+export function publishVerifyNote(publishState: PublishState): string {
+  if (publishState === 'scheduled') return SCHEDULED_PUBLISH_VERIFY_NOTE;
+  if (publishState === 'draft') return DRAFT_PUBLISH_VERIFY_NOTE;
+  return PUBLISH_VERIFY_NOTE;
+}
 
 export const DUPLICATE_CONTENT_NOTE =
   'Posting identical text twice in quick succession is refused by Meta as duplicate content (error 506). The server never retries a publish on its own (CC-PUB-2).';
@@ -96,6 +130,12 @@ export const DELETE_ALREADY_ABSENT_NOTE =
 export const SCHEDULE_RACE_NOTE =
   'A scheduled post can publish itself while this plan is open. The apply step re-reads the post first and refuses with a diff if its state moved (CC-SCHED-4).';
 
+export const RESCHEDULE_WINDOW_UNKNOWN_NOTE =
+  'The creation-relative window could NOT be checked: Graph reported no usable ' +
+  '`created_time` for this post, so the 29-day cap on how far a scheduled post ' +
+  'may be moved past its own creation was not applied here. The new time may ' +
+  'still be refused on apply (CC-SCHED-1).';
+
 export const VIDEO_CREATED_NOT_READY_NOTE =
   'A finished upload is NOT a published, processed video: Meta still has to transcode it. The video id comes back immediately, but the post may 404 or render empty for a while — poll the video status before telling anyone it is live (CC-MEDIA-7).';
 
@@ -120,7 +160,8 @@ export type PostValidationReason =
   | 'conflicting_params'
   | 'no_update_fields'
   | 'unsupported_transition'
-  | 'unsupported_media_source';
+  | 'unsupported_media_source'
+  | 'invalid_link';
 
 /**
  * A refusal raised locally, before anything was sent. `reason` is the machine
@@ -152,8 +193,7 @@ export class CarouselPostError extends Error {
   readonly cleanup: OrphanCleanupReport;
 
   constructor(opts: { readonly cause: unknown; readonly cleanup: OrphanCleanupReport }) {
-    const original =
-      opts.cause instanceof Error ? opts.cause.message : String(opts.cause);
+    const original = errorMessageOf(opts.cause);
     const orphanNote = describeOrphans(opts.cleanup);
     super(
       `the photos uploaded but the carousel post could not be created: ${original}` +
@@ -280,6 +320,30 @@ function days(ms: number): string {
 
 function minutes(ms: number): string {
   return String(Math.round(ms / 60_000));
+}
+
+/**
+ * An exact-enough duration for a refusal or warning that compares a span with
+ * a limit: "9 minutes 59 seconds", "75 days 1 hour". Units are FLOORED and the
+ * two largest non-zero ones are kept, so a span just past (or just short of) a
+ * limit is never rounded onto the limit itself — "only 10 minute(s) away; at
+ * least 10 minutes required" is a sentence a caller cannot act on.
+ */
+function span(ms: number): string {
+  const total = Math.floor(Math.abs(ms) / 1000);
+  const units: readonly (readonly [number, string])[] = [
+    [Math.floor(total / 86_400), 'day'],
+    [Math.floor((total % 86_400) / 3_600), 'hour'],
+    [Math.floor((total % 3_600) / 60), 'minute'],
+    [total % 60, 'second'],
+  ];
+  const first = units.findIndex(([n]) => n > 0);
+  if (first === -1) return 'less than 1 second';
+  return units
+    .slice(first, first + 2)
+    .filter(([n]) => n > 0)
+    .map(([n, unit]) => `${String(n)} ${unit}${n === 1 ? '' : 's'}`)
+    .join(' ');
 }
 
 /** `+0300` is not in the ES date-time grammar; `+03:00` is. */
@@ -423,14 +487,30 @@ export function formatInTimeZone(epochMs: number, timeZone: string): string | un
 }
 
 /**
+ * A leading digit or sign is Meta's legacy numeric UTC offset (`-8`, `+08:00`,
+ * `+0800`), never an IANA zone name — no IANA name starts with either. Newer
+ * `Intl` builds DO accept the `+08:00` forms, so the shape has to be rejected
+ * explicitly rather than left to {@link isSupportedTimeZone}.
+ */
+const NUMERIC_OFFSET_RE = /^[+-]?\d/;
+
+/**
  * Accept a Page timezone only when it is a usable IANA name. Meta's legacy Page
  * `timezone` field can also be a numeric UTC offset; a number is display-hostile
  * and cannot drive `Intl`, so it is dropped rather than reinterpreted.
+ *
+ * A region prefix is NOT part of that test: `UTC`, `GMT`, `Japan` and
+ * `Singapore` are real zone names this runtime formats with, and dropping them
+ * would make the schedule preview claim the Page timezone is unknown — or, on
+ * the operator-supplied `page_timezone` path, refuse the write outright saying
+ * the runtime does not recognise a zone it demonstrably does.
  */
 export function resolvePageTimezone(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const tz = raw.trim();
-  if (tz === '' || !tz.includes('/') || !isSupportedTimeZone(tz)) return undefined;
+  if (tz === '' || NUMERIC_OFFSET_RE.test(tz) || !isSupportedTimeZone(tz)) {
+    return undefined;
+  }
   return tz;
 }
 
@@ -448,16 +528,19 @@ export function resolveSchedule(value: unknown, ctx: ScheduleContext): ScheduleE
   const utc = new Date(epochMs).toISOString();
 
   if (leadMs < minLeadMs) {
+    // A past instant is not "-60 minute(s) away" — say what it is.
+    const where =
+      leadMs < 0 ? `is ${span(leadMs)} in the past` : `is only ${span(leadMs)} away`;
     throw new PostValidationError(
       'schedule_too_soon',
-      `scheduled_publish_time ${utc} is only ${minutes(leadMs)} minute(s) away; Facebook requires at least ${minutes(minLeadMs)} minutes of lead time. Pick a later instant or publish immediately by omitting scheduled_publish_time (CC-SCHED-1).`,
+      `scheduled_publish_time ${utc} ${where}; Facebook requires at least ${minutes(minLeadMs)} minutes of lead time. Pick a later instant or publish immediately by omitting scheduled_publish_time (CC-SCHED-1).`,
       'scheduled_publish_time',
     );
   }
   if (leadMs > maxLeadMs) {
     throw new PostValidationError(
       'schedule_too_far',
-      `scheduled_publish_time ${utc} is ${days(leadMs)} days away; the accepted window ends ${days(maxLeadMs)} days from now (CC-SCHED-1).`,
+      `scheduled_publish_time ${utc} is ${span(leadMs)} away; the accepted window ends ${days(maxLeadMs)} days from now (CC-SCHED-1).`,
       'scheduled_publish_time',
     );
   }
@@ -468,7 +551,7 @@ export function resolveSchedule(value: unknown, ctx: ScheduleContext): ScheduleE
   if (createdAtMs !== undefined && epochMs - createdAtMs > maxFromCreationMs) {
     throw new PostValidationError(
       'schedule_reschedule_window',
-      `scheduled_publish_time ${utc} is ${days(epochMs - createdAtMs)} days after the post was created (${new Date(createdAtMs).toISOString()}); a scheduled post can only be moved up to ${days(maxFromCreationMs)} days past its creation. Delete it and create a new post for a later date (CC-SCHED-1).`,
+      `scheduled_publish_time ${utc} is ${span(epochMs - createdAtMs)} after the post was created (${new Date(createdAtMs).toISOString()}); a scheduled post can only be moved up to ${days(maxFromCreationMs)} days past its creation. Delete it and create a new post for a later date (CC-SCHED-1).`,
       'scheduled_publish_time',
     );
   }
@@ -495,7 +578,7 @@ export function scheduleWarnings(echo: ScheduleEcho): string[] {
   const warnings: string[] = [];
   if (echo.leadMs > SCHEDULE_WARN_LEAD_MS) {
     warnings.push(
-      `This post is scheduled ${days(echo.leadMs)} days out. Some publishing surfaces cap scheduling at ${days(SCHEDULE_WARN_LEAD_MS)} days, so Meta may still refuse it (CC-SCHED-1).`,
+      `This post is scheduled ${span(echo.leadMs)} out. Some publishing surfaces cap scheduling at ${days(SCHEDULE_WARN_LEAD_MS)} days, so Meta may still refuse it (CC-SCHED-1).`,
     );
   }
   if (echo.pageTimezone === undefined) {
@@ -544,12 +627,28 @@ export interface PostPlan {
   readonly publishState: PublishState;
 }
 
+/**
+ * The number of characters in `text` as the ceiling is documented to the
+ * caller: code points, not UTF-16 units. `String.length` counts an emoji (or
+ * any astral character) twice, so a message the schema promises to accept
+ * would be refused with a count the caller cannot reconcile with the text.
+ */
+function codePointCount(text: string): number {
+  // The string iterator yields one code point per step: two units for an
+  // astral character (a surrogate pair), one otherwise — a lone surrogate
+  // included, so the count never drops below what Graph will receive.
+  let pairs = 0;
+  for (const ch of text) if (ch.length === 2) pairs += 1;
+  return text.length - pairs;
+}
+
 function assertMessageLength(message: string | undefined): void {
   if (message === undefined) return;
-  if (message.length > POST_MESSAGE_MAX_CHARS) {
+  const length = codePointCount(message);
+  if (length > POST_MESSAGE_MAX_CHARS) {
     throw new PostValidationError(
       'message_too_long',
-      `message is ${String(message.length)} characters; the Page-post limit is ${String(POST_MESSAGE_MAX_CHARS)} (CC-PUB-7).`,
+      `message is ${String(length)} characters; the Page-post limit is ${String(POST_MESSAGE_MAX_CHARS)} (CC-PUB-7).`,
       'message',
     );
   }
@@ -589,6 +688,71 @@ function describeWhen(
  *
  * @throws PostValidationError
  */
+/**
+ * Why `value` cannot be the web address of a link post or a carousel card, or
+ * `undefined` when it plausibly is one. Pure string work, so it runs in the dry
+ * run: Facebook builds a link preview by fetching the URL itself, so a local
+ * file path (usually a model that meant `photos`) or a non-web scheme such as
+ * `file:`, `ftp:` or `javascript:` can never become a preview, and approving
+ * "Create a link post" only for Graph to reject the URL at apply time is the
+ * preview/apply drift the planner exists to prevent. A scheme-less address
+ * (`example.com/page`) stays accepted for `link`, which Facebook resolves the
+ * way a browser does; `requireScheme` is for fields documented as absolute URLs.
+ */
+function webUrlProblem(value: string, requireScheme: boolean): string | undefined {
+  if (
+    value.includes('\\') ||
+    /^[a-z]:[\\/]/i.test(value) ||
+    /^(?:\/|\.{1,2}\/|~)/.test(value)
+  ) {
+    return 'looks like a local file path, not a web address';
+  }
+  const scheme = /^([a-z][a-z0-9+.-]*):(.*)$/is.exec(value);
+  if (scheme !== null && !/^\d+(?:[/?#]|$)/.test(scheme[2] ?? '')) {
+    const name = (scheme[1] ?? '').toLowerCase();
+    if ((name === 'http' || name === 'https') && (scheme[2] ?? '').startsWith('//')) {
+      return undefined;
+    }
+    return `uses the "${name}:" scheme; only http:// and https:// addresses can be shared`;
+  }
+  if (requireScheme) return 'is not an absolute http:// or https:// URL';
+  const host = value.split(/[/?#]/, 1)[0] ?? '';
+  return host.includes('.') ? undefined : 'is not a web address';
+}
+
+function assertWebLinks(
+  link: string | undefined,
+  children: readonly ChildAttachment[] | undefined,
+): void {
+  if (link !== undefined) {
+    const problem = webUrlProblem(link, false);
+    if (problem !== undefined) {
+      throw new PostValidationError(
+        'invalid_link',
+        `link "${link}" ${problem}. Facebook builds the preview by fetching the URL itself — send a public http(s) address, or use photos for local image files.`,
+        'link',
+      );
+    }
+  }
+  children?.forEach((child, i) => {
+    const checks: ReadonlyArray<readonly [string, string | undefined, boolean]> = [
+      ['link', child.link.trim(), false],
+      ['picture', nonEmpty(child.picture?.trim()), true],
+    ];
+    for (const [key, value, requireScheme] of checks) {
+      if (value === undefined) continue;
+      const problem = webUrlProblem(value, requireScheme);
+      if (problem !== undefined) {
+        throw new PostValidationError(
+          'invalid_link',
+          `child_attachments[${String(i)}].${key} "${value}" ${problem}. Every card link and picture must be a public http(s) address Facebook can fetch.`,
+          'child_attachments',
+        );
+      }
+    }
+  });
+}
+
 export function planCreatePost(
   input: CreatePostInput,
   ctx: { readonly nowMs: number; readonly pageTimezone?: string },
@@ -633,6 +797,8 @@ export function planCreatePost(
     }
   }
 
+  assertWebLinks(link, children);
+
   if (photoCount > 0 && link !== undefined) {
     throw new PostValidationError(
       'conflicting_params',
@@ -666,9 +832,20 @@ export function planCreatePost(
     ...(children !== undefined ? { child_attachments: JSON.stringify(children) } : {}),
     ...(publishState === 'published' ? {} : { published: false }),
     ...(schedule !== undefined ? { scheduled_publish_time: schedule.epochSeconds } : {}),
+    // A `/feed` post that carries `attached_media` (the multi-photo flow: children
+    // uploaded unpublished, then referenced here) needs this flag on top of
+    // `published:false` + `scheduled_publish_time`. Without it Graph files the post
+    // as a plain DRAFT — it is accepted, it reports as created, and the scheduled
+    // instant is simply never honoured, so the post silently never goes live. The
+    // flag is scoped to that combination: a scheduled text or link post is already
+    // scheduled by the two params above, and an unscheduled photo post is a draft
+    // or a live post, neither of which may claim to be scheduled content.
+    ...(schedule !== undefined && photoCount > 0
+      ? { unpublished_content_type: 'SCHEDULED' }
+      : {}),
   };
 
-  const warnings: string[] = [PUBLISH_VERIFY_NOTE, POST_YEAR_CAP_NOTE];
+  const warnings: string[] = [publishVerifyNote(publishState), POST_YEAR_CAP_NOTE];
   if (message !== undefined)
     warnings.push(DUPLICATE_CONTENT_NOTE, UNICODE_PASSTHROUGH_NOTE);
   if (link !== undefined) warnings.push(LINK_PREVIEW_NOTE);
@@ -766,7 +943,7 @@ export function planVideoPost(
   };
 
   const warnings: string[] = [
-    PUBLISH_VERIFY_NOTE,
+    publishState === 'published' ? PUBLISH_VERIFY_NOTE : VIDEO_UNPUBLISHED_VERIFY_NOTE,
     VIDEO_CREATED_NOT_READY_NOTE,
     POST_YEAR_CAP_NOTE,
     // C10: no local decode happens, so say so instead of implying a pre-flight check.
@@ -911,7 +1088,7 @@ export function planUpdatePost(
         'scheduled_publish_time',
       );
     }
-    warnings.push(SCHEDULE_RACE_NOTE, PUBLISH_VERIFY_NOTE);
+    warnings.push(SCHEDULE_RACE_NOTE, PUBLISH_NOW_VERIFY_NOTE);
     return {
       params: { is_published: true },
       summary: `Publish scheduled/draft post ${input.postId} right now.`,
@@ -937,6 +1114,12 @@ export function planUpdatePost(
       : {}),
   });
   warnings.push(SCHEDULE_RACE_NOTE, ...scheduleWarnings(schedule));
+  // `createdAtMs` comes from Graph's `created_time`, which may be absent, null
+  // or unparseable — `createdAtMsOf` answers undefined and `resolveSchedule`
+  // then skips the creation-relative bound entirely. A preview that omits a
+  // check reads exactly like a preview that passed it, so the operator confirms
+  // a move Facebook will refuse on apply. Name the check that did not run.
+  if (ctx.createdAtMs === undefined) warnings.push(RESCHEDULE_WINDOW_UNKNOWN_NOTE);
   return {
     params: { scheduled_publish_time: schedule.epochSeconds },
     summary: `Move post ${input.postId} to ${schedule.utc} (UTC)${schedule.pageLocal !== undefined ? ` = ${schedule.pageLocal} (${schedule.pageTimezone ?? 'Page time'})` : ''}.`,
@@ -1000,6 +1183,13 @@ export function feedPostRequest(
   };
 }
 
+/**
+ * The read that shows whether a lost `/{post-id}` write landed. Core cannot
+ * infer it from the path — a comment id has the same shape — so the builder
+ * names it (C2).
+ */
+const POST_VERIFY_TOOL = 'facebook_get_post';
+
 /** `POST /{page-id}/videos` with a remote `file_url` (Meta does the fetching). */
 export function videoByUrlRequest(
   pageId: string,
@@ -1028,6 +1218,7 @@ export function updatePostRequest(
     host: 'graph',
     path: `/${postId}`,
     body,
+    verifyTool: POST_VERIFY_TOOL,
     ...scopeOf(scope),
   };
 }
@@ -1039,6 +1230,7 @@ export function deletePostRequest(postId: string, scope: RequestScope = {}): Jso
     method: 'DELETE',
     host: 'graph',
     path: `/${postId}`,
+    verifyTool: POST_VERIFY_TOOL,
     ...scopeOf(scope),
   };
 }

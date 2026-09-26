@@ -42,17 +42,32 @@ make no network call and spawn nothing.
 A refusal is deliberately non-zero: a misconfigured job must never report a green run
 for a gate that never opened.
 
+A fourth outcome sits inside exit `0`: **not exercised**. A smoke that finds no data
+of the shape it needs — an empty inbox, a Page with no published post, a metric with
+too few data points to trip the row cap — calls `ctx.notExercised(reason)` instead of
+returning quietly. It still exits `0`, because an idle Page is a fact about the Page
+and not a defect in the server, but the reason is printed as it happens, listed again
+in the summary, counted next to `passed`, and the final line reads
+`result PASS — N smoke(s) NOT EXERCISED` rather than a bare `PASS`. Treat that as
+"this run is not evidence for what those smokes cover", and give the test Page the
+material they need before believing them.
+
 ## Environment
 
-| Variable                   | Required                     | What it does                                                          |
-| -------------------------- | ---------------------------- | --------------------------------------------------------------------- |
-| `FB_SMOKE`                 | always                       | Must be exactly `1`. Anything else ⇒ refuse, exit 2, no network call. |
-| `FB_SYSTEM_TOKEN`          | preferred credential         | System-user token; the server derives Page tokens from it.            |
-| `FB_ACCESS_TOKEN`          | alternative                  | User token. Used when no system token is set.                         |
-| `FB_SMOKE_PAGE_ID`         | for read smokes              | The Page read-only smokes read. Falls back to `FB_PAGE_ID`.           |
-| `FB_SMOKE_TEST_PAGE_ID`    | for write smokes + the sweep | The dedicated **test** Page. **No fallback** — unset ⇒ writes refuse. |
-| `FB_SMOKE_PAGE_TOKEN`      | optional                     | Explicit Page token for the read Page (skips derivation).             |
-| `FB_SMOKE_TEST_PAGE_TOKEN` | optional                     | Explicit Page token for the test Page (skips derivation).             |
+| Variable                   | Required                      | What it does                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FB_SMOKE`                 | always                        | Must be exactly `1`. Anything else ⇒ refuse, exit 2, no network call.                                                                                                                                                                                                                                                       |
+| `FB_SYSTEM_TOKEN`          | preferred credential          | System-user token; the server derives Page tokens from it.                                                                                                                                                                                                                                                                  |
+| `FB_ACCESS_TOKEN`          | alternative                   | User token. Used when no system token is set.                                                                                                                                                                                                                                                                               |
+| `FB_SMOKE_PAGE_ID`         | for read smokes               | The Page read-only smokes read. Falls back to `FB_PAGE_ID`.                                                                                                                                                                                                                                                                 |
+| `FB_SMOKE_TEST_PAGE_ID`    | for write smokes + the sweep  | The dedicated **test** Page. **No fallback** — unset ⇒ writes refuse.                                                                                                                                                                                                                                                       |
+| `FB_SMOKE_PAGE_TOKEN`      | optional                      | Explicit Page token for the read Page (skips derivation).                                                                                                                                                                                                                                                                   |
+| `FB_SMOKE_TEST_PAGE_TOKEN` | optional                      | Explicit Page token for the test Page (skips derivation).                                                                                                                                                                                                                                                                   |
+| `FB_CONFIRM_TOKEN`         | for every write smoke         | The operator approval an `irreversible` apply demands. Every write smoke declares it — the three `posts/*` ones and `moderation/reply-and-delete` — because each deletes what it created. Unset ⇒ those smokes **refuse** (exit 2) rather than create artifacts they could never remove. See [Confirmation](#confirmation). |
+| `FB_SMOKE_PHOTO_URL`       | for `posts/photo`             | A public `https://` image URL Meta fetches itself — the repo ships none, and baking in someone else's CDN link would make the smoke fail for reasons unrelated to this server. `posts/photo` is in the DEFAULT selection, so **an unset value refuses the plain `npm run smoke`** (exit 2, nothing executed).               |
+| `FB_SMOKE_REEL_PATH`       | for `reels/create-and-status` | Path to a real MP4/MOV the Reels upload streams. Budget-gated, so it only bites under `--include-budget` / `--only`. Must resolve **inside** `FB_MEDIA_DIR`.                                                                                                                                                                |
+| `FB_MEDIA_DIR`             | for `reels/create-and-status` | The server's local-media root. Local file access is **off by default** (C11): unset ⇒ the server is URL-only, and the Reels protocol has no "fetch this URL" mode, so `FB_SMOKE_REEL_PATH` alone is not enough. Inherited by the child verbatim; paths are confined by realpath containment.                                |
+| `FB_AD_ACCOUNT_ID`         | for the `ads/*` live smokes   | The ad account `ads/read-surface` and `ads/hierarchy` read, and the default for any tool call that omits `ad_account_id`. Written as `act_<digits>` or as the bare digits — the tools normalise it and echo back the `act_` form. Budget-gated, so it only bites under `--include-budget` / `--only`.                       |
 
 Everything else in your environment (API version, HTTP tuning, app id/secret) is
 inherited by the spawned server unchanged. The runner forces only:
@@ -140,6 +155,12 @@ registerSmoke({
 
 `writes: true` with any `page` other than `'test'` is a hard registration error.
 
+Never early-return on missing material. If the live Page holds nothing to assert
+against, say so with `ctx.notExercised('<the contract that did not run>')` first —
+name the behaviour that went unverified, not merely the data that was absent. It does
+not throw, so a smoke that proved five of its six behaviours records only the sixth
+and keeps the five.
+
 ### The `ctx` a smoke receives
 
 | Field                              | What it is                                                                                    |
@@ -154,6 +175,7 @@ registerSmoke({
 | `ctx.listTools()`                  | raw `tools/list`                                                                              |
 | `ctx.unwrap(value)`                | unwrap the taint envelope (`{__tainted, source, content, warning}`)                           |
 | `ctx.assert(condition, message)`   | fail the smoke with a readable message                                                        |
+| `ctx.notExercised(reason)`         | record that a part of this smoke's contract could not run against this Page — does not throw  |
 | `ctx.log`                          | `step` / `info` / `warn` — scrubbed terminal output                                           |
 | `ctx.signal`                       | aborted on timeout or Ctrl-C                                                                  |
 

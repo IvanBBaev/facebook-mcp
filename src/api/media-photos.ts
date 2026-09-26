@@ -54,11 +54,18 @@
 
 import { access, open, realpath, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { basename, extname, isAbsolute, resolve as resolvePath, sep } from 'node:path';
 
-import { GraphApiError, ambiguousWriteAction } from '../core/index.js';
+import {
+  DEFAULT_VERIFY_TOOL,
+  GraphApiError,
+  ambiguousWriteAction,
+  errorMessageOf,
+} from '../core/index.js';
 import type {
   FbRequestFn,
+  FbResponse,
   JsonRequest,
   Logger,
   MultipartRequest,
@@ -87,6 +94,9 @@ export const DEFAULT_MAX_LOCAL_BYTES = 25 * 1024 * 1024;
  * the upload so cleanup cannot hang a shutdown path.
  */
 export const DEFAULT_CLEANUP_TIMEOUT_MS = 10_000;
+
+/** The read that lists a Page's scheduled posts (verify target for a scheduled photo). */
+const SCHEDULED_VERIFY_TOOL = 'facebook_list_scheduled_posts';
 
 /** The only accepted remote scheme; everything else is refused. */
 export const ALLOWED_REMOTE_SCHEME = 'https:';
@@ -225,6 +235,22 @@ export interface OrphanCleanupReport {
   readonly orphans: readonly string[];
   /** One failure per entry in `orphans`, same order. */
   readonly failures: readonly OrphanCleanupFailure[];
+  /**
+   * Uploads whose OUTCOME is unknown (C2 ambiguous: a 5xx, a lost response, a
+   * 2xx without a photo id, a cancellation mid-request). Such a child may exist
+   * as an unpublished photo whose id was never returned, so it could not be
+   * cleaned up and cannot be named by id — the operator must check the Page's
+   * photo library. Absent when every failed upload was a clean refusal.
+   */
+  readonly unconfirmedUploads?: readonly UnconfirmedPhotoUpload[];
+}
+
+/** One upload that may or may not have created an unpublished photo. */
+export interface UnconfirmedPhotoUpload {
+  /** Zero-based index (into the caller's `sources`) of the upload. */
+  readonly index: number;
+  /** Why its outcome is unknown (the upload error's message). */
+  readonly message: string;
 }
 
 /**
@@ -278,12 +304,24 @@ export class MultiPhotoUploadError extends Error {
  * warnings without re-deriving the wording.
  */
 export function describeOrphans(report: OrphanCleanupReport): string | undefined {
-  if (report.orphans.length === 0) return undefined;
-  return (
-    `${String(report.orphans.length)} unpublished photo(s) could NOT be cleaned up and ` +
-    `remain in the Page's photo library — delete them manually ` +
-    `(DELETE /{photo-id}): ${report.orphans.join(', ')}.`
-  );
+  const parts: string[] = [];
+  if (report.orphans.length > 0) {
+    parts.push(
+      `${String(report.orphans.length)} unpublished photo(s) could NOT be cleaned up and ` +
+        `remain in the Page's photo library — delete them manually ` +
+        `(DELETE /{photo-id}): ${report.orphans.join(', ')}.`,
+    );
+  }
+  const unconfirmed = report.unconfirmedUploads ?? [];
+  if (unconfirmed.length > 0) {
+    const which = unconfirmed.map((u) => `photo ${String(u.index + 1)}`).join(', ');
+    parts.push(
+      `The upload of ${which} has an UNKNOWN outcome, so it may exist as an unpublished ` +
+        'photo whose id was never returned and which could not be cleaned up — check the ' +
+        "Page's photo library and delete it by hand if it is there.",
+    );
+  }
+  return parts.length > 0 ? parts.join(' ') : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +439,8 @@ interface MagicRule {
 const ASCII_RIFF = [0x52, 0x49, 0x46, 0x46];
 const ASCII_WEBP = [0x57, 0x45, 0x42, 0x50];
 const ASCII_FTYP = [0x66, 0x74, 0x79, 0x70];
+/** ISO-BMFF major brands that denote a HEIF/HEIC still image (or sequence). */
+const HEIF_BRANDS = ['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1'];
 
 /** Signatures for the formats a Page photo upload plausibly carries. */
 const MAGIC_RULES: readonly MagicRule[] = [
@@ -417,7 +457,14 @@ const MAGIC_RULES: readonly MagicRule[] = [
     type: 'image/webp',
     then: { offset: 8, bytes: ASCII_WEBP },
   },
-  { offset: 4, bytes: ASCII_FTYP, type: 'image/heic' },
+  // ISO-BMFF: `ftyp` alone is shared with MP4/MOV/3GP video, so the major brand
+  // at offset 8 must name a HEIF image before the bytes are labelled HEIC.
+  ...HEIF_BRANDS.map((brand): MagicRule => ({
+    offset: 4,
+    bytes: ASCII_FTYP,
+    type: 'image/heic',
+    then: { offset: 8, bytes: [...Buffer.from(brand, 'latin1')] },
+  })),
   { offset: 0, bytes: [0x42, 0x4d], type: 'image/bmp' },
   { offset: 0, bytes: [0x49, 0x49, 0x2a, 0x00], type: 'image/tiff' },
   { offset: 0, bytes: [0x4d, 0x4d, 0x00, 0x2a], type: 'image/tiff' },
@@ -583,7 +630,14 @@ export async function resolveLocalMediaPath(
     // Never become an existence oracle for the filesystem outside the allowlist:
     // if the lexical candidate is already out of bounds, report the boundary
     // rather than whether the file happens to exist.
-    if (!isInsideDir(root, candidate)) {
+    // The lexical check accepts the directory as CONFIGURED too: when
+    // FB_MEDIA_DIR is itself reached through a symlink (macOS `/tmp`, `/var`),
+    // an absolute path spelled under it is inside the allowlist, and a missing
+    // file there is missing — not a path that escapes the directory.
+    if (
+      !isInsideDir(root, candidate) &&
+      !isInsideDir(resolvePath(configured), candidate)
+    ) {
       throw outsideError(
         requested,
         root,
@@ -670,8 +724,85 @@ export async function resolveLocalMediaPath(
  * symlink: if it HAS become one between validation and read, the open fails
  * instead of following it. This narrows — it cannot fully close — the TOCTOU
  * window on a directory the operator has explicitly allowlisted.
+ *
+ * `O_NONBLOCK` (a no-op on a regular file) stops a path swapped for a FIFO after
+ * validation from blocking the open forever waiting for a writer; the fstat
+ * below then refuses it as `not_a_regular_file`.
  */
-const OPEN_FLAGS: number = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+const OPEN_FLAGS: number =
+  fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
+
+/** Chunk size for the bounded local read. */
+const READ_CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * Read the whole file but never buffer more than `maxBytes + 1` bytes: the size
+ * check runs on the bytes actually read, not only on an earlier `fstat`, so a
+ * file that grows between the check and the read cannot bypass the memory
+ * ceiling. Returns `undefined` when the file is larger than `maxBytes`.
+ */
+async function readAtMost(
+  handle: Awaited<ReturnType<typeof open>>,
+  maxBytes: number,
+): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const want = Math.min(READ_CHUNK_BYTES, maxBytes + 1 - total);
+    const chunk = Buffer.allocUnsafe(want);
+    const { bytesRead } = await handle.read(chunk, 0, want, null);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+    if (total > maxBytes) return undefined;
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Re-prove containment for the file actually OPENED. `O_NOFOLLOW` guards only
+ * the final path component: a directory on the way that became a symlink after
+ * validation would be followed silently, and bytes from outside FB_MEDIA_DIR
+ * would be uploaded. So, after the open, the validated realpath must still
+ * resolve to itself AND name the very inode the handle holds — a swap that is
+ * reverted between the open and this check is caught by the inode comparison.
+ */
+async function assertHandleStillContained(
+  handle: Awaited<ReturnType<typeof open>>,
+  validatedPath: string,
+  requested: string,
+): Promise<void> {
+  const changed = (detail: string): MediaSourceError =>
+    new MediaSourceError(
+      'outside_media_dir',
+      requested,
+      `refusing "${requested}": ${detail} after it was validated, so it was not ` +
+        'uploaded. Only regular files inside FB_MEDIA_DIR may be uploaded.',
+    );
+  let realNow: string;
+  let pathInfo: BigIntStats;
+  try {
+    realNow = await realpath(validatedPath);
+    pathInfo = await stat(validatedPath, { bigint: true });
+  } catch (err) {
+    throw new MediaSourceError(
+      'file_not_found',
+      requested,
+      `"${requested}" disappeared while it was being read (${errnoCode(err) ?? errorMessageOf(err)}).`,
+    );
+  }
+  if (realNow !== validatedPath) {
+    throw changed(
+      'its path now resolves elsewhere (a directory on the way became a symlink)',
+    );
+  }
+  const handleInfo = await handle.stat({ bigint: true });
+  if (handleInfo.ino !== pathInfo.ino || handleInfo.dev !== pathInfo.dev) {
+    throw changed(
+      'the file opened is not the file at the validated path (it was swapped)',
+    );
+  }
+}
 
 /** Buffer an already-validated local file, re-checking its size against the handle. */
 async function readResolvedLocalPhoto(
@@ -702,6 +833,7 @@ async function readResolvedLocalPhoto(
     );
   }
   try {
+    await assertHandleStillContained(handle, resolved.path, requested);
     // Re-stat through the open handle: the checks now describe the bytes we read.
     const info = await handle.stat();
     if (!info.isFile()) {
@@ -726,7 +858,22 @@ async function readResolvedLocalPhoto(
           'local upload ceiling. Resize the image or raise the ceiling.',
       );
     }
-    const data = await handle.readFile();
+    const data = await readAtMost(handle, maxBytes);
+    if (data === undefined) {
+      throw new MediaSourceError(
+        'file_too_large',
+        requested,
+        `"${requested}" grew past this server's ${String(maxBytes)}-byte local upload ceiling ` +
+          'while it was being read. Resize the image or raise the ceiling.',
+      );
+    }
+    if (data.byteLength === 0) {
+      throw new MediaSourceError(
+        'empty_file',
+        requested,
+        `"${requested}" is empty (0 bytes) — Facebook would reject it.`,
+      );
+    }
     return {
       path: resolved.path,
       filename: resolved.filename,
@@ -823,7 +970,12 @@ export interface PhotoUploadRequest {
 export interface UploadedPhoto {
   /** The photo (media) ID — the `media_fbid` for `attached_media`. */
   readonly id: string;
-  /** The created Page post ID; present only when the photo was published. */
+  /**
+   * The created Page post ID, when Graph reported one: expected for a published
+   * photo, never for an unpublished child. This is Graph's `post_id` passed
+   * through, not derived — its absence on a published upload means the wire
+   * did not say, not that no post was made.
+   */
   readonly postId?: string;
 }
 
@@ -840,17 +992,63 @@ function asNonEmptyString(value: unknown): string | undefined {
  * A 2xx whose body carries no photo id: the upload may well have landed, but we
  * have no handle to it, so this is a C2 AMBIGUOUS write — never auto-retried,
  * verify first.
+ *
+ * When the same body DID name a `post_id`, that handle is passed on rather than
+ * discarded: it is the one concrete thing Graph told us about the write, and a
+ * message that only says "check the Page for a stray photo" would send the
+ * operator searching the whole Page for a post whose id was already in hand.
+ * The outcome stays ambiguous — a post id is not the photo id the caller asked
+ * for — but the verification step becomes a direct lookup.
  */
-function missingIdError(sourceLabel: string, status: number): GraphApiError {
+function missingIdError(
+  sourceLabel: string,
+  status: number,
+  reportedPostId: string | undefined,
+  verifyTool: string | undefined,
+): GraphApiError {
+  const hint =
+    reportedPostId !== undefined
+      ? `Graph did report post id ${reportedPostId}, so inspect that post first.`
+      : 'check the Page for a stray photo first.';
   return new GraphApiError(
     `the photo upload for "${sourceLabel}" returned no photo id, so its outcome is unknown — ` +
-      'do NOT retry blindly; check the Page for a stray photo first.',
+      `do NOT retry blindly; ${hint}`,
     {
       code: 0,
       httpStatus: status,
-      action: ambiguousWriteAction({ detail: 'photo upload response carried no id' }),
+      action: ambiguousWriteAction({
+        ...(verifyTool !== undefined ? { verifyTool } : {}),
+        detail:
+          reportedPostId !== undefined
+            ? `photo upload response carried no id, only post id ${reportedPostId}`
+            : 'photo upload response carried no id',
+      }),
     },
   );
+}
+
+/**
+ * The read that can show whether an ambiguous photo write landed. A published
+ * photo becomes a Page post on the published listing; a scheduled one (Graph
+ * requires `published:false` plus `scheduled_publish_time`) sits on the
+ * scheduled queue; a draft or an unpublished carousel child is on no listing,
+ * so the guidance stays neutral rather than name a read that can never show it.
+ * The same holds for a published photo sent with `no_story`: Graph creates it
+ * without a feed story, so the published listing can never show it either.
+ */
+function photoVerifyTool(
+  published: boolean,
+  extraParams: Readonly<Record<string, ParamValue>> | undefined,
+): string | undefined {
+  if (published) {
+    const noStory = extraParams?.['no_story'];
+    const suppressesStory =
+      noStory === true || noStory === 1 || noStory === 'true' || noStory === '1';
+    return suppressesStory ? undefined : DEFAULT_VERIFY_TOOL;
+  }
+  return extraParams?.['scheduled_publish_time'] !== undefined
+    ? SCHEDULED_VERIFY_TOOL
+    : undefined;
 }
 
 /** Merge the shared photo params; `undefined` values are dropped by the client. */
@@ -883,6 +1081,50 @@ function toFields(params: Readonly<Record<string, ParamValue>>): Record<string, 
  */
 type PreparedUploadOptions = Omit<PhotoUploadRequest, 'source'>;
 
+/** Graph code for "missing or invalid image file" — on a `url` upload, the fetched bytes. */
+const GRAPH_INVALID_IMAGE_CODE = 324;
+/** A code-100 refusal that is about fetching the `url`, not about another argument. */
+const URL_FETCH_REFUSAL =
+  /\b(?:could ?n[o']t|cannot|unable to|failed to) (?:fetch|download|retrieve|read)\b/i;
+
+/**
+ * On a `url` upload Meta fetches the URL itself, so a 324 ("missing or invalid
+ * image file") or a code-100 "could not fetch" refusal is about THAT URL — yet the
+ * matrix leaves 324 unclassified and files 100 under a generic bad argument, so
+ * neither tells the caller what to fix. Re-issue such a refusal with a
+ * `validation` verdict naming the URL; the Graph code, message, trace id and
+ * user-facing text are kept and the original rides as `cause`. Every other error
+ * (including anything ambiguous) passes through untouched.
+ */
+function withUrlFetchVerdict(err: unknown, url: string): unknown {
+  if (!(err instanceof GraphApiError)) return err;
+  const aboutFetch =
+    err.code === GRAPH_INVALID_IMAGE_CODE ||
+    (err.code === 100 &&
+      [err.message, err.userTitle, err.userMessage].some(
+        (text) => text !== undefined && URL_FETCH_REFUSAL.test(text),
+      ));
+  if (!aboutFetch || err.action?.category === 'ambiguous') return err;
+  return new GraphApiError(err.message, {
+    code: err.code,
+    ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
+    ...(err.type !== undefined ? { type: err.type } : {}),
+    ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+    httpStatus: err.httpStatus,
+    ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+    ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
+    action: {
+      category: 'validation',
+      retryable: false,
+      operatorText:
+        `Facebook could not fetch a usable image from the URL "${url}" (Graph code ${err.code}) — ` +
+        'nothing was published. Make sure the URL is publicly reachable without login or cookies ' +
+        'and returns the image bytes (not an HTML page); retrying the same URL unchanged will fail again.',
+    },
+    cause: err,
+  });
+}
+
 /** Upload one prepared source; shared by the single- and multi-photo flows. */
 async function uploadPreparedPhoto(
   deps: MediaPhotoDeps,
@@ -896,6 +1138,7 @@ async function uploadPreparedPhoto(
     ...(req.extraParams !== undefined ? { extraParams: req.extraParams } : {}),
   });
   const path = `/${req.pageId}/${PHOTOS_EDGE}`;
+  const verifyTool = photoVerifyTool(published, req.extraParams);
 
   let request: JsonRequest | MultipartRequest;
   if (prepared.kind === 'url') {
@@ -907,6 +1150,7 @@ async function uploadPreparedPhoto(
       host: 'graph',
       path,
       body: { ...params, url: prepared.url },
+      ...(verifyTool !== undefined ? { verifyTool } : {}),
       ...(req.token !== undefined ? { token: req.token } : {}),
       ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
       ...(req.signal !== undefined ? { signal: req.signal } : {}),
@@ -927,30 +1171,41 @@ async function uploadPreparedPhoto(
           contentType: file.contentType,
         },
       ],
+      ...(verifyTool !== undefined ? { verifyTool } : {}),
       ...(req.token !== undefined ? { token: req.token } : {}),
       ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
       ...(req.signal !== undefined ? { signal: req.signal } : {}),
     };
   }
 
-  const res = await deps.fbRequest<RawPhotoResponse>(request);
-  const id = asNonEmptyString(res.data?.id);
-  if (id === undefined) {
-    throw missingIdError(describeSource(prepared), res.status);
+  let res: FbResponse<RawPhotoResponse>;
+  try {
+    res = await deps.fbRequest<RawPhotoResponse>(request);
+  } catch (err) {
+    throw prepared.kind === 'url' ? withUrlFetchVerdict(err, prepared.url) : err;
   }
+  const id = asNonEmptyString(res.data?.id);
   const postId = asNonEmptyString(res.data?.post_id);
+  if (id === undefined) {
+    throw missingIdError(describeSource(prepared), res.status, postId, verifyTool);
+  }
   return { id, ...(postId !== undefined ? { postId } : {}) };
 }
 
 /**
  * Upload ONE photo to `/{page-id}/photos`. With the default `published:true`
- * this both creates the photo and publishes it as a Page post, so
- * `postId` comes back for the single-photo flow. Requires
- * `pages_manage_posts` on a Page token.
+ * Graph both creates the photo and publishes it as a Page post, and normally
+ * reports that post as `postId`. Only the photo `id` is guaranteed here: a 2xx
+ * that names the photo but no post is still returned as a success WITHOUT
+ * `postId`, because the photo did land and its id is the handle the caller
+ * needs — whether a missing post id is acceptable is the caller's call (the
+ * tools layer tells the operator to verify). Requires `pages_manage_posts` on
+ * a Page token.
  *
  * @throws MediaSourceError when the source or an extra param fails local
  *   validation (nothing is sent on that path).
- * @throws GraphApiError propagated from the client, unchanged.
+ * @throws GraphApiError propagated from the client, unchanged — plus the C2
+ *   ambiguous error of {@link missingIdError} when a 2xx carries no photo id.
  */
 export async function uploadPhoto(
   deps: MediaPhotoDeps,
@@ -983,6 +1238,34 @@ interface RawDeleteResponse {
 }
 
 /**
+ * Did Graph CONFIRM the delete? `fbRequest` casts the parsed body to the
+ * declared type without validating it, so `success` is whatever the wire sent:
+ * a bodiless 2xx parses as `undefined`, and a refusal can arrive as the string
+ * `"false"`, as `0` or as `null` just as readily as a boolean `false`.
+ * Only an explicit `true` — or no flag at all, since the transport has already
+ * turned an error payload into a throw — counts as confirmation. Anything else
+ * present is Facebook declining, and a declined delete is an orphan
+ * (CC-MEDIA-10), not a success.
+ */
+function confirmsDelete(body: unknown): boolean {
+  // A bodiless 2xx, or Graph's bare-boolean answer `true`, confirms. Any other
+  // bare value (`false`, `"false"`, `null`, a number) is present and is not a
+  // confirmation, so the photo is reported as surviving.
+  if (body === undefined || body === true) return true;
+  if (typeof body !== 'object' || body === null) return false;
+  const flag: unknown = (body as Record<string, unknown>).success;
+  return flag === undefined || flag === true;
+}
+
+/** The part of a non-confirming DELETE body worth quoting to the operator. */
+function describeDeleteBody(body: unknown): string {
+  if (typeof body === 'object' && body !== null) {
+    return `success: ${String(JSON.stringify((body as RawDeleteResponse).success))}`;
+  }
+  return `body: ${String(JSON.stringify(body))}`;
+}
+
+/**
  * Delete unpublished child photos, best effort and NEVER throwing. Every ID is
  * attempted (a failure does not stop the pass) and whatever survives is returned
  * in `orphans` so the caller can tell the operator exactly what to remove
@@ -1003,7 +1286,7 @@ export async function cleanupUnpublishedPhotos(
 
   for (const id of ids) {
     try {
-      const res = await deps.fbRequest<RawDeleteResponse>({
+      const res = await deps.fbRequest<unknown>({
         protocol: 'json',
         method: 'DELETE',
         host: 'graph',
@@ -1012,10 +1295,13 @@ export async function cleanupUnpublishedPhotos(
         timeoutMs: opts.timeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS,
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       });
-      // Graph answers `{success:true}`; an explicit `false` means it survived.
-      if (res.data?.success === false) {
+      // Graph answers `{success:true}`; anything else present means it survived.
+      if (!confirmsDelete(res.data)) {
         orphans.push(id);
-        failures.push({ id, message: 'Graph reported success:false for the delete' });
+        failures.push({
+          id,
+          message: `Graph did not confirm the delete (${describeDeleteBody(res.data)})`,
+        });
         continue;
       }
       deleted.push(id);
@@ -1116,6 +1402,53 @@ export function attachedMediaParams(
 }
 
 /**
+ * Feed the progress sink, defensively. A sink is ADVISORY: the tools layer
+ * bridges it onto an MCP `progressToken` notification (CC-MCP-1), and that
+ * notification can fail on a closing transport. A throwing sink must never fail
+ * an upload whose children Meta has already accepted — the caller's catch would
+ * delete every one of them and then blame the child that in fact succeeded — so
+ * the throw is contained, and logged rather than silently dropped.
+ *
+ * The log call is contained in turn for the same reason `cleanupNeverThrows`
+ * contains its own: bookkeeping must never become the reported upload failure
+ * (CC-MEDIA-10).
+ */
+function reportPhotoProgress(
+  deps: MediaPhotoDeps,
+  onProgress: ((done: number, total: number) => void) | undefined,
+  done: number,
+  total: number,
+): void {
+  if (onProgress === undefined) return;
+  try {
+    onProgress(done, total);
+  } catch (err) {
+    try {
+      deps.logger?.warn('progress sink threw — the upload continues', {
+        done,
+        total,
+        error: errorMessage(err),
+      });
+    } catch {
+      // The logger itself is broken; there is nothing left to report with.
+    }
+  }
+}
+
+/**
+ * Could this failed upload have created a photo anyway? A local refusal
+ * ({@link MediaSourceError}) never reached the wire, and a classified Graph
+ * refusal means Graph answered "no". Everything else — the C2 `ambiguous`
+ * category (5xx, lost response, 2xx without an id) or an unclassified fault such
+ * as a cancellation mid-request — may have landed (CC-MEDIA-10).
+ */
+function uploadMayHaveLanded(err: unknown): boolean {
+  if (err instanceof MediaSourceError) return false;
+  if (err instanceof GraphApiError) return err.action?.category === 'ambiguous';
+  return true;
+}
+
+/**
  * Upload N photos as UNPUBLISHED children and hand back their IDs for a
  * follow-up `/{page-id}/feed` call with `attached_media` (the feed call belongs
  * to the tools layer, V03).
@@ -1159,7 +1492,7 @@ export async function uploadUnpublishedPhotos(
         ...(req.extraParams !== undefined ? { extraParams: req.extraParams } : {}),
       });
       children.push({ id: uploaded.id, index });
-      req.onProgress?.(children.length, total);
+      reportPhotoProgress(deps, req.onProgress, children.length, total);
     } catch (err) {
       // Best-effort cleanup WITHOUT req.signal: if the failure was a cancellation,
       // reusing that signal would abort every DELETE and orphan every child.
@@ -1173,7 +1506,15 @@ export async function uploadUnpublishedPhotos(
             : {}),
         },
       );
-      throw new MultiPhotoUploadError({ failedIndex: index, total, cleanup, cause: err });
+      const report: OrphanCleanupReport = uploadMayHaveLanded(err)
+        ? { ...cleanup, unconfirmedUploads: [{ index, message: errorMessage(err) }] }
+        : cleanup;
+      throw new MultiPhotoUploadError({
+        failedIndex: index,
+        total,
+        cleanup: report,
+        cause: err,
+      });
     }
   }
 

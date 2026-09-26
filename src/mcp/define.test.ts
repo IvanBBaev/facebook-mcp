@@ -220,6 +220,37 @@ test('defineTool passes through title, outputSchema and logFields when given', (
   assert.deepEqual(spec.logFields, ['name']);
 });
 
+test('defineTool rejects a logFields allowlist that names nothing loggable', () => {
+  // `[]` and a blank entry both READ like log hygiene was reasoned about while
+  // producing exactly the behaviour of omitting the field — the "documented
+  // control that enforces nothing" failure in miniature. Both are refused at
+  // authoring time, which is module load, long before a client can connect.
+  assert.throws(
+    () =>
+      defineTool({
+        name: 'facebook_empty_allowlist',
+        description: 'x',
+        inputSchema: z.object({}),
+        annotations: READ_ONLY,
+        logFields: [],
+        handler: () => Promise.resolve(ok()),
+      }),
+    /`logFields` must name at least one argument/,
+  );
+  assert.throws(
+    () =>
+      defineTool({
+        name: 'facebook_blank_allowlist',
+        description: 'x',
+        inputSchema: z.object({}),
+        annotations: READ_ONLY,
+        logFields: ['page_id', '  '],
+        handler: () => Promise.resolve(ok()),
+      }),
+    /`logFields` must not contain a blank argument name/,
+  );
+});
+
 test('defineTool rejects an empty name or description', () => {
   assert.throws(
     () =>

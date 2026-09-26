@@ -101,14 +101,25 @@ export function effectiveWriteMode(
  *   `packagesReadonly`.
  * @throws PackageSelectionError if any selection/deny/readonly token is unknown.
  * @throws RegistryError on duplicate package names, a selected-but-unregistered
- *   package, or a duplicate tool name across the resolved packages.
+ *   package, or a duplicate tool name across the injected packages (selected
+ *   or not — the check is config-blind).
  */
 export function createRegistry(
   packages: readonly PackageSpec[],
   settings: Settings,
 ): ToolRegistry {
   // Index the injected packages; a duplicate name is a wiring fault.
+  //
+  // Tool names are claimed here, across EVERY injected package, before any
+  // selection, deny or read-only drop. A duplicate tool name is a packaging
+  // fault, and a packaging fault has to fail identically in every deployment —
+  // not only in the ones whose config keeps both twins alive. Checked over the
+  // resolved set only, a collision with `ads` (off by default) boots a default
+  // install clean and passes `doctor`, then crashes the first deployment that
+  // enables `ads`; one twin named in FB_PACKAGES_DENY or FB_PACKAGES_READONLY
+  // hides it the same way.
   const specByName = new Map<string, PackageSpec>();
+  const claimedBy = new Map<string, string>();
   for (const pkg of packages) {
     if (specByName.has(pkg.name)) {
       throw new RegistryError(
@@ -116,16 +127,27 @@ export function createRegistry(
       );
     }
     specByName.set(pkg.name, pkg);
+    for (const tool of pkg.tools) {
+      const owner = claimedBy.get(tool.name);
+      if (owner !== undefined) {
+        throw new RegistryError(
+          `duplicate tool name '${tool.name}' (packages '${owner}' and '${pkg.name}').`,
+        );
+      }
+      claimedBy.set(tool.name, pkg.name);
+    }
   }
 
   // 1. Base selection: default profile, or the explicit list (unknown ⇒ throws).
   const selectedRaw =
     settings.toolPackages === undefined
       ? [...DEFAULT_PROFILE_PACKAGES]
-      : expandSelection(settings.toolPackages);
+      : expandSelection(settings.toolPackages, 'FB_TOOL_PACKAGES');
 
   // 2. Deny (unknown deny names also throw), then force `core` back on.
-  const denied = new Set<PackageName>(expandSelection(settings.packagesDeny));
+  const denied = new Set<PackageName>(
+    expandSelection(settings.packagesDeny, 'FB_PACKAGES_DENY'),
+  );
   const selected = new Set<PackageName>();
   for (const name of selectedRaw) {
     if (!denied.has(name)) {
@@ -135,7 +157,9 @@ export function createRegistry(
   selected.add(ALWAYS_ON); // always-on: survives deny.
 
   // 3. Read-only packages: their write-tier tools are dropped.
-  const readOnly = new Set<PackageName>(expandSelection(settings.packagesReadonly));
+  const readOnly = new Set<PackageName>(
+    expandSelection(settings.packagesReadonly, 'FB_PACKAGES_READONLY'),
+  );
 
   const tools: ToolSpec[] = [];
   const byToolName = new Map<string, ToolSpec>();
@@ -159,14 +183,21 @@ export function createRegistry(
       settings.writeModeExplicit === true,
     );
     for (const tool of pkg.tools) {
-      // writeTier absent ⇒ read-only tool (ToolSpec contract): keep it.
-      if (dropWrites && tool.writeTier !== undefined) {
+      // A read-only package keeps a tool only when BOTH of the spec's
+      // independent read-only signals say so. `defineTool` cross-checks them at
+      // authoring time, but the registry does not consume `defineTool` — it
+      // consumes an INJECTED `PackageSpec[]` that it never re-validates. A write
+      // tool that lost its `writeTier` (added later, copy-pasted off a read
+      // tool, hand-built) still announces `readOnlyHint:false` to the client and
+      // still mutates. Keyed on `writeTier` alone, FB_PACKAGES_READONLY fails
+      // OPEN on exactly that fault: the operator asked for a deployment that
+      // cannot write and gets a mutating tool served. A containment control has
+      // to drop on the UNION of the signals — a missing field may cost a tool,
+      // never the guarantee.
+      const declaresWrite =
+        tool.writeTier !== undefined || tool.annotations.readOnlyHint !== true;
+      if (dropWrites && declaresWrite) {
         continue;
-      }
-      if (byToolName.has(tool.name)) {
-        throw new RegistryError(
-          `duplicate tool name '${tool.name}' (package '${pkg.name}').`,
-        );
       }
       const stamped: ToolSpec = { ...tool, package: pkg.name };
       byToolName.set(stamped.name, stamped);

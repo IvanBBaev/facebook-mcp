@@ -78,16 +78,28 @@ export class PackageSelectionError extends Error {
   readonly unknownNames: readonly string[];
   /** The full set of valid selection tokens. */
   readonly validNames: readonly string[];
+  /**
+   * Which environment variable supplied the offending tokens, when the caller
+   * knows. Three variables feed {@link expandSelection} and they fail
+   * identically, so without this the operator reads the message, then has to
+   * grep their own environment to find out which one to edit.
+   */
+  readonly source: string | undefined;
 
-  constructor(unknownNames: readonly string[], validNames: readonly string[]) {
+  constructor(
+    unknownNames: readonly string[],
+    validNames: readonly string[],
+    source?: string,
+  ) {
     super(
-      `Unknown tool package/profile name(s): ${unknownNames
+      `Unknown tool package/profile name(s)${source === undefined ? '' : ` in ${source}`}: ${unknownNames
         .map((n) => JSON.stringify(n))
         .join(', ')}. Valid names: ${validNames.join(', ')}.`,
     );
     this.name = 'PackageSelectionError';
     this.unknownNames = unknownNames;
     this.validNames = validNames;
+    this.source = source;
     Object.setPrototypeOf(this, PackageSelectionError.prototype);
   }
 }
@@ -102,8 +114,16 @@ export class PackageSelectionError extends Error {
  *
  * The returned list preserves first-seen order; call {@link sortByCanonical} for
  * a deterministic, snapshot-friendly ordering.
+ *
+ * @param source Name of the environment variable the tokens came from. All three
+ *   variables produce the same error text otherwise, and the server refuses to
+ *   start — so during an incident the operator would be told a token is invalid
+ *   without being told which setting to correct.
  */
-export function expandSelection(tokens: readonly string[]): PackageName[] {
+export function expandSelection(
+  tokens: readonly string[],
+  source?: string,
+): PackageName[] {
   const out = new Set<PackageName>();
   const unknown: string[] = [];
 
@@ -125,7 +145,7 @@ export function expandSelection(tokens: readonly string[]): PackageName[] {
   }
 
   if (unknown.length > 0) {
-    throw new PackageSelectionError(unknown, knownSelectionNames());
+    throw new PackageSelectionError(unknown, knownSelectionNames(), source);
   }
   return [...out];
 }

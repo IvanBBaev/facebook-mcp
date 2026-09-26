@@ -13,12 +13,13 @@
 
 import { z } from 'zod';
 
-import type {
-  ApplyResult,
-  PlanPreview,
-  ToolContext,
-  ToolResult,
-  WriteTier,
+import {
+  GraphApiError,
+  type ApplyResult,
+  type PlanPreview,
+  type ToolContext,
+  type ToolResult,
+  type WriteTier,
 } from '../core/index.js';
 import { DEFAULT_PAGE_LIMIT } from '../api/shared.js';
 import {
@@ -63,6 +64,122 @@ export const limitArg = z
   .describe(
     `Maximum items to return in this page (1–100). Defaults to ${String(DEFAULT_PAGE_LIMIT)}. Large values risk truncation by the result budget.`,
   );
+
+/**
+ * Graph video/Reel IDs are bare decimal node IDs. Digits-only is both the true
+ * shape and the strictest possible path containment for `/{videoId}/…` — no dot
+ * segment, no slash, no percent-escape can survive it — and it rejects the one
+ * mistake every video edge invites: handing it the `{page-id}_{post-id}`
+ * composite, which addresses a POST and resolves on no video edge at all.
+ */
+export const VIDEO_ID_SHAPE = /^\d+$/;
+
+/**
+ * The one rejection message every `video_id` argument shares. It lives here
+ * because the shape it describes is a property of Graph's ID space, not of any
+ * single tool: two tools that disagree about which IDs are acceptable is how
+ * `facebook_get_video_status` came to accept a composite that can never resolve.
+ * Tool-specific follow-up prose is appended by {@link videoIdArg}; this sentence
+ * is the part that stays identical everywhere, and the live
+ * `reels/status-guardrail` smoke asserts its "VIDEO id" / "digits only" wording.
+ */
+export const VIDEO_ID_MESSAGE =
+  'Expected the bare VIDEO id (digits only, e.g. "1234567890"), not a "{page-id}_{post-id}" post ID, a permalink or a URL.';
+
+/** What {@link videoIdArg} needs from the tool that mounts the argument. */
+export interface VideoIdArgOptions {
+  /**
+   * The model-facing `.describe()` prose for this tool — genuinely
+   * tool-specific (which edge it reads, which tool minted the id).
+   */
+  readonly description: string;
+  /**
+   * Optional tool-specific sentence appended to {@link VIDEO_ID_MESSAGE} in the
+   * rejection, naming where the caller can obtain a real video id.
+   */
+  readonly hint?: string;
+}
+
+/**
+ * Build the `video_id` argument for one tool: one shape and one rejection
+ * message for every video edge, with the prose left per-tool. `.trim()` runs
+ * before the checks, so a pasted id with stray whitespace is accepted on its
+ * digits rather than refused on its padding.
+ */
+export function videoIdArg(options: VideoIdArgOptions): z.ZodString {
+  const message =
+    options.hint === undefined ? VIDEO_ID_MESSAGE : `${VIDEO_ID_MESSAGE} ${options.hint}`;
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .regex(VIDEO_ID_SHAPE, message)
+    .describe(options.description);
+}
+
+/**
+ * The shape a Graph node ID must have before it is interpolated into an edge
+ * path.
+ *
+ * This is PATH CONTAINMENT, not cosmetics. Every edge in this server is built by
+ * interpolating a model-supplied id — `/{post_id}`, `/{comment_id}`,
+ * `/{conversation_id}`, `/{object_id}/comments` — and `containPathname`
+ * (`../core/http.ts`) receives the pathname ALREADY JOINED. It refuses dot
+ * segments and percent-encodes each segment it can see, but it cannot tell an
+ * interpolated id from a structural one, so a `/` inside an id silently becomes
+ * a new segment: `post_id: "100200300/conversations"` reaches
+ * `/v23.0/100200300/conversations` — the inbox — under the same Page token and
+ * the same HTTP method as the write the tool advertised, and `"me/accounts"`
+ * reaches the Page listing. `?`, `%` and whitespace are already contained
+ * (encoded per segment) and `..` is already refused; `/` is the one character
+ * that escapes, and this shape is where it is stopped.
+ *
+ * The class admits every id Graph actually mints: the `{page-id}_{post-id}`
+ * composite, `t_1234567890` thread ids, bare numeric node ids and prefixed ones
+ * such as `act_123`. The lookahead keeps a bare `"."` / `".."` out as well.
+ * The reader tools' `POST_ID_SHAPE` (`./reader.ts`) is deliberately STRICTER —
+ * digits or `{digits}_{digits}` only — because an always-on read with a free
+ * `fields` list must not reach the Page node through its vanity username; this
+ * shape still has to admit `t_…` thread ids and `act_…` ids.
+ */
+export const GRAPH_NODE_ID_SHAPE = /^(?=.*\w)[\w.-]+$/;
+
+/**
+ * The rejection message every path-bound id argument shares. Like
+ * {@link VIDEO_ID_MESSAGE} it lives here because the shape it describes is a
+ * property of Graph's ID space rather than of any single tool; per-tool prose is
+ * appended by {@link graphNodeIdArg}.
+ */
+export const GRAPH_NODE_ID_MESSAGE =
+  'Expected a bare Graph ID (letters, digits, "_", "-" and "." only, e.g. "111222333_999"), not a URL, a permalink, a query string or a path.';
+
+/** What {@link graphNodeIdArg} needs from the tool that mounts the argument. */
+export interface GraphNodeIdArgOptions {
+  /**
+   * The model-facing `.describe()` prose for this tool. Omitted for an array
+   * ELEMENT schema, where the describing is done once on the array itself.
+   */
+  readonly description?: string;
+  /**
+   * Optional tool-specific sentence appended to {@link GRAPH_NODE_ID_MESSAGE},
+   * naming where the caller can obtain a real id for this edge.
+   */
+  readonly hint?: string;
+}
+
+/**
+ * Build a path-bound id argument: one shape and one rejection message for every
+ * edge, with the prose left per-tool. `.trim()` runs before the checks, so a
+ * pasted id is judged on its characters rather than on its padding.
+ */
+export function graphNodeIdArg(options: GraphNodeIdArgOptions = {}): z.ZodString {
+  const message =
+    options.hint === undefined
+      ? GRAPH_NODE_ID_MESSAGE
+      : `${GRAPH_NODE_ID_MESSAGE} ${options.hint}`;
+  const arg = z.string().trim().min(1).regex(GRAPH_NODE_ID_SHAPE, message);
+  return options.description === undefined ? arg : arg.describe(options.description);
+}
 
 /**
  * The apply switch every write tool carries. `apply:true` is the only way to
@@ -199,12 +316,34 @@ export class MissingWriteGateError extends Error {
 }
 
 /**
+ * Is this actually a gate? The whole point of the check is that the value did
+ * NOT come through the type system — `ToolContext` does not declare `writeGate`,
+ * so whatever the bootstrap attached is unverified at this seam.
+ *
+ * `null` is the shape that has to be named explicitly. Testing only for
+ * `undefined` and then reaching for `.execute` turns the one mis-wiring that
+ * writes an absence down as a value — `writeGate: lookup() ?? null`, a context
+ * rebuilt from JSON, a JS consumer of the package barrel who meets no type
+ * checker at all — into `TypeError: Cannot read properties of null (reading
+ * 'execute')`. That names no tool, names no cause, and reads like a crash in the
+ * write path rather than a server that was never wired, which is the exact
+ * confusion {@link MissingWriteGateError} exists to prevent.
+ */
+function isWriteGate(value: unknown): value is WriteGate {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { execute?: unknown }).execute === 'function'
+  );
+}
+
+/**
  * Runtime-checked accessor for the write gate. Fails loudly and immediately
  * instead of letting a mis-wired context reach `perform()`.
  */
 export function writeGateOf(ctx: ToolContext, tool: string): WriteGate {
-  const candidate = (ctx as Partial<WriteToolContext>).writeGate;
-  if (candidate === undefined || typeof candidate.execute !== 'function') {
+  const candidate: unknown = (ctx as Partial<WriteToolContext>).writeGate;
+  if (!isWriteGate(candidate)) {
     throw new MissingWriteGateError(tool);
   }
   return candidate;
@@ -257,6 +396,28 @@ function previewPayload(preview: PlanPreview): PreviewPayload {
   };
 }
 
+/**
+ * The `not_applied` notice for a refusal — Graph answered "no" and nothing
+ * changed. Also the wording for an `ApplyResult` that carries no `outcome`:
+ * every classifier that predates `attempted` being reachable meant a refusal.
+ */
+const REFUSED_NOTICE =
+  'The write was attempted and nothing landed. Read the per-item outcomes below for why; ' +
+  'the audit journal records this as a failure, not as a change.';
+
+/**
+ * The `not_applied` notice for an ambiguous write. Telling the model "nothing
+ * landed" here invites the retry that duplicates a video whose object already
+ * exists (CC-PUB-1); the truth is that the journal holds an ATTEMPTED entry
+ * an operator has to reconcile.
+ */
+const ATTEMPTED_NOTICE =
+  'The request reached Facebook, but what it did is unconfirmed: the acknowledgement did not ' +
+  'confirm the write, and an object may now exist that this call cannot vouch for. The audit ' +
+  'journal records this as ATTEMPTED — not as a change, not as a failure. Verify the current ' +
+  'state (the result below carries the ids to check) before retrying; a blind retry can ' +
+  'create a duplicate.';
+
 function applyPayload<T>(tool: string, result: ApplyResult<T>): Record<string, unknown> {
   if (result.diverged !== undefined) {
     return {
@@ -271,9 +432,38 @@ function applyPayload<T>(tool: string, result: ApplyResult<T>): Record<string, u
         : {}),
     };
   }
+  // The journal's verdict, echoed so the caller and the audit trail agree; absent
+  // only when the gate computed none (an older caller handing in the bare shape).
+  const outcome = result.outcome !== undefined ? { outcome: result.outcome } : {};
+  // `applied` is not always true on this path. A bulk verb reports per-id
+  // outcomes instead of throwing (CC-MOD-5), so a batch in which every id failed
+  // resolves normally and still changed nothing; the action says so through
+  // `WriteAction.classifyResult`. Echoing a hardcoded `status:"applied"` beside
+  // `applied:false` would hand the model two contradictory answers to the single
+  // question this envelope exists to answer, and the contradictory one is the
+  // one that reads first.
+  //
+  // `status` stays `not_applied` for every such verdict; what differs is the
+  // notice, because `attempted` (something may exist — verify) and `failed`
+  // (nothing does — fix and retry) call for opposite next moves.
+  if (!result.applied) {
+    return {
+      status: 'not_applied',
+      applied: false,
+      ...outcome,
+      tool,
+      notPerformedNotice:
+        result.outcome === 'attempted' ? ATTEMPTED_NOTICE : REFUSED_NOTICE,
+      ...(result.result !== undefined ? { result: result.result } : {}),
+      ...(result.journalStatus !== undefined
+        ? { journalStatus: result.journalStatus }
+        : {}),
+    };
+  }
   return {
     status: 'applied',
     applied: result.applied,
+    ...outcome,
     tool,
     ...(result.result !== undefined ? { result: result.result } : {}),
     ...(result.journalStatus !== undefined
@@ -305,4 +495,55 @@ export async function executeWrite<T>(
       ? previewPayload(outcome.preview)
       : applyPayload(action.tool, outcome.result);
   return shapeResult(payload, shapeOptionsOf(ctx));
+}
+
+// ---------------------------------------------------------------------------
+// 4. Graph error identity for package-local error envelopes
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound on each Meta-authored explanation (`userTitle` / `userMessage`)
+ * carried by {@link graphErrorFields}. Meta's own sentences are short; the bound
+ * only keeps a pathological body from dominating an error envelope.
+ */
+export const META_ERROR_TEXT_MAX = 500;
+
+function boundMetaText(text: string): string {
+  if (text.length <= META_ERROR_TEXT_MAX) return text;
+  let head = text.slice(0, META_ERROR_TEXT_MAX - 1);
+  // The slice counts UTF-16 units, so an astral character straddling the cut
+  // leaves its high surrogate behind \u2014 half a character, which no decoder can
+  // render. Drop it: the ellipsis already says the text goes on.
+  const last = head.charCodeAt(head.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) head = head.slice(0, -1);
+  return `${head}\u2026`;
+}
+
+/**
+ * The Graph identity of a failure, for a package that catches an error and
+ * shapes its own `isError` record instead of letting it reach the server's
+ * error mapper: code, subcode, type, HTTP status, trace id, and Meta's own
+ * human-readable refusal (`userTitle` / `userMessage`). On a publishing or ads
+ * refusal `message` is usually the generic "Invalid parameter" and those two
+ * fields are the only reason the model can act on; the trace id is what Meta
+ * support asks for. A package record that omits them tells the caller less than
+ * the server-level envelope would have.
+ *
+ * Returns `{}` for anything that is not a {@link GraphApiError}, so it can be
+ * spread unconditionally. The Meta texts are length-bounded here and redacted
+ * downstream by the shaper, like every other field.
+ */
+export function graphErrorFields(err: unknown): Record<string, unknown> {
+  if (!(err instanceof GraphApiError)) return {};
+  return {
+    code: err.code,
+    ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
+    ...(err.type !== undefined ? { type: err.type } : {}),
+    httpStatus: err.httpStatus,
+    ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
+    ...(err.userTitle !== undefined ? { userTitle: boundMetaText(err.userTitle) } : {}),
+    ...(err.userMessage !== undefined
+      ? { userMessage: boundMetaText(err.userMessage) }
+      : {}),
+  };
 }

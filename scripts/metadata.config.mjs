@@ -149,9 +149,10 @@ export const env = Object.freeze([
     required: 'one-of',
     secret: true,
     format: 'string',
-    summary: '**Secret.** Long-lived Page token — the no-Business-Manager fallback.',
+    summary:
+      '**Secret.** Long-lived Page token — the no-Business-Manager fallback. Belongs to exactly one Page: set `FB_PAGE_ID` to that Page alongside it, or no Page-scoped tool can use it.',
     description:
-      'Long-lived Page access token used as a fallback credential when no user or system-user token is configured.',
+      'Long-lived Page access token used as a fallback credential when no user or system-user token is configured. It belongs to exactly one Page, so set FB_PAGE_ID to that Page ID alongside it (the doctor / facebook_whoami reports it as the acting Page); a Page token without its Page ID is bound to nothing.',
     example: '',
     userConfig: 'page_token',
     userConfigTitle: 'Page access token',
@@ -192,9 +193,10 @@ export const env = Object.freeze([
     required: 'no',
     secret: false,
     format: 'string',
-    summary: 'Default Page ID for Page-scoped tools when a call omits `profile`.',
+    summary:
+      'Default Page ID for Page-scoped tools when a call omits `profile`. Required when `FB_PAGE_TOKEN` is the only credential (it names the Page the token belongs to).',
     description:
-      'Default Facebook Page ID, used when a tool call omits an explicit profile argument.',
+      'Default Facebook Page ID, used when a tool call omits an explicit profile argument. Required when FB_PAGE_TOKEN is the only credential: it names the Page that token belongs to.',
     example: '',
     userConfig: 'page_id',
     userConfigTitle: 'Default Page ID',
@@ -274,9 +276,9 @@ export const env = Object.freeze([
     secret: true,
     format: 'string',
     summary:
-      '**Secret.** Out-of-band confirmation token authorizing gated write / spend actions, for clients that cannot prompt.',
+      '**Secret.** Out-of-band confirmation token authorizing gated write / spend actions, for clients that cannot prompt. At least 16 characters.',
     description:
-      'Operator confirmation token for out-of-band approval of irreversible or spend actions. The server prompts through MCP elicitation where the client supports it; otherwise the caller passes this value as the confirm_token tool argument.',
+      'Operator confirmation token for out-of-band approval of irreversible or spend actions. The server prompts through MCP elicitation where the client supports it; otherwise the caller passes this value as the confirm_token tool argument. At least 16 characters — a shorter value fails startup; mint one with openssl rand -hex 32.',
     example: '',
   },
   {
@@ -330,9 +332,10 @@ export const env = Object.freeze([
     required: 'no',
     secret: false,
     format: 'string',
-    summary: 'Packages to exclude even if enabled by `FB_TOOL_PACKAGES`.',
+    summary:
+      'Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.',
     description:
-      'Comma-separated packages to exclude even when FB_TOOL_PACKAGES enables them. Deny wins over allow.',
+      'Comma-separated packages OR profiles to exclude even when FB_TOOL_PACKAGES enables them; deny wins over allow. Profile names expand here exactly as they do in FB_TOOL_PACKAGES, and a profile beats a same-spelled package, so FB_PACKAGES_DENY=core denies the whole six-package core profile rather than the single core package. The core package is then forced back on regardless, because its identity and diagnostic tools are what you need to debug the surface you just narrowed. An unrecognized name is a startup error, not a silently ignored token.',
     example: '',
   },
   {
@@ -341,9 +344,10 @@ export const env = Object.freeze([
     required: 'no',
     secret: false,
     format: 'string',
-    summary: 'Packages whose write tools are not registered; their read tools stay.',
+    summary:
+      'Packages or profiles whose write tools are not registered; their read tools stay.',
     description:
-      'Comma-separated packages whose write tools are not registered at all; the read tools of those packages stay available.',
+      'Comma-separated packages OR profiles whose write tools are not registered at all; the read tools of those packages stay available. Profile names expand as they do in FB_TOOL_PACKAGES, so FB_PACKAGES_READONLY=core makes every default package read-only in one token. An unrecognized name is a startup error.',
     example: '',
   },
 
@@ -369,9 +373,9 @@ export const env = Object.freeze([
     secret: true,
     format: 'string',
     summary:
-      '**Secret.** Bearer token required by the `http` transport; it fails closed without it.',
+      '**Secret.** Bearer token required by the `http` transport; it fails closed without it. At least 16 characters.',
     description:
-      'Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it).',
+      'Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it). At least 16 characters — a shorter value is refused (under stdio it is dropped with a warning); mint one with openssl rand -hex 32.',
     example: '',
   },
   {
@@ -407,9 +411,9 @@ export const env = Object.freeze([
     secret: false,
     format: 'number',
     summary:
-      'Hard budget ceiling for ads writes, in minor currency units (non-negative integer).',
+      'Hard budget ceiling for ads writes, in minor units of the ad account currency (non-negative integer, no currency conversion).',
     description:
-      'Hard ceiling for any ads budget write, in minor currency units (e.g. cents). Non-negative integer; a write above it is refused.',
+      "Hard ceiling for any ads budget write, in minor units of the ad account's own currency (e.g. cents for USD). Non-negative integer; a write above it is refused. No currency conversion: size it for the account's currency (1000 is $10 but only 1000 JPY).",
     example: '',
   },
 

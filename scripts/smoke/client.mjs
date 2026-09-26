@@ -47,7 +47,79 @@ export class SmokeSetupError extends Error {
   name = 'SmokeSetupError';
 }
 
+/**
+ * The child was spawned but the MCP handshake never completed. Carries the
+ * child's own stderr, because at this point there is no session left to ask for
+ * it and that output is usually the only explanation of what went wrong.
+ */
+export class SmokeTransportError extends Error {
+  name = 'SmokeTransportError';
+
+  constructor(message, { cause, stderrTail = '' } = {}) {
+    super(message, { cause });
+    this.stderrTail = stderrTail;
+  }
+}
+
 const STDERR_TAIL_BYTES = 8000;
+
+/**
+ * A bounded, SCRUBBED, line-aligned tail of the child's stderr.
+ *
+ * The naive `(buffer + chunk).slice(-N)` this replaces had two holes, and the
+ * order of operations is what closes them:
+ *
+ *   1. scrub BEFORE truncating. Slicing first can cut a token in half, and half
+ *      a token matches neither its literal value nor the structural
+ *      `\bEA[A-Za-z0-9]{20,}` pattern — so the surviving fragment would be
+ *      printed verbatim into a log an operator may paste into an issue.
+ *   2. truncate on LINE boundaries. The server writes one JSON document per
+ *      line, so dropping whole leading lines keeps every retained line
+ *      parseable and can never split a value in the middle.
+ *
+ * Scrubbing runs on assembled LINES rather than on raw chunks, so a secret that
+ * straddles a pipe-chunk boundary is still matched.
+ */
+export function createStderrTail(limit = STDERR_TAIL_BYTES) {
+  /** Complete, already-scrubbed lines, oldest first. */
+  const lines = [];
+  /** Running size of `lines`, counting the newline that rejoins them. */
+  let bytes = 0;
+  /** The trailing line that has not been terminated yet. */
+  let pending = '';
+
+  const remember = (line) => {
+    const safe = clip(scrub(line), limit);
+    lines.push(safe);
+    bytes += safe.length + 1;
+    // Keep at least one line: a single over-long line is already clipped above.
+    while (bytes > limit && lines.length > 1) {
+      bytes -= lines[0].length + 1;
+      lines.shift();
+    }
+  };
+
+  return {
+    append(chunk) {
+      pending += chunk;
+      let nl = pending.indexOf('\n');
+      while (nl !== -1) {
+        remember(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf('\n');
+      }
+      // A server that never emits a newline must not grow this without bound.
+      if (pending.length > limit) {
+        remember(pending);
+        pending = '';
+      }
+    },
+    read() {
+      const partial = pending === '' ? [] : [scrub(pending)];
+      return [...lines, ...partial].join('\n').trimEnd();
+    },
+  };
+}
 
 /**
  * Unwrap the canonical taint envelope (`{__tainted, source, content, warning}`)
@@ -125,23 +197,53 @@ export async function startSmokeClient(opts) {
 
   const client = new Client({ name: 'facebook-mcp-smoke', version: '0.0.0' });
 
-  let stderrBuffer = '';
-  const stderrTail = () => scrub(stderrBuffer).trimEnd();
+  const tail = createStderrTail();
+  const stderrTail = () => tail.read();
 
-  await client.connect(transport);
-
+  // Attached BEFORE `connect`, on purpose. `StdioClientTransport` hands out its
+  // stderr `PassThrough` immediately — before the child is even spawned —
+  // precisely so early output is not lost, and a server that dies during
+  // start-up (bad configuration, an unreadable build) writes its ONLY
+  // diagnostic there. Attaching after the handshake would capture nothing in
+  // exactly the case the operator most needs to read.
   if (transport.stderr !== null && transport.stderr !== undefined) {
     transport.stderr.setEncoding('utf8');
     transport.stderr.on('data', (chunk) => {
-      stderrBuffer = (stderrBuffer + chunk).slice(-STDERR_TAIL_BYTES);
+      tail.append(String(chunk));
       log.debug(`server: ${String(chunk).trimEnd()}`);
     });
   }
+
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    // Hand the child's stderr to the caller: there will be no session to ask.
+    try {
+      await transport.close();
+    } catch {
+      // The child may already be gone; nothing useful is left to do here.
+    }
+    throw new SmokeTransportError(
+      `could not speak MCP to ${resolved}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err, stderrTail: stderrTail() },
+    );
+  }
+
+  // Every tool this session got an ANSWER from, in call order of first answer.
+  // The run's summary reports coverage from it (`coverage.mjs`), so the bar has
+  // to be "the server replied", not "we tried": a call the transport lost or the
+  // wall clock killed is not evidence that the tool works, while a call that
+  // came back `isError` is — the tool ran and refused, which is exactly what a
+  // guardrail smoke asserts. `callToolRaw` is the single chokepoint every other
+  // helper here funnels through, so recording it once covers `callTool`,
+  // `applyWrite` and the sweepers alike.
+  const answered = new Set();
 
   const callToolRaw = async (tool, args = {}) => {
     const result = await client.callTool({ name: tool, arguments: args }, undefined, {
       timeout: timeoutMs,
     });
+    answered.add(tool);
     return {
       result,
       payload: parsePayload(tool, result),
@@ -255,6 +357,8 @@ export async function startSmokeClient(opts) {
     callToolRaw,
     applyWrite,
     listTools: () => client.listTools(undefined, { timeout: timeoutMs }),
+    /** Tool names this session has had an answer from, sorted. */
+    answeredTools: () => [...answered].sort(),
     stderrTail,
     close: async () => {
       try {

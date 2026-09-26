@@ -190,7 +190,7 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_get_ad_object', true, false, true, true, undefined],
   ['facebook_ads_insights', true, false, true, true, undefined],
   ['facebook_ads_report_status', true, false, true, true, undefined],
-  ['facebook_update_ad_object', false, true, true, true, 'irreversible'],
+  ['facebook_update_ad_object', false, true, true, true, 'spend'],
 ];
 
 /** The four hints doc 06 requires every tool to spell out. */
@@ -435,7 +435,7 @@ test('the default `core` profile ships 30 tools — everything except `ads`', ()
   );
 });
 
-test('the surface splits 23 read / 14 write (10 reversible, 4 irreversible)', () => {
+test('the surface splits 23 read / 14 write (10 reversible, 3 irreversible, 1 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
@@ -450,9 +450,162 @@ test('the surface splits 23 read / 14 write (10 reversible, 4 irreversible)', ()
   }
   assert.deepEqual(
     byTier,
-    { reversible: 10, irreversible: 4 },
-    'the write-tier distribution changed. `spend` and `safe` are deliberately unused ' +
-      'today: nothing here charges money, and no write is cheap enough to skip the ' +
-      'gate. A new tier in this map is a safety-review event, not a refactor.',
+    { reversible: 10, irreversible: 3, spend: 1 },
+    'the write-tier distribution changed. The single `spend` is ' +
+      '`facebook_update_ad_object`, which is the only tool in this server that can ' +
+      'cost money — resuming delivery or raising a budget. `safe` stays deliberately ' +
+      'unused: no write here is cheap enough to skip the gate. A new tier in this map ' +
+      'is a safety-review event, not a refactor.',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 6. The log allowlist, audited over the assembled surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Every argument name any tool is cleared to put on stderr, for the WHOLE
+ * surface (04 §"Log hygiene" asks for exactly this manifest-driven audit).
+ *
+ * The per-package tests in `src/tools/*.test.ts` already freeze which tool
+ * declares which list, and they are the better place to argue about one tool.
+ * They cannot catch two things, both of which are how an allowlist actually
+ * rots: a package that ships allowlists with no audit table of its own — its
+ * file simply has no such test, and nothing notices — and a name that looks
+ * innocuous in the one package that introduced it while being content-bearing
+ * everywhere else. This set is the second net, and it is deliberately a set of
+ * NAMES rather than of tool-to-list pairs: a key that has been reviewed once for
+ * stderr has been reviewed for stderr, and a key that has not cannot reach it
+ * through a package nobody audited.
+ *
+ * What is in here and why: `profile`/`ad_account_id`/`object_id`/`post_id`/
+ * `comment_id`/`conversation_id` are opaque Graph handles the log needs in order
+ * to be worth keeping at all; `apply`/`plan_id` are the preview-versus-performed
+ * distinction, which is the single most valuable thing in the line; `action`/
+ * `status`/`level`/`edge`/`filter`/`order`/`type`/`video_state`/`published`/
+ * `hidden`/`is_hidden`/`is_pinned`/`force_async` are closed enums or booleans
+ * the author declared; `since`/`until`/`date_preset`/`scheduled_publish_time`
+ * are timestamps and windows.
+ *
+ * What is not, and must never be: anything the model or a stranger composed
+ * (`message`, `caption`, `fields`), anything that identifies a private person
+ * (`psids`, `recipient_id`), the operator's out-of-band secret
+ * (`confirm_token`), and the budget amounts the write gate exists to protect.
+ */
+const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
+  'action',
+  'ad_account_id',
+  'apply',
+  'comment_id',
+  'conversation_id',
+  'date_preset',
+  'edge',
+  'filter',
+  'force_async',
+  'hidden',
+  'is_hidden',
+  'is_pinned',
+  'level',
+  'object_id',
+  'order',
+  'plan_id',
+  'post_id',
+  'profile',
+  'published',
+  'scheduled_publish_time',
+  'since',
+  'status',
+  'type',
+  'until',
+  'video_state',
+]);
+
+/**
+ * Names that must never be cleared, matched as SHAPES rather than spelled out.
+ *
+ * The exact-name list above is the review; this is what catches the review going
+ * wrong. A future argument called `reply_message`, `owner_email` or
+ * `apply_token` would have to be added to the vocabulary by hand, and the hand
+ * that adds it is exactly the one that has already decided it is fine. A pattern
+ * fires on the family instead of the instance, so the second reviewer is the
+ * test rather than a person under deadline.
+ */
+const NEVER_LOGGABLE = [
+  /token/i,
+  /secret/i,
+  /password/i,
+  /\bmessage\b|_message|message_/i,
+  /caption|body|text|content/i,
+  /psid|recipient|sender/i,
+  /email|phone/i,
+  /budget|amount|bid/i,
+  /^fields$|_fields$/i,
+];
+
+test('no tool logs an argument outside the reviewed vocabulary', () => {
+  for (const tool of REGISTRY.tools) {
+    const declared = tool.logFields;
+    if (declared === undefined) continue;
+    for (const key of declared) {
+      assert.ok(
+        LOGGABLE_VOCABULARY.has(key),
+        `${tool.name} (package ${tool.package ?? '?'}) logs '${key}', which no one has ` +
+          `cleared for stderr. The per-package audit in src/tools/ may already agree ` +
+          `with it — this set is the second reviewer, and the log line outlives the ` +
+          `process, so add the name here deliberately or stop logging it.`,
+      );
+    }
+  }
+});
+
+test('every logged argument is a real argument of the tool that logs it', () => {
+  for (const tool of REGISTRY.tools) {
+    const declared = tool.logFields;
+    if (declared === undefined) continue;
+    // Zod's runtime shape IS the argument list. A key that names nothing reads
+    // like a control in the source while contributing nothing to the line:
+    // `allowlistedLogFields` skips an absent value silently, so the drift is
+    // invisible in production and looks like a tool that simply logs less.
+    const { shape } = tool.inputSchema as unknown as {
+      readonly shape?: Record<string, unknown>;
+    };
+    assert.ok(shape, `${tool.name} has no object schema to audit its allowlist against`);
+    for (const key of declared) {
+      assert.ok(
+        key in shape,
+        `${tool.name} logs '${key}', which is not one of its arguments ` +
+          `(${Object.keys(shape).sort().join(', ')}). It was probably renamed and the ` +
+          `allowlist was not renamed with it.`,
+      );
+    }
+  }
+});
+
+test('the reviewed vocabulary names nothing content-, identity- or secret-bearing', () => {
+  for (const key of LOGGABLE_VOCABULARY) {
+    for (const pattern of NEVER_LOGGABLE) {
+      assert.ok(
+        !pattern.test(key),
+        `'${key}' is cleared for stderr but matches ${String(pattern)}. Either the name ` +
+          `is genuinely one of these families — in which case it must not be logged — or ` +
+          `it is an unlucky spelling, in which case rename the argument rather than ` +
+          `widening the pattern: the pattern is the only reviewer that does not get tired.`,
+      );
+    }
+  }
+});
+
+test('the reviewed vocabulary carries no name the surface has stopped using', () => {
+  const used = new Set<string>();
+  for (const tool of REGISTRY.tools) {
+    for (const key of tool.logFields ?? []) used.add(key);
+  }
+  const stale = [...LOGGABLE_VOCABULARY].filter((key) => !used.has(key)).sort();
+  assert.deepEqual(
+    stale,
+    [],
+    `these names are cleared for stderr but no tool logs them: ${stale.join(', ')}. A ` +
+      `standing permission nothing exercises is how an allowlist turns back into a ` +
+      `default — drop them, and re-review if they are ever needed again.`,
   );
 });

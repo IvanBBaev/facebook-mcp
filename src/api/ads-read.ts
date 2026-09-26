@@ -41,7 +41,7 @@
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type { Cursor, FbRequestFn, ParamValue } from '../core/index.js';
-import { fetchPage } from './shared.js';
+import { DEFAULT_PAGE_LIMIT, fetchPage } from './shared.js';
 import type { EdgeRequest } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -93,10 +93,11 @@ export const AD_LEVEL_DETAIL_FIELDS: Readonly<Record<AdLevel, string>> = {
 /**
  * Fields read when the level is unknown. Graph object ids do not encode their
  * level, so a caller that omits `level` gets the intersection that every level
- * answers plus the parent ids that reveal what it actually is.
+ * answers plus the parent ids that reveal what it actually is. `account_id` is
+ * in that intersection and a write's ownership check depends on it.
  */
 export const AD_OBJECT_COMMON_FIELDS =
-  'id,name,status,effective_status,created_time,updated_time';
+  'id,name,status,effective_status,created_time,updated_time,account_id';
 
 /** Ad-account fields backing the health check and the currency echo. */
 export const AD_ACCOUNT_FIELDS =
@@ -202,6 +203,12 @@ export const EFFECTIVE_STATUS_EXPLANATIONS: Readonly<Record<string, string>> = {
   ADSET_PAUSED_BY_AD_RULE: 'Paused automatically by an ad rule — not delivering.',
 };
 
+/** Parent-paused effective statuses, mapped to the parent that holds the pause. */
+const PARENT_PAUSED_STATUSES: Readonly<Record<string, string>> = {
+  CAMPAIGN_PAUSED: 'campaign',
+  ADSET_PAUSED: 'ad set',
+};
+
 /** True when the effective status means Meta can deliver right now (CC-ADS-2). */
 export function isDelivering(effectiveStatus: string | undefined): boolean {
   return effectiveStatus !== undefined && DELIVERING_STATUSES.has(effectiveStatus);
@@ -218,9 +225,22 @@ export function describeEffectiveStatus(
   if (effectiveStatus === undefined) {
     return 'Delivery state unknown: Graph returned no `effective_status` for this object (the `fields` override may have dropped it).';
   }
+  const pausedParent = Object.hasOwn(PARENT_PAUSED_STATUSES, effectiveStatus)
+    ? PARENT_PAUSED_STATUSES[effectiveStatus]
+    : undefined;
+  if (pausedParent !== undefined && configuredStatus === 'PAUSED') {
+    // "Resume the parent, not this object" is only true while this object's own
+    // switch is on. With both paused, resuming the parent alone changes nothing.
+    return `The parent ${pausedParent.toUpperCase()} is paused and this object's own status is PAUSED too, so it is not delivering. Resume both this object and its ${pausedParent} — resuming either one alone will not start delivery.`;
+  }
   const base =
     EFFECTIVE_STATUS_EXPLANATIONS[effectiveStatus] ??
     `Unrecognised effective status "${effectiveStatus}" — treat delivery as unknown and check Ads Manager.`;
+  if (effectiveStatus === 'WITH_ISSUES') {
+    // Partial delivery is possible here, so the definitive "NOT delivering" line
+    // below would contradict the explanation it is appended to.
+    return `${base} It may still be delivering (and spending) in part; \`delivering\` is false only because full delivery cannot be confirmed.`;
+  }
   if (
     configuredStatus === 'ACTIVE' &&
     effectiveStatus !== 'ACTIVE' &&
@@ -266,6 +286,43 @@ function readString(value: unknown): string | undefined {
 }
 
 /**
+ * Assign a shaped field. `JSON.parse` creates `__proto__` as an OWN property,
+ * so a Graph node can carry one and `Object.keys` hands it straight to the
+ * shaper — where a plain `out[key] = value` runs the inherited `__proto__`
+ * setter instead of defining a field. The key would then vanish from the output
+ * and every value on the injected object would start answering property reads on
+ * a record this shaper never validated. Defining it is the only assignment that
+ * means what it says. Mirrors `setOwn` in `src/mcp/result.ts`.
+ */
+function setOwn(out: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === '__proto__') {
+    Object.defineProperty(out, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    return;
+  }
+  out[key] = value;
+}
+
+/**
+ * A node id off the wire. Graph is not consistent about id encoding — the same
+ * field arrives as a JSON string on one build and as a bare number on another,
+ * which is why {@link readReportRunId} exists. A number that is exactly
+ * representable IS the id and is worth keeping; one that is not has already
+ * been rounded by `JSON.parse`, and `String(n)` would mint a plausible id for an
+ * object that does not exist. Refusing beats inventing (CC-NET-2).
+ */
+function readNodeId(value: unknown): string | undefined {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) ? String(value) : undefined;
+  }
+  return readString(value);
+}
+
+/**
  * Parse a minor-unit amount Graph sent as a decimal string (or, rarely, a
  * number). Returns `undefined` for anything that is not a safe integer, so a
  * surprising value is passed through untouched instead of being rounded.
@@ -280,11 +337,29 @@ export function parseMinorUnits(value: unknown): number | undefined {
 }
 
 /**
+ * Drop every `paging` object from a passed-through value, at ANY depth. `fields`
+ * is caller-supplied and supports expansions (`ads{id,name}`,
+ * `adcreatives{...}`), and an expanded edge comes back as `{ data, paging }` —
+ * so the token-bearing `paging.next` sits BELOW the node's top level, where a
+ * top-level key loop never reaches it. The value is rebuilt, never mutated.
+ */
+function stripNestedPaging(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripNestedPaging);
+  if (!isRecord(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (key === 'paging') continue;
+    setOwn(out, key, stripNestedPaging(value[key]));
+  }
+  return out;
+}
+
+/**
  * Normalise one ads node: pass unknown fields through, guarantee a string `id`,
  * add the derived delivery truth (CC-ADS-2), and replace minor-unit budget
- * strings with integer `*_minor` fields (CC-ADS-3). `paging` is dropped — nested
- * edge paging carries the access token and must never travel further (C3).
- * The input is never mutated.
+ * strings with integer `*_minor` fields (CC-ADS-3). `paging` is dropped at EVERY
+ * depth — nested edge paging carries the access token and must never travel
+ * further (C3). The input is never mutated.
  */
 export function normalizeAdNode(raw: unknown): AdRecord {
   const src: Record<string, unknown> = isRecord(raw) ? raw : {};
@@ -292,9 +367,9 @@ export function normalizeAdNode(raw: unknown): AdRecord {
   for (const key of Object.keys(src)) {
     if (key === 'paging') continue;
     if ((BUDGET_KEYS as readonly string[]).includes(key)) continue;
-    out[key] = src[key];
+    setOwn(out, key, stripNestedPaging(src[key]));
   }
-  out.id = readString(src.id) ?? '';
+  out.id = readNodeId(src.id) ?? '';
 
   for (const key of BUDGET_KEYS) {
     if (!(key in src)) continue;
@@ -321,15 +396,15 @@ export function normalizeAdNode(raw: unknown): AdRecord {
  * through {@link normalizeAdNode} would stamp it with `id: ''` and
  * `delivering: false` — labelling a row that is itself proof of delivery
  * ("12000 impressions, 48.10 spent") as not delivering. Metrics pass through
- * untouched; only `paging` is dropped, because nested edge paging carries the
- * access token and must never travel further (C3).
+ * untouched; only `paging` is dropped — at every depth, because an expanded edge
+ * nests it below the row's top level and it carries the access token (C3).
  */
 export function normalizeInsightsRow(raw: unknown): AdRecord {
   const src: Record<string, unknown> = isRecord(raw) ? raw : {};
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(src)) {
     if (key === 'paging') continue;
-    out[key] = src[key];
+    setOwn(out, key, stripNestedPaging(src[key]));
   }
   return out as AdRecord;
 }
@@ -347,22 +422,63 @@ export function normalizeInsightsRow(raw: unknown): AdRecord {
  */
 export const PINNED_AD_FIELDS = ['id', 'status', 'effective_status'] as const;
 
+/**
+ * The top-level field names of a Graph `fields` list, each with its nested
+ * selection (`{...}`) and modifiers (`.limit(5)`, `(...)`) removed. Commas at
+ * any brace/paren depth other than zero are part of a nested value, not a
+ * separator.
+ */
+function topLevelFieldNames(fields: string): string[] {
+  const names: string[] = [];
+  let depth = 0;
+  let current = '';
+  const flush = (): void => {
+    const name = current.trim().split('.')[0]?.trim() ?? '';
+    if (name !== '') names.push(name);
+    current = '';
+  };
+  for (const ch of fields) {
+    if (ch === '{' || ch === '(') {
+      depth += 1;
+    } else if (ch === '}' || ch === ')') {
+      depth = Math.max(0, depth - 1);
+    } else if (depth === 0) {
+      if (ch === ',') flush();
+      else current += ch;
+    }
+  }
+  flush();
+  return names;
+}
+
 /** Union a caller-supplied `fields` list with {@link PINNED_AD_FIELDS}. */
 export function withPinnedAdFields(fields: string): string {
   const pinned = [...PINNED_AD_FIELDS];
   if (fields.trim() === '') return pinned.join(',');
-  // Nested selections (`creative{id,name}`) are stripped before the membership
-  // test, so an inner `id` is not mistaken for the top-level one.
-  const present = new Set(
-    fields
-      .replace(/\{[^}]*\}/g, '')
-      .split(',')
-      .map((field) => field.trim())
-      .filter((field) => field !== ''),
-  );
+  // Only TOP-LEVEL names count: an inner `id` in `creative{id,name}` is not the
+  // record's own. Nesting is tracked by depth rather than stripped with a regex,
+  // because selections nest (`ads{creative{id},effective_status}`) and modifiers
+  // carry commas and braces (`insights.time_range({...}){spend}`) — a strip that
+  // stops at the first `}` leaks the inner fields to the top level.
+  const present = new Set(topLevelFieldNames(fields));
   const missing = pinned.filter((field) => !present.has(field));
   return missing.length === 0 ? fields : `${fields},${missing.join(',')}`;
 }
+
+/**
+ * Emitted on an EMPTY listing page that still hands back a forward cursor.
+ * Graph can answer a slice with `data: []` next to `paging.next` (CC-PAGE-1) —
+ * most often under a server-side `effective_status` filter — so "no objects"
+ * would be false while the next page is one call away.
+ */
+export const EMPTY_ADS_PAGE_MORE_FOLLOWS_NOTE =
+  'No objects on this page, but Graph returned a forward cursor — more pages follow. ' +
+  'Resume with `nextCursor` before concluding anything about how many objects the account has.';
+
+/** The insights counterpart of {@link EMPTY_ADS_PAGE_MORE_FOLLOWS_NOTE}. */
+export const EMPTY_INSIGHTS_PAGE_MORE_FOLLOWS_NOTE =
+  'No insights rows on this page, but Graph returned a forward cursor — more pages follow. ' +
+  'Resume with `nextCursor` before concluding whether the object delivered in the window.';
 
 // ---------------------------------------------------------------------------
 // 5. Option / result shapes
@@ -402,7 +518,11 @@ export interface AdListResult extends AdPagedResult {
   readonly level: AdLevel;
   readonly objects: readonly AdRecord[];
   readonly count: number;
-  /** True when at least one object carries a budget (drives the currency echo). */
+  /**
+   * True when at least one object in this page carries a budget. The listing
+   * itself does NOT carry the account currency: `*_minor` values are in the ad
+   * account's currency, which only {@link readAdAccount} reports.
+   */
   readonly hasBudgets: boolean;
   readonly notes: readonly string[];
 }
@@ -456,10 +576,15 @@ export async function listAdObjects(
   const params: Record<string, ParamValue> = {
     fields: withPinnedAdFields(opts.fields ?? AD_LEVEL_LIST_FIELDS[opts.level]),
   };
-  if (opts.effectiveStatus !== undefined && opts.effectiveStatus.length > 0) {
-    // Graph expects a JSON array literal for this filter.
-    params.effective_status = JSON.stringify([...opts.effectiveStatus]);
-  }
+  // One local decides both the wire filter and the empty-page explanation: an
+  // EMPTY array is no filter at all, and reporting it as one would send the
+  // operator hunting for a status that was never sent.
+  const statusFilter =
+    opts.effectiveStatus !== undefined && opts.effectiveStatus.length > 0
+      ? [...opts.effectiveStatus]
+      : undefined;
+  // Graph expects a JSON array literal for this filter.
+  if (statusFilter !== undefined) params.effective_status = JSON.stringify(statusFilter);
 
   const page = await fetchPage<unknown>(
     fbRequest,
@@ -472,11 +597,22 @@ export async function listAdObjects(
 
   const objects = page.data.map((node) => normalizeAdNode(node));
   const notes = [EFFECTIVE_STATUS_NOTE];
-  if (objects.length === 0 && !page.truncated) {
+  if (objects.length === 0 && !page.truncated && page.nextCursor !== undefined) {
+    // Graph applies effective_status server-side and can answer a slice with
+    // `data: []` beside `paging.next` (CC-PAGE-1). Every "no objects" line
+    // below would be false here: the objects may be one call away.
+    notes.push(EMPTY_ADS_PAGE_MORE_FOLLOWS_NOTE);
+  } else if (objects.length === 0 && !page.truncated) {
+    // A page fetched WITH a forward cursor is a continuation: that cursor came
+    // out of a successful earlier page, so an empty result here is the end of
+    // the walk, not a statement about the account. Advising a re-list with
+    // effective_status would burn the metered ads edge for nothing.
     notes.push(
-      opts.effectiveStatus === undefined
-        ? 'No objects returned. Graph hides ARCHIVED and DELETED objects by default — pass effective_status to include them.'
-        : 'No objects matched the requested effective_status filter.',
+      opts.after !== undefined
+        ? 'No further objects. This page was fetched with a forward cursor, so the listing has run past its last object — this says nothing about how many objects the account has.'
+        : statusFilter === undefined
+          ? 'No objects returned. Graph hides ARCHIVED and DELETED objects by default — pass effective_status to include them.'
+          : 'No objects matched the requested effective_status filter.',
     );
   }
 
@@ -568,6 +704,15 @@ const SERVING_ACCOUNT_STATUSES: ReadonlySet<number> = new Set([1, 201]);
 /** Serving, but with a payment problem that will stop delivery if ignored. */
 const AT_RISK_ACCOUNT_STATUSES: ReadonlySet<number> = new Set([3, 8, 9]);
 
+/**
+ * A code outside {@link AD_ACCOUNT_STATUS_LABELS}. Meta adds statuses without
+ * notice; one this server has never heard of is not evidence that the account
+ * is dead, only that nothing can be said about it from here.
+ */
+function isUndocumentedStatus(status: number | undefined): boolean {
+  return status !== undefined && AD_ACCOUNT_STATUS_LABELS[status] === undefined;
+}
+
 export interface AdAccountInfo {
   /** Normalised `act_<id>`. */
   readonly id: string;
@@ -644,6 +789,13 @@ export function describeAdAccount(accountId: string, raw: unknown): AdAccountInf
     summary = 'Ad account is active and can serve ads.';
   } else if (atRisk) {
     summary = `Ad account is ${statusLabel}: billing is unsettled or in a grace period. It is STILL DELIVERING and still spending; Meta will stop delivery once the grace period ends — settle the balance or fix the payment method in Ads Manager. Pausing an object is still allowed from here; resuming and budget changes are not.`;
+  } else if (isUndocumentedStatus(status)) {
+    // Not "cannot serve ads": that is a guess, and the doctor prints it verbatim.
+    summary = `Ad account status code ${String(status)} is not one this server knows${
+      disableReasonLabel !== undefined && disableReasonLabel !== 'NONE'
+        ? ` (disable reason: ${disableReasonLabel})`
+        : ''
+    }, so whether it can serve ads cannot be told from here — check the account in Ads Manager. Writes are attempted and Graph decides.`;
   } else {
     summary = `Ad account is ${statusLabel}${
       disableReasonLabel !== undefined && disableReasonLabel !== 'NONE'
@@ -712,7 +864,9 @@ export interface AdWriteIntent {
 /**
  * Pre-flight for ads WRITES: refuse before the wire when the account cannot
  * serve. Accounts whose status is unknown are allowed through — an absent field
- * is not evidence of a problem, and Graph will reject the write if it is.
+ * is not evidence of a problem, and Graph will reject the write if it is. The
+ * same goes for a status code this server cannot decode: refusing on it would
+ * turn every new Meta status into a lock-out, pause included.
  *
  * The one deliberate hole is for at-risk accounts (`UNSETTLED`,
  * `PENDING_SETTLEMENT`, `IN_GRACE_PERIOD`). Those are `serving: false` yet still
@@ -727,6 +881,7 @@ export function assertAdAccountUsable(
   intent: AdWriteIntent = {},
 ): void {
   if (info.accountStatus === undefined) return;
+  if (isUndocumentedStatus(info.accountStatus)) return;
   if (info.serving) return;
   if (info.atRisk && intent.stopsDelivery === true) return;
   throw adAccountBlockedError(info);
@@ -736,15 +891,54 @@ export function assertAdAccountUsable(
 // 8. Insights — sync, with an async report-run fallback (CC-ADS-5)
 // ---------------------------------------------------------------------------
 
-/** Default insights fields: spend plus the four numbers every report starts from. */
+/**
+ * Default insights fields: spend plus the four numbers every report starts from,
+ * and `account_currency` so `spend`/`cpc` are never a bare, unit-less number.
+ */
 export const ADS_INSIGHTS_DEFAULT_FIELDS =
-  'impressions,clicks,spend,reach,cpc,ctr,date_start,date_stop';
+  'impressions,clicks,spend,reach,cpc,ctr,account_currency,date_start,date_stop';
+
+/**
+ * Insights money metrics. Graph returns them as decimal strings in the ad
+ * account's currency (major units, unlike the `*_minor` budgets), and the row
+ * says nothing about which currency unless `account_currency` is asked for.
+ */
+const INSIGHTS_MONEY_FIELD =
+  /^(?:spend|social_spend|cpc|cpm|cpp|action_values|conversion_values)$|^cost_per_|_values?$/;
+
+/**
+ * Pin `account_currency` onto a fields list that asks for any money metric, so
+ * a caller-chosen `fields:'spend'` cannot come back as "48.10" of nothing.
+ */
+function withInsightsCurrency(fields: string): string {
+  const names = topLevelFieldNames(fields);
+  if (names.includes('account_currency')) return fields;
+  if (!names.some((name) => INSIGHTS_MONEY_FIELD.test(name))) return fields;
+  return `${fields},account_currency`;
+}
 
 /** Hard row cap for one insights read, sized to stay inside the result budget. */
 export const ADS_INSIGHTS_MAX_ROWS = 200;
 
 /** Graph's "this query is too large for a synchronous read" subcode. */
 export const OVERSIZED_SYNC_SUBCODE = 1487534;
+
+/**
+ * A `report_run_id` off the wire. Graph sends it as a string on some builds and
+ * as a bare JSON number on others, so a number is worth coercing — but only when
+ * it is exactly representable. A real run id is around nineteen digits, well
+ * past `Number.MAX_SAFE_INTEGER`, which means `JSON.parse` has already rounded
+ * it; `String(n)` would then hand back an id that polls forever and resolves to
+ * nothing, while the run that was actually started is orphaned. Refusing is the
+ * only honest answer, and the caller already turns `undefined` into an error
+ * that tells the operator to retry (CC-NET-2).
+ */
+function readReportRunId(raw: unknown): string | undefined {
+  if (typeof raw === 'number') {
+    return Number.isSafeInteger(raw) ? String(raw) : undefined;
+  }
+  return readString(raw);
+}
 
 /** A `report_run_id` is only resolvable for 30 days after the run started. */
 export const REPORT_RUN_TTL_DAYS = 30;
@@ -798,9 +992,32 @@ export interface AdsInsightsResult extends AdPagedResult {
   readonly notes: readonly string[];
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse one end of the insights window as a calendar date. Graph answers a
+ * malformed or reversed `time_range` with a bare 400 "Invalid parameter" that
+ * names neither end, so the shape is checked here, before the request. Mirrors
+ * the Page-insights guard (`api/insights.ts`) minus its 90-day ceiling: ads
+ * insights reach back up to 37 months and are not capped per call.
+ */
+function parseWindowDate(label: 'since' | 'until', value: string): number {
+  if (!DATE_ONLY.test(value)) {
+    throw validationError(
+      `Invalid \`${label}\`: "${value}". Use a calendar date in YYYY-MM-DD form.`,
+    );
+  }
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  // `Date.parse` accepts 2026-02-30 by rolling over; the round-trip catches it.
+  if (Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== value) {
+    throw validationError(`Invalid \`${label}\`: "${value}" is not a real date.`);
+  }
+  return ms;
+}
+
 function insightsParams(query: AdsInsightsQuery): Record<string, ParamValue> {
   const params: Record<string, ParamValue> = {
-    fields: query.fields ?? ADS_INSIGHTS_DEFAULT_FIELDS,
+    fields: withInsightsCurrency(query.fields ?? ADS_INSIGHTS_DEFAULT_FIELDS),
   };
   if (query.level !== undefined) params.level = query.level;
   if (query.since !== undefined || query.until !== undefined) {
@@ -808,6 +1025,13 @@ function insightsParams(query: AdsInsightsQuery): Record<string, ParamValue> {
     if (query.since === undefined || query.until === undefined) {
       throw validationError(
         'Insights window incomplete: pass BOTH `since` and `until` (YYYY-MM-DD), or neither and use `date_preset` instead.',
+      );
+    }
+    const sinceMs = parseWindowDate('since', query.since);
+    const untilMs = parseWindowDate('until', query.until);
+    if (sinceMs > untilMs) {
+      throw validationError(
+        `Invalid window: \`since\` (${query.since}) is after \`until\` (${query.until}).`,
       );
     }
     params.time_range = JSON.stringify({ since: query.since, until: query.until });
@@ -819,6 +1043,18 @@ function insightsParams(query: AdsInsightsQuery): Record<string, ParamValue> {
   }
   if (query.timeIncrement !== undefined) params.time_increment = query.timeIncrement;
   return params;
+}
+
+/**
+ * The page size to ask Graph for, never more than the row cap. Rows past the cap
+ * are dropped AND the cursor withheld (it would resume past them), so a page
+ * larger than the cap turns into rows nobody can reach; asking for at most the
+ * cap keeps the cursor walk intact. An explicit `limit` inside the cap, or none
+ * at all when the default page already fits, is sent unchanged.
+ */
+function cappedPageLimit(limit: number | undefined, maxRows: number): number | undefined {
+  const requested = limit ?? DEFAULT_PAGE_LIMIT;
+  return requested > maxRows ? maxRows : limit;
 }
 
 function capRows(
@@ -853,8 +1089,7 @@ export async function startAdsReport(
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   });
   const body: Record<string, unknown> = isRecord(res.data) ? res.data : {};
-  const raw = body.report_run_id;
-  const id = typeof raw === 'number' ? String(raw) : readString(raw);
+  const id = readReportRunId(body.report_run_id);
   if (id === undefined || id === '') {
     throw new GraphApiError(
       'Async insights run was accepted but Graph returned no `report_run_id`, so there is nothing to poll. Retry the request; if it repeats, narrow the query and use the synchronous path.',
@@ -885,13 +1120,14 @@ export async function fetchAdsInsights(
     return asyncStarted(opts.objectId, reportRunId, false);
   }
 
+  const limit = cappedPageLimit(opts.limit, maxRows);
   let page;
   try {
     page = await fetchPage<unknown>(
       fbRequest,
       adsEdge(`/${opts.objectId}/insights`, insightsParams(opts), opts),
       {
-        ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+        ...(limit !== undefined ? { limit } : {}),
         ...(opts.after !== undefined ? { after: opts.after } : {}),
       },
     );
@@ -905,9 +1141,19 @@ export async function fetchAdsInsights(
   const capped = capRows(rows, maxRows);
   const notes: string[] = [];
   if (capped.note !== undefined) notes.push(capped.note);
-  if (rows.length === 0 && !page.truncated) {
+  if (rows.length === 0 && !page.truncated && page.nextCursor !== undefined) {
+    // An empty slice beside a forward cursor (CC-PAGE-1): rows may follow, so
+    // neither "never delivered" nor "end of the walk" below is true here.
+    notes.push(EMPTY_INSIGHTS_PAGE_MORE_FOLLOWS_NOTE);
+  } else if (rows.length === 0 && !page.truncated) {
+    // Same distinction `listAdObjects` draws: a page fetched WITH a forward
+    // cursor is a continuation of a page that HAD rows, so an empty answer is
+    // the end of the walk — not evidence that the object "never delivered",
+    // which would contradict the rows the caller is already holding.
     notes.push(
-      'No insights rows for this object and window. Insights are empty (not an error) when the object never delivered in the window; attribution also lags, so the last day or two can be incomplete.',
+      opts.after !== undefined
+        ? 'No further insights rows. This page was fetched with a forward cursor, so the read has run past the last row — this says nothing about whether the object delivered in the window.'
+        : 'No insights rows for this object and window. Insights are empty (not an error) when the object never delivered in the window; attribution also lags, so the last day or two can be incomplete.',
     );
   }
 
@@ -1126,16 +1372,18 @@ export async function fetchReportResults(
   fbRequest: FbRequestFn,
   opts: ReportResultsOptions,
 ): Promise<ReportResults> {
+  const maxRows = opts.maxRows ?? ADS_INSIGHTS_MAX_ROWS;
+  const limit = cappedPageLimit(opts.limit, maxRows);
   const page = await fetchPage<unknown>(
     fbRequest,
     adsEdge(`/${opts.reportRunId}/insights`, {}, opts),
     {
-      ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      ...(limit !== undefined ? { limit } : {}),
       ...(opts.after !== undefined ? { after: opts.after } : {}),
     },
   );
   const rows = page.data.map((row) => normalizeInsightsRow(row));
-  const capped = capRows(rows, opts.maxRows ?? ADS_INSIGHTS_MAX_ROWS);
+  const capped = capRows(rows, maxRows);
   const notes: string[] = [];
   if (capped.note !== undefined) notes.push(capped.note);
 

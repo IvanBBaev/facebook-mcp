@@ -134,7 +134,7 @@ generations — for an audit, or because you are about to run a high-volume
 moderation sweep — copy the files somewhere durable first:
 
 ```sh
-ls -l "${FB_JOURNAL_PATH:-$HOME/.local/state/facebook-mcp/}"
+ls -l "$(dirname "${FB_JOURNAL_PATH:-$HOME/.local/state/facebook-mcp/journal.ndjson}")"
 ```
 
 On Windows the default location is `%LOCALAPPDATA%\facebook-mcp\`.
@@ -152,9 +152,13 @@ rotated file, and anything you needed to keep has been copied out.
    a deliberately small runtime dependency set, so a real finding is rare and
    worth acting on immediately.
 3. Check whether the supported Node floor still matches reality: the floor is
-   declared once in `scripts/metadata.config.mjs` and propagated to
-   `package.json`, `.nvmrc`, the launcher, CI and the bundle manifests. If you
-   raise it, raise it there and regenerate.
+   declared once in `scripts/metadata.config.mjs`, and `npm run metadata`
+   propagates it to `package.json`, `server.json`, `manifest.json`, the plugin
+   manifests, `.env.example` and the generated README blocks. `.nvmrc`, the
+   `bin/` launcher guard and the CI/release workflows are **hand-written** — the
+   drift tests in `src/metadata.test.ts` only assert they agree, they do not
+   update them. So raising the floor is: edit the config, run `npm run
+   metadata`, then edit those four by hand, and only then do the tests go green.
 
 **Verify by:** `npm run check` and `npm run metadata:check` are both green.
 

@@ -56,7 +56,10 @@ import type { FbRequestFn, ParamValue } from '../core/index.js';
  */
 export const INSIGHTS_MAX_ROWS = 250;
 
-/** Longest `since`..`until` window Graph serves for Page insights (doc 03). */
+/**
+ * Longest `since`..`until` window this server reads per insights query. Graph
+ * itself accepts up to 93 days; 90 keeps a margin inside that maximum (doc 03).
+ */
 export const INSIGHTS_MAX_WINDOW_DAYS = 90;
 
 /** Follower/like floor below which a Page returns empty insights (CC-INS-2). */
@@ -91,7 +94,8 @@ export const POST_EMPTY_NOTE =
   'Every requested metric came back empty. On a just-published post that is ' +
   'normal — post insights lag minutes to hours. If the ID is a Reel, its ' +
   'metrics are NOT on this edge at all: they live on /{video-id}/video_insights, ' +
-  'so re-read it with facebook_reel_insights and the VIDEO id.';
+  'so re-read it with facebook_reel_insights and the VIDEO id ' +
+  '(facebook_list_reels lists it as each item `id`).';
 
 /**
  * Empty Reel series (G-TOOL-2). Two causes dominate and they need different
@@ -140,22 +144,83 @@ export const PERIOD_BOUNDARY_NOTE =
   'period the value covers, in the Page timezone — so the current day is a ' +
   'partial bucket. Days with no data are absent; nothing is zero-filled.';
 
-function truncationNote(kept: number, dropped: number): string {
-  return `Row cap reached: kept the first ${String(kept)} of ${String(kept + dropped)} data points and dropped ${String(dropped)}. Re-run with aggregate:true for per-metric totals, or narrow the window (since/until) or the metric list.`;
+/**
+ * Periods whose consecutive points OVERLAP: Graph answers `week` and `days_28`
+ * with one point per day, each already covering the trailing 7 / 28 days, and
+ * `lifetime` on a Page with one cumulative point per day. Summing such points
+ * counts the same day up to 28 times (CC-INS-4: the sum IS the headline of
+ * aggregate mode). `day`, `month` and `total_over_range` are disjoint buckets
+ * whose sum is a real total, and stay one.
+ */
+const OVERLAPPING_PERIODS: ReadonlySet<string> = new Set(['week', 'days_28', 'lifetime']);
+
+/** Why `total` is the latest point, not a sum, for an overlapping period. */
+export const OVERLAPPING_TOTAL_NOTE =
+  '`total` for a week / days_28 / lifetime metric with more than one point is ' +
+  'the value of the LATEST point (`totalIsLatest: true`), not a sum: every ' +
+  'point already covers a rolling (or, for lifetime, cumulative) window that ' +
+  'overlaps the previous one, so adding them would count the same day up to 28 ' +
+  'times. Only day, month and total_over_range totals are sums.';
+
+/** One metric whose per-point rows the cap cut short (or cut entirely). */
+interface CutSeries {
+  readonly metric: string;
+  readonly kept: number;
+  readonly available: number;
+}
+
+/**
+ * Rows are emitted metric by metric in Graph's order, so the cap keeps the
+ * leading metrics whole and cuts the trailing ones — partially or entirely.
+ * Naming them is the difference between "this series ends early" (false) and
+ * "this series was cut here" (true); a wholly cut metric would otherwise look
+ * like one with no rows at all.
+ */
+function truncationNote(
+  kept: number,
+  dropped: number,
+  cut: readonly CutSeries[],
+): string {
+  const detail =
+    cut.length > 0
+      ? ` Rows are kept metric by metric in response order, so these series are incomplete in rows (their summaries in metrics are still whole): ${cut
+          .map((c) => `${c.metric} (kept ${String(c.kept)} of ${String(c.available)})`)
+          .join(', ')}.`
+      : '';
+  return `Row cap reached: kept the first ${String(kept)} of ${String(kept + dropped)} data points and dropped ${String(dropped)}.${detail} Re-run with aggregate:true for per-metric totals, or narrow the window (since/until) or the metric list.`;
+}
+
+/** Per-metric kept-vs-available counts for every metric the cap cut short. */
+function cutSeries(all: readonly InsightRow[], kept: readonly InsightRow[]): CutSeries[] {
+  const available = new Map<string, number>();
+  for (const row of all) available.set(row.metric, (available.get(row.metric) ?? 0) + 1);
+  const keptCounts = new Map<string, number>();
+  for (const row of kept)
+    keptCounts.set(row.metric, (keptCounts.get(row.metric) ?? 0) + 1);
+  const cut: CutSeries[] = [];
+  for (const [metric, count] of available) {
+    const k = keptCounts.get(metric) ?? 0;
+    if (k < count) cut.push({ metric, kept: k, available: count });
+  }
+  return cut;
 }
 
 function droppedMetricsNote(count: number): string {
   return `Dropped ${String(count)} deprecated metric name(s) from the request — Graph fails the whole call when a single metric name is invalid. See deprecatedMetrics for the replacement names, then re-run with those.`;
 }
 
-function unavailableNote(metrics: readonly string[], scope: InsightsScope): string {
+function unavailableNote(
+  metrics: readonly string[],
+  scope: InsightsScope,
+  period: string,
+): string {
   // The doctor's metric probe speaks the `/insights` edge only, so pointing a
   // Reel read at it would be advice that cannot work — say what does instead.
   const probe =
     scope === 'reel'
       ? 'Metric names are version-dependent, and the /video_insights vocabulary is its own — page/post metric names do not transfer. Request one name at a time to find which ones this video answers.'
       : 'Metric names are version-dependent; run the doctor to probe which names this Page answers.';
-  return `Graph returned no entry for: ${metrics.join(', ')}. An absent entry means the name is not valid for this object or for the pinned Graph API version — that is different from a valid metric with no data (see emptyMetrics). ${probe}`;
+  return `Graph returned no entry for: ${metrics.join(', ')}. An absent entry means the name is not valid for this object or for the pinned Graph API version, or that the metric does not serve period "${period}" (Graph omits an unsupported metric/period pair instead of failing the call) — that is different from a valid metric with no data (see emptyMetrics). ${probe}`;
 }
 
 const ALL_METRICS_DEPRECATED_NOTE =
@@ -164,6 +229,11 @@ const ALL_METRICS_DEPRECATED_NOTE =
 
 const EMPTY_METRICS_NOTE_PREFIX =
   'Valid but empty (Graph accepted the metric and returned no data points): ';
+
+/** An unsupported period also comes back empty — say so rather than "no data". */
+function emptyMetricsNote(metrics: readonly string[], period: string): string {
+  return `${EMPTY_METRICS_NOTE_PREFIX}${metrics.join(', ')}. A metric queried with a period it does not serve (here period "${period}") comes back the same way; re-read it with another period before concluding there was no activity.`;
+}
 
 // ---------------------------------------------------------------------------
 // 3. Metric rename / deprecation table (C6, CC-INS-1)
@@ -401,8 +471,16 @@ export interface MetricSummary {
   readonly period: string;
   /** Number of flattened data points Graph returned for this metric. */
   readonly points: number;
-  /** Sum of the numeric points (across breakdown keys). Absent ⇒ none numeric. */
+  /**
+   * The metric's total across breakdown keys. Absent ⇒ no numeric point. For a
+   * disjoint period (`day`, `month`, `total_over_range`) this is the sum of all
+   * numeric points; for an overlapping one (`week`, `days_28`, `lifetime`) with
+   * points on more than one date it is the LATEST date's value only, flagged by
+   * `totalIsLatest` — see {@link OVERLAPPING_TOTAL_NOTE}.
+   */
   readonly total?: number;
+  /** True ⇒ `total` is the newest point (overlapping period), not a sum. */
+  readonly totalIsLatest?: true;
   /** Raw `end_time` of the first/last point — the exact boundary, kept once. */
   readonly firstEnd?: string;
   readonly lastEnd?: string;
@@ -429,6 +507,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Calendar-date prefix of an `end_time`; the raw string when it is not a date. */
 function endDate(endTime: string): string {
   return DATE_PREFIX.exec(endTime)?.[1] ?? endTime;
+}
+
+/** True when `a` is strictly earlier than `b`; string order when unparseable. */
+function endBefore(a: string, b: string): boolean {
+  const aMs = Date.parse(a);
+  const bMs = Date.parse(b);
+  return Number.isFinite(aMs) && Number.isFinite(bMs) ? aMs < bMs : a < b;
 }
 
 interface FlatValue {
@@ -476,6 +561,12 @@ function flattenValue(
   }
 }
 
+/** A breakdown map (or list) with no entries at all: `{}` / `[]`. */
+function isEmptyMap(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0;
+  return isRecord(value) && Object.keys(value).length === 0;
+}
+
 interface RawValuePoint {
   readonly value?: unknown;
   readonly end_time?: unknown;
@@ -487,21 +578,54 @@ function summarize(
   rows: readonly InsightRow[],
   ends: readonly string[],
   nonNumeric: boolean,
+  emptyMapDates: ReadonlySet<string> = new Set(),
 ): MetricSummary {
+  // A rolling / cumulative period with points on several dates: the honest
+  // headline is the newest window, not 30 overlapping ones added together
+  // (a steady 100 views per 28 days summed to "3000" before this). The newest
+  // date is chosen by value, not array position — Graph documents oldest-first
+  // but a reversed body must not quietly hand back the OLDEST window as the
+  // current total. A single date (or none) is summed like any other period:
+  // the sum and the latest point are then the same number.
+  //
+  // A point whose value is an EMPTY breakdown map (`{}`) is a point Graph did
+  // return — a breakdown with no keys, i.e. zero — so it competes for "latest"
+  // too. Skipping it made the previous window's figure the current total.
+  const dates = new Set(
+    rows.map((row) => row.date).filter((d): d is string => d !== undefined),
+  );
+  if (rows.length > 0) for (const date of emptyMapDates) dates.add(date);
+  const latestDate =
+    OVERLAPPING_PERIODS.has(period) && dates.size > 1
+      ? [...dates].reduce((max, date) => (date > max ? date : max))
+      : undefined;
   let total: number | undefined;
   for (const row of rows) {
+    if (latestDate !== undefined && row.date !== latestDate) continue;
     if (typeof row.value === 'number') total = (total ?? 0) + row.value;
+  }
+  if (total === undefined && latestDate !== undefined && emptyMapDates.has(latestDate)) {
+    total = 0;
   }
   const breakdowns = new Set(
     rows.filter((r) => r.breakdown !== undefined).map((r) => r.breakdown),
   ).size;
-  const first = ends[0];
-  const last = ends[ends.length - 1];
+  // Boundaries by time, not array position: Graph documents oldest-first, but
+  // a reversed body must not report a `firstEnd` later than its `lastEnd`.
+  let first: string | undefined;
+  let last: string | undefined;
+  for (const end of ends) {
+    if (first === undefined || endBefore(end, first)) first = end;
+    if (last === undefined || endBefore(last, end)) last = end;
+  }
   return {
     metric,
     period,
     points: rows.length,
     ...(total !== undefined ? { total } : {}),
+    ...(total !== undefined && latestDate !== undefined
+      ? { totalIsLatest: true as const }
+      : {}),
     ...(first !== undefined ? { firstEnd: first } : {}),
     ...(last !== undefined ? { lastEnd: last } : {}),
     ...(breakdowns > 0 ? { breakdowns } : {}),
@@ -531,6 +655,7 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
 
     const metricRows: InsightRow[] = [];
     const ends: string[] = [];
+    const emptyMapEnds: string[] = [];
     let nonNumeric = false;
 
     for (const point of points) {
@@ -540,6 +665,9 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
       const flattened: FlatValue[] = [];
       flattenValue(typed.value, [], 0, flattened);
       if (flattened.length > 0 && endTime !== undefined) ends.push(endTime);
+      if (flattened.length === 0 && endTime !== undefined && isEmptyMap(typed.value)) {
+        emptyMapEnds.push(endTime);
+      }
       for (const flat of flattened) {
         if (typeof flat.value !== 'number') nonNumeric = true;
         metricRows.push({
@@ -552,7 +680,20 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
     }
 
     for (const row of metricRows) rows.push(row);
-    metrics.push(summarize(name, period, metricRows, ends, nonNumeric));
+    // Empty-map points only shape a series that has data at all: a metric whose
+    // every point is `{}` stays an empty series (emptyMetrics), with no invented
+    // boundaries or total.
+    if (metricRows.length > 0) for (const endTime of emptyMapEnds) ends.push(endTime);
+    metrics.push(
+      summarize(
+        name,
+        period,
+        metricRows,
+        ends,
+        nonNumeric,
+        new Set(emptyMapEnds.map((endTime) => endDate(endTime))),
+      ),
+    );
   }
 
   return { rows, metrics };
@@ -566,8 +707,10 @@ export interface CappedRows {
 }
 
 /**
- * Apply the row cap, keeping the FIRST rows (chronological, matching the
- * pagination contract's "truncation keeps the first items" rule).
+ * Apply the row cap, keeping the FIRST rows (matching the pagination
+ * contract's "truncation keeps the first items" rule). Rows are metric-major —
+ * chronological within a metric — so a multi-metric cut keeps leading metrics
+ * whole and trailing ones partially or not at all; `fetchInsights` names them.
  */
 export function capRows(rows: readonly InsightRow[], maxRows: number): CappedRows {
   const cap = Number.isFinite(maxRows) && maxRows > 0 ? Math.floor(maxRows) : 1;
@@ -603,7 +746,11 @@ function parseDate(label: string, value: string): number {
     );
   }
   const ms = Date.parse(`${value}T00:00:00Z`);
-  if (Number.isNaN(ms)) {
+  // `Date.parse` rolls an impossible day over ("2026-02-29" becomes March 1st,
+  // "04-31" May 1st) instead of returning NaN, and Graph's own parser does the
+  // same — so without the round-trip the caller is told the window starts on a
+  // date that does not exist while the data starts on the next one.
+  if (Number.isNaN(ms) || utcDate(ms) !== value) {
     throw validationError(`Invalid \`${label}\`: "${value}" is not a real date.`);
   }
   return ms;
@@ -636,14 +783,20 @@ export function checkWindow(input: {
   if (sinceMs !== undefined) {
     const endMs = untilMs ?? parseDate('until', utcDate(input.nowMs));
     if (endMs < sinceMs) {
+      // A lone \`since\` is measured against today: name that, not an \`until\`
+      // the caller never passed.
+      const end =
+        input.until !== undefined
+          ? `\`until\` (${input.until})`
+          : `today (${utcDate(input.nowMs)}, the default \`until\`)`;
       throw validationError(
-        `Invalid window: \`since\` (${String(input.since)}) is after \`until\` (${String(input.until ?? utcDate(input.nowMs))}).`,
+        `Invalid window: \`since\` (${String(input.since)}) is after ${end}.`,
       );
     }
     days = Math.round((endMs - sinceMs) / MS_PER_DAY) + 1;
     if (days > maxDays) {
       throw validationError(
-        `Window too wide: ${String(days)} days requested but Graph serves at most ${String(maxDays)} days of insights per query (2-year retention overall). Narrow since/until, or read the window in ${String(maxDays)}-day slices.`,
+        `Window too wide: ${String(days)} days requested but this server reads at most ${String(maxDays)} days of insights per query (inside Graph's 93-day maximum; 2-year retention overall). Narrow since/until, or read the window in ${String(maxDays)}-day slices.`,
       );
     }
   }
@@ -706,7 +859,18 @@ export interface InsightsResult {
   readonly unavailableMetrics: readonly string[];
   /** Accepted by Graph with zero data points ⇒ valid, no data. */
   readonly emptyMetrics: readonly string[];
+  /**
+   * Names Graph rejected by position (`metric[N]`) — dropped so the rest of the
+   * list could be re-read. Absent when Graph rejected nothing.
+   */
+  readonly rejectedMetrics?: readonly RejectedMetric[];
   readonly notes: readonly string[];
+}
+
+/** One metric name Graph rejected by position, and why this server says so. */
+export interface RejectedMetric {
+  readonly metric: string;
+  readonly reason: string;
 }
 
 /**
@@ -729,6 +893,69 @@ function insightsEdge(scope: InsightsScope): string {
 }
 
 /**
+ * True for a Graph failure that is about the metric LIST (code 100 / 3001 whose
+ * text mentions a metric) rather than the token, the object or the window.
+ */
+function isMetricRejection(err: unknown): err is GraphApiError {
+  return (
+    err instanceof GraphApiError &&
+    (err.code === 100 || err.code === 3001) &&
+    /metric/i.test(err.message)
+  );
+}
+
+/**
+ * The name a positional rejection (`metric[N]`) points at, resolved against the
+ * list Graph actually RECEIVED — deprecated names already dropped, case folded,
+ * duplicates merged — so read against the caller's own list it can point at a
+ * perfectly valid name. Undefined when Graph named no index or an index outside
+ * that list.
+ */
+function locatedRejection(
+  err: GraphApiError,
+  sent: readonly string[],
+): { readonly index: string; readonly metric: string } | undefined {
+  const index = /metric\[(\d+)\]/.exec(err.message)?.[1];
+  if (index === undefined) return undefined;
+  const metric = sent[Number(index)];
+  return metric !== undefined ? { index, metric } : undefined;
+}
+
+/**
+ * A metric name that belongs to another insights edge than the one this scope
+ * reads. Graph rejects such a name exactly like a typo, so without this the
+ * caller is told the name is misspelled or too new for the pinned version while
+ * the real fix is a different tool. Prefix-based on purpose: every Page-edge
+ * metric is `page_*` and no post or video metric is, and no Page-edge metric is
+ * `post_*`.
+ */
+function scopeMismatch(scope: InsightsScope, metric: string): string | undefined {
+  if (scope !== 'page' && metric.startsWith('page_')) {
+    return `"${metric}" is a Page-level metric, which the ${insightsEdge(scope)} edge of a ${scope === 'post' ? 'post' : 'Reel'} does not serve — read it with facebook_page_insights.`;
+  }
+  if (scope === 'page' && metric.startsWith('post_')) {
+    return `"${metric}" is a post-level metric, which the Page edge does not serve — read it with facebook_post_insights and a post ID (or facebook_reel_insights and a video ID for a Reel).`;
+  }
+  return undefined;
+}
+
+/** One name Graph rejected by position, with the list it was rejected from. */
+interface LocatedRejection extends RejectedMetric {
+  readonly index: string;
+  readonly sent: readonly string[];
+}
+
+function rejectedReason(
+  scope: InsightsScope,
+  metric: string,
+  index: string,
+  sent: readonly string[],
+): string {
+  const where = `Graph rejected metric[${index}] of the list sent ("${sent.join(',')}").`;
+  return `${where} ${scopeMismatch(scope, metric) ?? 'The name is not valid for this object or for the pinned Graph API version.'}`;
+}
+
+/**
  * Re-throw a Graph metric-validation failure with the table's suggestions
  * attached. Graph's own text ("metric[0] must be one of the following values")
  * lists hundreds of names — useless to a model — so the enriched message names
@@ -738,23 +965,48 @@ function insightsEdge(scope: InsightsScope): string {
  *
  * `metrics` is the caller's ORIGINAL list, not the live subset that was sent:
  * when a request mixed a dead name with an unknown-but-invalid one, naming the
- * rename is the most useful thing we can say about the rejection.
+ * rename is the most useful thing we can say about the rejection. `earlier`
+ * lists names Graph already rejected by position in this call, which were
+ * dropped before the attempt that failed here.
  */
-function enrichMetricError(err: unknown, metrics: readonly string[]): unknown {
-  if (!(err instanceof GraphApiError)) return err;
-  const looksMetricRelated =
-    (err.code === 100 || err.code === 3001) && /metric/i.test(err.message);
-  if (!looksMetricRelated) return err;
+function enrichMetricError(
+  err: unknown,
+  metrics: readonly string[],
+  sent: readonly string[],
+  scope: InsightsScope,
+  earlier: readonly LocatedRejection[],
+): unknown {
+  if (!isMetricRejection(err)) return err;
 
   const suggestions = classifyMetrics(metrics)
     .filter((verdict) => verdict.suggestion !== undefined)
     .map((verdict) => verdict.suggestion);
-  const tail =
-    suggestions.length > 0
-      ? ` Known-dead names in this request: ${suggestions.join(' ')}`
-      : ' None of the requested names appears in the rename table of this server, so the invalid one is either a typo or unsupported by the pinned Graph API version.';
+  const located = locatedRejection(err, sent);
+  const locatedText =
+    located !== undefined
+      ? ` Graph's index counts the list actually sent ("${sent.join(',')}"), so metric[${located.index}] is "${located.metric}".`
+      : '';
+  const earlierText =
+    earlier.length > 0
+      ? ` Earlier in this call Graph also rejected ${earlier.map((r) => `"${r.metric}" (metric[${r.index}] of "${r.sent.join(',')}")`).join(', ')}, dropped before this attempt.`
+      : '';
+  // A name from another edge is the likeliest invalid one, and "typo or too
+  // new" would send the caller hunting in the wrong place.
+  const mismatches = [...new Set([...sent, ...earlier.map((r) => r.metric)])]
+    .map((metric) => scopeMismatch(scope, metric))
+    .filter((text): text is string => text !== undefined);
+  const parts: string[] = [];
+  if (mismatches.length > 0) parts.push(` ${mismatches.join(' ')}`);
+  if (suggestions.length > 0) {
+    parts.push(` Known-dead names in this request: ${suggestions.join(' ')}`);
+  }
+  if (parts.length === 0) {
+    parts.push(
+      ' None of the requested names appears in the rename table of this server, so the invalid one is either a typo or unsupported by the pinned Graph API version.',
+    );
+  }
   return new GraphApiError(
-    `${err.message} Graph rejected the metric list, so NO metric was read. Request one metric at a time to isolate the invalid name.${tail}`,
+    `${err.message} Graph rejected the metric list, so NO metric was read.${locatedText}${earlierText} Request one metric at a time to isolate the invalid name.${parts.join('')}`,
     {
       code: err.code,
       ...(err.subcode !== undefined ? { subcode: err.subcode } : {}),
@@ -762,6 +1014,10 @@ function enrichMetricError(err: unknown, metrics: readonly string[]): unknown {
       ...(err.fbtraceId !== undefined ? { fbtraceId: err.fbtraceId } : {}),
       httpStatus: err.httpStatus,
       ...(err.action !== undefined ? { action: err.action } : {}),
+      // Graph's own human-readable reason rides on these two fields and the
+      // server surfaces them to the caller; the rebuilt error must not drop it.
+      ...(err.userTitle !== undefined ? { userTitle: err.userTitle } : {}),
+      ...(err.userMessage !== undefined ? { userMessage: err.userMessage } : {}),
       cause: err,
     },
   );
@@ -776,20 +1032,73 @@ async function requestInsights(
   const params: Record<string, ParamValue> = { metric: metrics.join(','), period };
   if (req.since !== undefined) params.since = req.since;
   if (req.until !== undefined) params.until = req.until;
-  try {
-    const res = await fbRequest<unknown>({
-      protocol: 'json',
-      method: 'GET',
-      host: 'graph',
-      path: `/${req.objectId}/${insightsEdge(req.scope)}`,
-      params,
-      ...(req.token !== undefined ? { token: req.token } : {}),
-      ...(req.signal !== undefined ? { signal: req.signal } : {}),
-    });
-    return res.data;
-  } catch (err) {
-    throw enrichMetricError(err, req.metrics);
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'GET',
+    host: 'graph',
+    path: `/${req.objectId}/${insightsEdge(req.scope)}`,
+    params,
+    ...(req.token !== undefined ? { token: req.token } : {}),
+    ...(req.signal !== undefined ? { signal: req.signal } : {}),
+  });
+  return res.data;
+}
+
+/**
+ * Most names one read will drop on positional rejections before giving up and
+ * reporting the rejection instead: each drop costs one more GET.
+ */
+const MAX_POSITIONAL_DROPS = 5;
+
+/** The answered body, the names it answers for, and the names Graph rejected. */
+interface TolerantRead {
+  readonly body: unknown;
+  readonly answered: readonly string[];
+  readonly rejected: readonly LocatedRejection[];
+}
+
+/**
+ * GET the live list; when Graph rejects it by POSITION (`metric[N]`), drop that
+ * one name and re-read the rest. Graph fails the whole call over one invalid
+ * name, but a positional rejection proves which name it was — failing the read
+ * would throw away every other metric's numbers for a fault that is not theirs.
+ * An unlocated rejection, a lone remaining name, or too many drops ends the
+ * loop with the enriched error.
+ */
+async function readTolerant(
+  fbRequest: FbRequestFn,
+  req: InsightsRequest,
+  live: readonly string[],
+  period: string,
+): Promise<TolerantRead> {
+  let sent = live;
+  const rejected: LocatedRejection[] = [];
+  for (;;) {
+    try {
+      const body = await requestInsights(fbRequest, req, sent, period);
+      return { body, answered: sent, rejected };
+    } catch (err) {
+      const located = isMetricRejection(err) ? locatedRejection(err, sent) : undefined;
+      if (
+        located === undefined ||
+        sent.length <= 1 ||
+        rejected.length >= MAX_POSITIONAL_DROPS
+      ) {
+        throw enrichMetricError(err, req.metrics, sent, req.scope, rejected);
+      }
+      rejected.push({
+        metric: located.metric,
+        reason: rejectedReason(req.scope, located.metric, located.index, sent),
+        index: located.index,
+        sent,
+      });
+      sent = sent.filter((metric) => metric !== located.metric);
+    }
   }
+}
+
+function rejectedNote(rejected: readonly RejectedMetric[]): string {
+  return `Graph rejected ${rejected.map((r) => `"${r.metric}"`).join(', ')} by position, so ${rejected.length === 1 ? 'that name was' : 'those names were'} dropped and the remaining metrics re-read; rows and summaries cover only the remaining names. See rejectedMetrics for why each was rejected.`;
 }
 
 /**
@@ -816,11 +1125,13 @@ function needsFreshnessNote(
 
 function buildNotes(input: {
   readonly scope: InsightsScope;
+  readonly period: string;
   readonly rows: readonly InsightRow[];
   readonly metrics: readonly MetricSummary[];
   readonly emptyMetrics: readonly string[];
   readonly unavailableMetrics: readonly string[];
   readonly deprecated: readonly MetricVerdict[];
+  readonly rejected: readonly RejectedMetric[];
   readonly capped: CappedRows;
   readonly until?: string;
   readonly nowMs: number;
@@ -828,26 +1139,43 @@ function buildNotes(input: {
   const notes: string[] = [];
   if (input.deprecated.length > 0)
     notes.push(droppedMetricsNote(input.deprecated.length));
+  if (input.rejected.length > 0) notes.push(rejectedNote(input.rejected));
   if (input.capped.truncated) {
-    notes.push(truncationNote(input.capped.rows.length, input.capped.dropped));
+    notes.push(
+      truncationNote(
+        input.capped.rows.length,
+        input.capped.dropped,
+        cutSeries(input.rows, input.capped.rows),
+      ),
+    );
   }
   if (input.unavailableMetrics.length > 0) {
-    notes.push(unavailableNote(input.unavailableMetrics, input.scope));
+    notes.push(unavailableNote(input.unavailableMetrics, input.scope, input.period));
   }
 
-  const allEmpty =
-    input.metrics.length > 0 && input.metrics.every((metric) => metric.points === 0);
+  // `[].every(...)` is true on purpose: "silent empty data" (CC-AUTH-2) and the
+  // eligibility floor (CC-INS-2) can surface either as entries whose `values`
+  // are empty OR as a body with no entries at all, and doc 09 pins neither wire
+  // shape. Requiring at least one entry here made the second shape skip the
+  // whole explanation and leave only the unavailable-metric note, which says the
+  // metric NAMES are invalid — the one reading that is almost certainly wrong,
+  // since Graph rejects an invalid name outright (see `enrichMetricError`).
+  // `buildNotes` is only reached with a non-empty `live` list, so this cannot
+  // fire for a request that asked for nothing.
+  const allEmpty = input.metrics.every((metric) => metric.points === 0);
   if (allEmpty) {
     notes.push(EMPTY_SCOPE_NOTE[input.scope]);
     // The eligibility/lag explanations above are the LIKELY cause; the silent
     // user-token read is the other one, and only the caller can tell them apart.
     notes.push(INSIGHTS_TOKEN_EMPTY_HINT);
   } else if (input.emptyMetrics.length > 0) {
-    notes.push(`${EMPTY_METRICS_NOTE_PREFIX}${input.emptyMetrics.join(', ')}.`);
+    notes.push(emptyMetricsNote(input.emptyMetrics, input.period));
   }
 
   if (needsFreshnessNote(input.rows, input.until, input.nowMs))
     notes.push(FRESHNESS_NOTE);
+  if (input.metrics.some((metric) => metric.totalIsLatest === true))
+    notes.push(OVERLAPPING_TOTAL_NOTE);
   notes.push(PERIOD_BOUNDARY_NOTE);
   return notes;
 }
@@ -905,7 +1233,7 @@ export async function fetchInsights(
     };
   }
 
-  const body = await requestInsights(fbRequest, req, live, period);
+  const { body, answered, rejected } = await readTolerant(fbRequest, req, live, period);
   const reshaped = reshapeInsights(body);
   // Aggregate mode emits no rows at all, so the row cap simply does not apply —
   // and must not raise a truncation note about rows nobody asked for.
@@ -914,8 +1242,19 @@ export async function fetchInsights(
       ? capRows(reshaped.rows, req.maxRows ?? INSIGHTS_MAX_ROWS)
       : { rows: [], dropped: 0, truncated: false };
 
-  const returned = new Set(reshaped.metrics.map((metric) => metric.metric));
-  const unavailableMetrics = live.filter((metric) => !returned.has(metric));
+  // Folded on BOTH sides. `live` was already canonicalised so the request and
+  // this check would speak one vocabulary, but the reply half stayed verbatim:
+  // `metric.metric` is Graph's `name` straight off the wire, a declared string
+  // that nothing has folded. One entry echoed as `Page_Media_View` and the
+  // comparison misses — the metric lands in `unavailableMetrics` and the model
+  // is handed that metric's own rows next to a note insisting the name is not
+  // valid for this object. The reply is not more trustworthy than the request.
+  const returned = new Set(
+    reshaped.metrics.map((metric) => canonicalMetricName(metric.metric)),
+  );
+  // Against the names the answered request carried: a name Graph rejected by
+  // position is reported in rejectedMetrics, not again as "no entry returned".
+  const unavailableMetrics = answered.filter((metric) => !returned.has(metric));
   const emptyMetrics = reshaped.metrics
     .filter((metric) => metric.points === 0)
     .map((metric) => metric.metric);
@@ -932,8 +1271,14 @@ export async function fetchInsights(
     deprecatedMetrics: deprecated,
     unavailableMetrics,
     emptyMetrics,
+    ...(rejected.length > 0
+      ? {
+          rejectedMetrics: rejected.map(({ metric, reason }) => ({ metric, reason })),
+        }
+      : {}),
     notes: buildNotes({
       scope: req.scope,
+      period,
       // Freshness is judged on the FULL series, not the capped prefix — a cap
       // that lopped off the tail must not hide that the tail may be stale.
       rows: reshaped.rows,
@@ -941,6 +1286,7 @@ export async function fetchInsights(
       emptyMetrics,
       unavailableMetrics,
       deprecated,
+      rejected,
       capped,
       ...(req.until !== undefined ? { until: req.until } : {}),
       nowMs: req.nowMs,

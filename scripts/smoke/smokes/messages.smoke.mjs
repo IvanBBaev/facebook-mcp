@@ -110,9 +110,13 @@ registerSmoke({
     if (conversations.length === 0) {
       // An empty inbox is a legitimate state of a live Page, not a failure: the
       // read path is proven, the id round-trip simply has no material to work on.
-      ctx.log.step(
-        'read Page has an empty Messenger inbox — id round-trip and message-level ' +
-          'taint wrapping were not exercised',
+      ctx.log.step('read Page has an empty Messenger inbox');
+      ctx.notExercised(
+        'nothing below the listing ran: the conversation-id round-trip through ' +
+          'facebook_get_conversation, the messagingWindow contract, and — the one ' +
+          'that matters most — the B1 / CC-MOD-8 control that every visitor-authored ' +
+          'message body reaches the model inside the rendered taint envelope, never ' +
+          'as bare text',
       );
       return;
     }
@@ -173,7 +177,13 @@ registerSmoke({
     ctx.log.step(`thread window: ${window.status}`);
 
     if (messages.length === 0) {
-      ctx.log.step('thread returned no messages — message-level taint not exercised');
+      ctx.log.step('thread returned no messages');
+      ctx.notExercised(
+        'the per-message contract never ran: no message body was checked for the ' +
+          'rendered taint envelope (B1 / CC-MOD-8) and no `direction` value was ' +
+          'validated, so the listing-level envelope is the only taint evidence this ' +
+          'run produced',
+      );
       return;
     }
 

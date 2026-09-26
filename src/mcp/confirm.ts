@@ -22,6 +22,7 @@
 // (see `createConfirmer` below).
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { errorMessageOf } from '../core/index.js';
 import type {
   ConfirmationRequest,
   ConfirmationResponse,
@@ -67,23 +68,31 @@ export interface ConfirmerDeps {
   readonly resolveOperatorToken?: OperatorTokenResolver;
 }
 
-/** Longest elicitation-failure text carried into a denial note. */
-const MAX_ELICIT_FAILURE_CHARS = 200;
+/** Longest elicitation-supplied text carried back to the caller, either way. */
+const MAX_ELICIT_TEXT_CHARS = 200;
 
 /**
- * One line describing why an advertised elicitation prompt did not complete.
+ * Flatten text to one line and cap it.
  *
- * The text ends up in a tool error the model reads, so it is length-capped and
- * kept to the thrown message: the {@link ConfirmationRequest} it came from holds
- * no secret (tool, tier, plan id, human summary), and no token is in scope here.
+ * Everything this seam echoes back — a failure reason, a human's note — ends up
+ * in a tool result the MODEL reads, and every one of those strings arrives from
+ * outside: a thrown message, or a JSON-RPC payload the client composed. Uncapped
+ * and un-flattened, the confirmation channel becomes a way to push newlines and
+ * kilobytes of attacker-chosen prose into the model's context — through the one
+ * channel whose entire job is to be the trustworthy half of the conversation.
+ * Neither string may carry a secret: the {@link ConfirmationRequest} holds none
+ * (tool, tier, plan id, human summary) and no token is ever in scope here.
  */
-function describeElicitFailure(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
+function condense(raw: string): string {
   const oneLine = raw.replace(/\s+/g, ' ').trim();
-  const text =
-    oneLine.length > MAX_ELICIT_FAILURE_CHARS
-      ? `${oneLine.slice(0, MAX_ELICIT_FAILURE_CHARS)}…`
-      : oneLine;
+  return oneLine.length > MAX_ELICIT_TEXT_CHARS
+    ? `${oneLine.slice(0, MAX_ELICIT_TEXT_CHARS)}…`
+    : oneLine;
+}
+
+/** One line describing why an advertised elicitation prompt did not complete. */
+function describeElicitFailure(error: unknown): string {
+  const text = condense(errorMessageOf(error));
   return `elicitation failed (${text.length > 0 ? text : 'no reason given'})`;
 }
 
@@ -127,8 +136,15 @@ export function createConfirmer(deps: ConfirmerDeps): Confirmer {
     const hasExpected = typeof expected === 'string' && expected.length > 0;
     // The per-call token wins: it is the concrete authorization for THIS write,
     // whereas the resolver is a construction-time seam that may answer for a
-    // different notion of "current call".
-    const supplied = perCallToken ?? (await resolveOperatorToken?.(request));
+    // different notion of "current call". Only a genuinely ABSENT argument falls
+    // through — `??` would also fall through on `null` and `''`, and the write
+    // gate threads this straight from a `confirm_token` a JSON-RPC caller wrote.
+    // A caller who sends `"confirm_token": null` supplied no credential, and
+    // must not thereby reach a resolver holding one that says yes: a wrong or
+    // empty credential is a refusal, never an invitation to go looking for
+    // another that might answer differently.
+    const supplied =
+      perCallToken === undefined ? await resolveOperatorToken?.(request) : perCallToken;
     const hasSupplied = typeof supplied === 'string' && supplied.length > 0;
     if (hasExpected && hasSupplied && constantTimeEqual(expected, supplied)) {
       return { confirmed: true, method: 'operator_token' };
@@ -155,11 +171,22 @@ export function createConfirmer(deps: ConfirmerDeps): Confirmer {
     ): Promise<ConfirmationResponse> {
       if (elicit) {
         try {
-          const outcome = await elicit(request);
+          const outcome: ElicitOutcome | undefined = await elicit(request);
+          // Narrow the WIRE value rather than trust its declared type. This
+          // object was decoded from a JSON-RPC response the client composed, and
+          // no type checker stands between that payload and this field: copying
+          // it through means `"no"`, `"false"` and `{}` — all truthy — confirm a
+          // delete or a budget raise downstream. Only an explicit boolean `true`
+          // is a human saying yes; anything else, including a client that
+          // answered with nothing at all, is not.
+          const note =
+            typeof outcome?.note === 'string' ? condense(outcome.note) : undefined;
           return {
-            confirmed: outcome.confirmed,
+            confirmed: outcome?.confirmed === true,
             method: 'elicitation',
-            ...(outcome.note !== undefined ? { note: outcome.note } : {}),
+            // An empty note is dropped rather than echoed: after flattening,
+            // whitespace-only text carries nothing a caller can act on.
+            ...(note !== undefined && note.length > 0 ? { note } : {}),
           };
         } catch (error) {
           // Elicitation was advertised but failed to complete. Do NOT claim an

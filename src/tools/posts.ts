@@ -32,7 +32,7 @@ import { extname } from 'node:path';
 
 import { z } from 'zod';
 
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, errorMessageOf, isPageTokenDead } from '../core/index.js';
 import type {
   PackageSpec,
   ParamValue,
@@ -78,8 +78,11 @@ import {
   DELETE_PERMANENT_NOTE,
   EDIT_OWN_APP_NOTE,
   MAX_LOCAL_VIDEO_BYTES,
+  PUBLISH_NOW_VERIFY_NOTE,
   PUBLISH_VERIFY_NOTE,
   PostValidationError,
+  VIDEO_UNPUBLISHED_VERIFY_NOTE,
+  publishVerifyNote,
   SCHEDULE_FORMAT_HELP,
   SCHEDULE_TIMEZONE_CAVEAT,
   UPDATE_POST_ACTIONS,
@@ -110,15 +113,28 @@ import {
   type UpdatePostAction,
 } from '../api/posts-write.js';
 import { fetchPage } from '../api/shared.js';
-import { WriteGateError, defineTool, shapeEnvelope, shapeResult } from '../mcp/index.js';
+import {
+  APPLIED_VERDICT,
+  ATTEMPTED_VERDICT,
+  PLAN_IN_PROGRESS_MESSAGE,
+  REFUSED_VERDICT,
+  WriteGateError,
+  defineTool,
+  shapeEnvelope,
+  shapeResult,
+  type WriteResultVerdict,
+} from '../mcp/index.js';
 import {
   confirmableWriteArgs,
   executeWrite,
   gateArgs,
+  graphErrorFields,
   listArgs,
   profileArg,
   shapeFor,
+  graphNodeIdArg,
   shapeOptionsOf,
+  videoIdArg,
   writeArgs,
 } from './shared.js';
 
@@ -167,7 +183,7 @@ const scheduledPublishTimeArg = z
   .min(1)
   .optional()
   .describe(
-    'When to publish, as an ISO-8601 instant WITH an explicit offset — "2026-08-01T09:30:00+03:00" or "2026-08-01T06:30:00Z". A bare local time ("2026-08-01T09:30:00") and a raw epoch number are both REFUSED, because they have no unambiguous meaning. Must be more than 10 minutes and at most 75 days ahead. Setting this creates the post unpublished; do NOT also pass published:true.',
+    'When to publish, as an ISO-8601 instant WITH an explicit offset — "2026-08-01T09:30:00+03:00" or "2026-08-01T06:30:00Z". A bare local time ("2026-08-01T09:30:00") and a raw epoch number are both REFUSED, because they have no unambiguous meaning. Must be at least 10 minutes and at most 75 days ahead. Setting this creates the post unpublished; do NOT also pass published:true.',
   );
 
 const pageTimezoneArg = z
@@ -185,19 +201,31 @@ const publishedArg = z
     'false ⇒ create the post UNPUBLISHED (a draft that stays invisible until facebook_update_post action:"publish_now"). Omitted or true ⇒ publish immediately. Must be omitted when scheduled_publish_time is set.',
   );
 
-const postIdArg = z
-  .string()
-  .min(1)
-  .describe(
+/**
+ * The post id argument for the two lifecycle writes. The SHAPE is the shared one
+ * (`./shared.js`): `/{post_id}` is built by interpolation, so an id carrying a
+ * `/` would aim an advertised post edit or delete at a different Graph node
+ * under the same Page token — see `GRAPH_NODE_ID_SHAPE` for why the HTTP layer
+ * cannot catch that on its own.
+ */
+const postIdArg = graphNodeIdArg({
+  hint: 'Pass the `id` facebook_list_posts or facebook_list_scheduled_posts returns, verbatim.',
+  description:
     'The post ID, normally "{page-id}_{post-id}". Only posts this same app created can be edited or deleted — a post made in the Facebook UI or by another app is not addressable here.',
-  );
+});
 
-const videoIdArg = z
-  .string()
-  .min(1)
-  .describe(
+/**
+ * The video id argument for the status poll. The SHAPE and the rejection
+ * wording are the shared ones (`./shared.js`): a `{page-id}_{post-id}` composite
+ * addresses a POST and cannot resolve on this edge, so it is refused here —
+ * locally, with a message that names the mistake — instead of being spent on a
+ * Graph round-trip that can only fail.
+ */
+const statusVideoIdArg = videoIdArg({
+  hint: 'facebook_create_video_post returns it as `videoId`.',
+  description:
     'The VIDEO ID — the `videoId` facebook_create_video_post returned, not a post ID. A "{page-id}_{post-id}" value is a post, not a video, and does not resolve on this edge.',
-  );
+});
 
 // ---------------------------------------------------------------------------
 // 3. Local error types and the error → result mapping
@@ -217,6 +245,49 @@ class ToolInputError extends Error {
   }
 }
 
+/**
+ * The carousel `POST /feed` failed in a way that may still have landed (a 5xx,
+ * a transport fault, a lost response — C2). The post may exist and reference
+ * every child photo, so the children are deliberately NOT cleaned up: deleting
+ * them would gut a live post. The caller gets their ids to reconcile instead.
+ */
+class CarouselPostUnconfirmedError extends Error {
+  override readonly name = 'CarouselPostUnconfirmedError';
+  readonly photoIds: readonly string[];
+  /** Where the post would be if it landed — it decides where to verify. */
+  readonly publishState: PublishState;
+
+  constructor(opts: {
+    readonly cause: unknown;
+    readonly photoIds: readonly string[];
+    readonly publishState: PublishState;
+  }) {
+    super(
+      `the photos uploaded but the carousel post outcome is unknown: ${errorMessageOf(opts.cause)}`,
+      { cause: opts.cause },
+    );
+    this.photoIds = opts.photoIds;
+    this.publishState = opts.publishState;
+    Object.setPrototypeOf(this, CarouselPostUnconfirmedError.prototype);
+  }
+}
+
+/**
+ * Where an unconfirmed carousel post can be seen if it landed. A scheduled post
+ * sits only on the scheduled queue and a draft on no listing this server reads;
+ * sending either to facebook_list_posts reads as "it did not land" and invites
+ * deleting the photos of a live post or re-sending it (CC-PUB-1).
+ */
+function carouselVerifyStep(publishState: PublishState): string {
+  if (publishState === 'scheduled') {
+    return 'Verify with facebook_list_scheduled_posts (a scheduled post is not on the published listing until its publish time)';
+  }
+  if (publishState === 'draft') {
+    return "Verify in the Page's drafts in Meta Business Suite (an unpublished draft is on neither the published listing nor the scheduled queue)";
+  }
+  return "Verify with facebook_list_posts, matching each item's created_time and message text (the tool has no time filter; the newest posts come first)";
+}
+
 /** The operator-facing projection of a best-effort orphan cleanup (CC-MEDIA-10). */
 function cleanupPayload(report: OrphanCleanupReport): Record<string, unknown> {
   return {
@@ -226,6 +297,17 @@ function cleanupPayload(report: OrphanCleanupReport): Record<string, unknown> {
       id: failure.id,
       error: failure.message,
     })),
+    // Uploads that may have created a photo whose id never came back: nothing
+    // to DELETE, so they are not in `orphans`, but they may still be on the Page.
+    // `photo` is 1-based, matching the operator notice.
+    ...(report.unconfirmedUploads !== undefined && report.unconfirmedUploads.length > 0
+      ? {
+          unconfirmedUploads: report.unconfirmedUploads.map((upload) => ({
+            photo: upload.index + 1,
+            error: upload.message,
+          })),
+        }
+      : {}),
     operatorNotice:
       describeOrphans(report) ??
       'Every unpublished child photo was cleaned up; nothing was left behind on the Page.',
@@ -284,11 +366,24 @@ function errorRecord(err: unknown): Record<string, unknown> | undefined {
       hint: 'The photos uploaded but no post references them. Any id under `cleanup.orphans` is still in the Page photo library and must be deleted by hand.',
     };
   }
+  if (err instanceof CarouselPostUnconfirmedError) {
+    return {
+      applied: false,
+      outcome: 'attempted',
+      error: err.message,
+      reason: 'carousel_post_unconfirmed',
+      photoIds: err.photoIds,
+      hint: `The carousel post may have been created and may reference these photos, so none was deleted. ${carouselVerifyStep(err.publishState)} before doing anything: if the post exists, leave the photos alone; if it does not, the ids under photoIds are unpublished orphans in the Page photo library to delete by hand. Never re-send the post blindly — it can publish twice (CC-PUB-1).`,
+    };
+  }
   if (isReelPublishError(err)) {
     const { reel } = err;
     return {
       applied: false,
       error: err.message,
+      // A locally raised refusal (code 0, HTTP 0) had no Graph round trip, so it
+      // carries no Graph identity; a phase failure keeps Meta's own explanation.
+      ...(err.code !== 0 || err.httpStatus !== 0 ? graphErrorFields(err) : {}),
       reason: `reel_${reel.kind}`,
       phase: reel.phase,
       category: reel.category,
@@ -299,6 +394,8 @@ function errorRecord(err: unknown): Record<string, unknown> | undefined {
       ...(reel.retryAfterMs !== undefined ? { retryAfterMs: reel.retryAfterMs } : {}),
       ...(reel.nextTool !== undefined ? { nextTool: reel.nextTool } : {}),
       ...(reel.signatureId !== undefined ? { signatureId: reel.signatureId } : {}),
+      /** Set once bytes reached Meta: the video exists there and can be inspected or deleted. */
+      ...(reel.videoId !== undefined ? { videoId: reel.videoId } : {}),
     };
   }
   if (err instanceof WriteGateError) {
@@ -308,23 +405,63 @@ function errorRecord(err: unknown): Record<string, unknown> | undefined {
       reason: err.code,
       tool: err.tool,
       tier: err.tier,
-      hint: "Run the tool once WITHOUT apply to get a fresh preview, then repeat the identical arguments with apply:true and that preview's plan_id.",
+      // Re-planning a plan another call is still applying is the duplicate
+      // write the gate refused to cause; the only safe step is to wait.
+      hint:
+        err.message === PLAN_IN_PROGRESS_MESSAGE
+          ? 'Another call is applying this plan right now. Wait for its result before doing anything else — do not re-plan or re-apply, or the write may happen twice.'
+          : "Run the tool once WITHOUT apply to get a fresh preview, then repeat the identical arguments with apply:true and that preview's plan_id.",
     };
   }
   return undefined;
 }
 
-/** Run a handler body, shaping the expected failures instead of throwing them. */
+/**
+ * The Pages each in-flight {@link guarded} call resolved, keyed by its context.
+ * {@link prepareBase} records into it; `guarded` reads it when it swallows a
+ * token-dead failure.
+ */
+const resolvedPagesOf = new WeakMap<ToolContext, Set<string>>();
+
+/**
+ * Whether Graph called the Page token dead anywhere in `err`'s `cause` chain
+ * (bounded at depth 4): {@link isPageTokenDead}, the one predicate the server hub
+ * and the resolver cache apply too. A Reels phase failure is the Graph error
+ * itself; a carousel or multi-photo wrapper keeps the original as `cause`.
+ */
+function pageTokenDeadBehind(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    if (isPageTokenDead(current)) return true;
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
+
+/**
+ * Run a handler body, shaping the expected failures instead of throwing them.
+ *
+ * A shaped failure never reaches the server's invalidate-on-190 hook (C1), so a
+ * token-dead one evicts the resolved Page token here: otherwise every retry for
+ * the cache's lifetime replays the dead token and fails the same way.
+ */
 async function guarded(
   ctx: ToolContext,
   run: () => Promise<ToolResult>,
 ): Promise<ToolResult> {
+  const resolved = new Set<string>();
+  resolvedPagesOf.set(ctx, resolved);
   try {
     return await run();
   } catch (err) {
     const record = errorRecord(err);
     if (record === undefined) throw err;
+    if (pageTokenDeadBehind(err)) {
+      for (const pageId of resolved) ctx.pages.invalidate(pageId);
+    }
     return shapeResult(record, { ...shapeOptionsOf(ctx), isError: true });
+  } finally {
+    if (resolvedPagesOf.get(ctx) === resolved) resolvedPagesOf.delete(ctx);
   }
 }
 
@@ -370,6 +507,7 @@ async function prepareBase(
   opts: { readonly needTimezone: boolean },
 ): Promise<PostsBase> {
   const page = await ctx.pages.resolvePage(input.profile);
+  resolvedPagesOf.get(ctx)?.add(page.pageId);
   const nowMs = ctx.clock.now();
 
   let pageTimezone: string | undefined;
@@ -476,13 +614,173 @@ function planWarnings(plan: { readonly warnings: readonly string[] }, echo?: Tim
 // 6. Response readers
 // ---------------------------------------------------------------------------
 
-interface FeedPostResponse {
-  readonly id?: string;
-  readonly post_id?: string;
+/**
+ * Every reader below starts from `unknown`, because `fbRequest<T>` CASTS the
+ * parsed body to `T` without validating it (`data as T`, src/core/http.ts). The
+ * declared type is a hope, not a guarantee: a 2xx can arrive with no body at all
+ * (parsed as `undefined`), as a raw non-JSON string, or with fields of the wrong
+ * type. Reading a property straight off `res.data` therefore throws a TypeError
+ * on the SUCCESS path of a bodiless 2xx — the write landed and the model is told
+ * it failed, which invites a retry that duplicates a post or hunts for a post
+ * that is already gone.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
-function createdPostId(data: FeedPostResponse): string | null {
-  return data.post_id ?? data.id ?? null;
+/** The acknowledgement as it actually arrives — never assumed to be a record. */
+function ackOf(body: unknown): Record<string, unknown> {
+  return isRecord(body) ? body : {};
+}
+
+/** A Graph id counts only when it is a non-empty string; anything else is absent. */
+function ackId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Did Facebook confirm this write?
+ *
+ * Absence still confirms — the transport has already turned an error payload
+ * into a throw, so a bodiless 2xx on these edges is Facebook saying "done", and
+ * reading it as a failure would report a completed publish or delete as failed.
+ * What must NOT confirm is a `success` that is PRESENT and is anything other
+ * than `true`: `false`, `"false"` and `0` are all Facebook saying no, and the
+ * old `?? true` accepted two of those three — on the delete that is a verdict
+ * telling the model the post is gone when Facebook declined to remove it.
+ */
+function confirmsWrite(body: unknown): boolean {
+  if (body === undefined || body === true) return true;
+  // A bare `false`, a `null` or a non-JSON text body is not a confirmation: the
+  // transport keeps a 2xx literal as-is, and reading `false` as "done" reported
+  // a declined update or delete as completed.
+  if (!isRecord(body)) return false;
+  const flag: unknown = body.success;
+  return flag === undefined || flag === true;
+}
+
+/** What `facebook_update_post` hands back from a resolved `POST /{post-id}`. */
+interface UpdatePostOutcome extends Record<string, unknown> {
+  readonly success: boolean;
+}
+
+/** What `facebook_delete_post` hands back from a resolved `DELETE /{post-id}`. */
+interface DeletePostOutcome extends Record<string, unknown> {
+  readonly deleted: boolean;
+  readonly alreadyAbsent: boolean;
+}
+
+/**
+ * What `facebook_create_video_post` hands back from a resolved perform, on
+ * either delivery. `accepted` exists on the resumable-upload delivery only: it
+ * is the `finish` phase's own verdict, and the `file_url` delivery has no
+ * counterpart (a refusal there arrives as a Graph error and throws).
+ */
+interface CreateVideoOutcome extends Record<string, unknown> {
+  readonly accepted?: boolean;
+  readonly videoId: string | null;
+}
+
+/**
+ * The `processingNote` for a video create whose `finish` Graph declined.
+ * {@link VIDEO_CREATED_NOT_READY_NOTE} describes a COMMITTED upload that Meta is
+ * transcoding; beside `accepted:false` that is false — the upload was not
+ * committed. The object from the `start` phase still exists, so name it.
+ */
+function videoFinishDeclinedNote(videoId: string | null): string {
+  const id = videoId ?? 'the video created by the start phase';
+  return `Graph DECLINED the finish phase: the upload was NOT committed, so this is not a video Meta is preparing to publish. The video object ${id} still exists from the start phase — check it with facebook_get_video_status, then delete it or leave it; do not re-run the upload blindly, it creates a duplicate (CC-MEDIA-3).`;
+}
+
+/**
+ * The `processingNote` for a `file_url` create whose 2xx named no video id: the
+ * create may or may not have landed, and there is no id to poll.
+ */
+const VIDEO_NO_ID_NOTE =
+  'Graph answered but named no video id, so this call cannot confirm a video was created and there is no id to poll. Verify on the Page (its videos, or the newest items of facebook_list_posts by created_time) before retrying — a blind retry may create a duplicate (CC-PUB-1).';
+
+/**
+ * {@link VIDEO_NO_ID_NOTE} for a scheduled or draft video, which no feed listing
+ * shows: pointing there reads as "it did not land" and invites the duplicate.
+ */
+const VIDEO_UNPUBLISHED_NO_ID_NOTE =
+  "Graph answered but named no video id, so this call cannot confirm a video was created and there is no id to poll. A scheduled or unpublished video does not appear among the published posts, so check the Page's video library in Meta Business Suite before retrying — a blind retry may create a duplicate (CC-PUB-1).";
+
+/** Pick the processing note that is true for this video create's outcome. */
+function videoProcessingNote(
+  accepted: boolean | undefined,
+  videoId: string | null,
+  publishState: PublishState,
+): string {
+  if (accepted === false) return videoFinishDeclinedNote(videoId);
+  if (videoId === null) {
+    return publishState === 'published' ? VIDEO_NO_ID_NOTE : VIDEO_UNPUBLISHED_NO_ID_NOTE;
+  }
+  return VIDEO_CREATED_NOT_READY_NOTE;
+}
+
+/** What `facebook_create_post` hands back from a resolved `POST /{page}/feed`. */
+interface CreatePostOutcome extends Record<string, unknown> {
+  readonly postId: string | null;
+}
+
+/**
+ * Tell the write gate what a resolved video create achieved. A `finish` Graph
+ * declined (`accepted:false`) is NOT a refusal: the video object exists from
+ * the `start` phase on, so the operator has something to reconcile — verify,
+ * then publish or delete — which is what `attempted` is defined for. Stamping
+ * it `applied` puts `status:"applied"` beside `accepted:false`; stamping it
+ * `failed` invites the retry that creates a duplicate (CC-PUB-1). The
+ * `file_url` delivery carries no flag; its ack is the video id, and a 2xx that
+ * named none is the same unconfirmed state (see {@link createPostVerdict}).
+ */
+function createVideoVerdict(outcome: CreateVideoOutcome): WriteResultVerdict {
+  return outcome.accepted === false || outcome.videoId === null
+    ? ATTEMPTED_VERDICT
+    : APPLIED_VERDICT;
+}
+
+/**
+ * Tell the write gate what a resolved `POST /{page}/feed` achieved. A create's
+ * ack IS its id: Graph answers `{ id }` (or `post_id` on media). A 2xx that
+ * names no usable post — `{}`, `{ success: true }`, an empty body, an id of the
+ * wrong type — is exactly the state the http layer files as C2-ambiguous when
+ * the body is lost after the status line: a post may now exist, and this call
+ * cannot vouch for it. `applied` beside `postId:null` reads as "published" and
+ * invites the retry that duplicates it; `attempted` says "verify first".
+ */
+function createPostVerdict(outcome: CreatePostOutcome): WriteResultVerdict {
+  return outcome.postId === null ? ATTEMPTED_VERDICT : APPLIED_VERDICT;
+}
+
+/**
+ * Tell the write gate whether a resolved `POST /{post-id}` actually changed the
+ * post (`WriteAction.classifyResult`).
+ *
+ * A 2xx whose body carries `success:false` (or any non-`true` flag) is Graph
+ * declining the edit: the post is untouched. Without this hook the gate would
+ * stamp the very same call `applied` in the envelope and journal it as a
+ * change, beside a `result.success:false` that says the opposite — two answers
+ * to the one question the envelope exists to answer.
+ */
+function updatePostVerdict(outcome: UpdatePostOutcome): WriteResultVerdict {
+  return outcome.success ? APPLIED_VERDICT : REFUSED_VERDICT;
+}
+
+/**
+ * The delete counterpart of {@link updatePostVerdict}. The already-absent path
+ * (CC-PUB-5) stays `applied`: the post is gone, which is the end state the
+ * operator asked for, and `alreadyAbsent:true` already says this call did not
+ * do the removing. Only a present post whose delete Graph refused is a failure.
+ */
+function deletePostVerdict(outcome: DeletePostOutcome): WriteResultVerdict {
+  return outcome.deleted || outcome.alreadyAbsent ? APPLIED_VERDICT : REFUSED_VERDICT;
+}
+
+/** The id of a freshly created post: `post_id` on the feed edge, `id` on media. */
+function createdPostId(body: unknown): string | null {
+  const ack = ackOf(body);
+  return ackId(ack.post_id) ?? ackId(ack.id) ?? null;
 }
 
 /**
@@ -495,14 +793,24 @@ function createdPostId(data: FeedPostResponse): string | null {
  * genuine rejection: nothing was created, so `failed` is honest.
  */
 function classifyPublishFailure(err: unknown): 'attempted' | 'failed' {
-  // The Reels layer already decided this: `ambiguous` means the finish phase
-  // returned something that neither confirms nor denies the publish.
+  // The Reels layer already decided this: `ambiguous` means a phase returned
+  // something that neither confirms nor denies it. Only the finish phase can
+  // publish, so an ambiguous start or transfer leaves no Reel that may be live.
   if (isReelPublishError(err)) {
-    return err.reel.kind === 'ambiguous' ? 'attempted' : 'failed';
+    return err.reel.kind === 'ambiguous' && err.reel.phase === 'finish'
+      ? 'attempted'
+      : 'failed';
   }
+  // Raised precisely because the carousel post may have landed.
+  if (err instanceof CarouselPostUnconfirmedError) return 'attempted';
   // A carousel wraps the underlying feed failure; classify what actually failed.
   const inner = err instanceof CarouselPostError ? err.cause : err;
   if (inner instanceof GraphApiError) {
+    // The http and media layers stamp `ambiguous` on outcomes the status line
+    // cannot classify — a body lost after HTTP 200, a 2xx photo upload that
+    // carried no id. Their `httpStatus` is the 2xx that was read, so the status
+    // rule alone would file a "may have landed" as a clean failure.
+    if (inner.action?.category === 'ambiguous') return 'attempted';
     return inner.httpStatus >= 500 || inner.httpStatus === 0 ? 'attempted' : 'failed';
   }
   // These are all raised before or instead of the create request.
@@ -515,6 +823,25 @@ function classifyPublishFailure(err: unknown): 'attempted' | 'failed' {
   }
   // Anything unrecognised (transport abort, timeout, socket reset) may well have
   // reached the wire — assume it did, so the journal never invites a blind retry.
+  return 'attempted';
+}
+
+/**
+ * Journal outcome for a failed `facebook_update_post` / `facebook_delete_post`.
+ *
+ * A Graph error keeps the gate's default: the http layer stamps `ambiguous` on
+ * a 5xx or a mid-flight fault on a write, and anything else it throws (a 4xx
+ * refusal, a provably connect-phase fault) is a clean `failed`. What escapes the
+ * client WITHOUT that classification is the caller's cancellation, re-thrown raw
+ * — and it can fire after the request was sent, even while the response body is
+ * arriving, i.e. after Graph applied the edit or the delete. Filing that as
+ * `failed` invites a second delete or a re-edit of a write that landed, so any
+ * non-Graph failure is `attempted`: verify before retrying.
+ */
+function classifyMutationFailure(err: unknown): 'attempted' | 'failed' {
+  if (err instanceof GraphApiError) {
+    return err.action?.category === 'ambiguous' ? 'attempted' : 'failed';
+  }
   return 'attempted';
 }
 
@@ -608,6 +935,15 @@ function buildCreatePost() {
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
+    // Every write in this package records the same three things on stderr: which
+    // Page it was aimed at, whether it was armed (`apply`, and the `plan_id`
+    // that bound it), and whether it reaches an audience now, later or never.
+    // The post CONTENT is absent by design — `message`, `link`, `photos` and
+    // `child_attachments` are model-composed text, URLs and file paths, and the
+    // log line is not a place to reprint them (04 §"Log hygiene"). What is left
+    // still answers the question an operator actually asks of a log: did this
+    // call put something in front of an audience, and when.
+    logFields: ['profile', 'apply', 'plan_id', 'published', 'scheduled_publish_time'],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, {
@@ -662,8 +998,9 @@ function buildCreatePost() {
           notPerformedNotice:
             'This was a dry run — nothing was posted and no photo was uploaded.',
           classifyOutcome: classifyPublishFailure,
+          classifyResult: createPostVerdict,
           metadata: { publishState: plan.publishState, photoCount: sources.length },
-          perform: async (): Promise<Record<string, unknown>> => {
+          perform: async (): Promise<CreatePostOutcome> => {
             const scope = requestScope(ctx, base.page);
             let attachedMedia: Readonly<Record<string, string>> = {};
             let photoIds: string[] = [];
@@ -688,7 +1025,7 @@ function buildCreatePost() {
             }
 
             try {
-              const res = await ctx.fbRequest<FeedPostResponse>(
+              const res = await ctx.fbRequest<unknown>(
                 feedPostRequest(
                   base.page.pageId,
                   { ...plan.params, ...attachedMedia },
@@ -701,13 +1038,22 @@ function buildCreatePost() {
                 publishState: plan.publishState,
                 ...(photoIds.length > 0 ? { photoIds } : {}),
                 ...(echo !== undefined ? { schedule: echo } : {}),
-                verifyNote: PUBLISH_VERIFY_NOTE,
+                verifyNote: publishVerifyNote(plan.publishState),
               };
             } catch (err) {
-              // The children exist but nothing references them: this call owns
-              // their cleanup (CC-MEDIA-10). The cleanup runs WITHOUT the call's
+              // On a clean rejection the children exist but nothing references
+              // them: this call owns their cleanup (CC-MEDIA-10). The cleanup runs WITHOUT the call's
               // signal so a cancelled post still tidies up after itself.
               if (photoIds.length === 0) throw err;
+              // A failure that may have landed leaves a post that may reference
+              // every child: deleting them would gut it, so hand the ids back.
+              if (classifyPublishFailure(err) === 'attempted') {
+                throw new CarouselPostUnconfirmedError({
+                  cause: err,
+                  photoIds,
+                  publishState: plan.publishState,
+                });
+              }
               const cleanup = await cleanupUnpublishedPhotos(media, photoIds, {
                 token: base.page.token,
               });
@@ -749,6 +1095,10 @@ function buildCreatePhotoPost() {
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
+    // `photo` is a URL or a path inside FB_MEDIA_DIR and `caption` is composed
+    // text; neither belongs on stderr, and the scheduling pair already says
+    // whether this became visible.
+    logFields: ['profile', 'apply', 'plan_id', 'published', 'scheduled_publish_time'],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, {
@@ -814,7 +1164,7 @@ function buildCreatePhotoPost() {
               pageId: base.page.pageId,
               publishState: plan.publishState,
               ...(echo !== undefined ? { schedule: echo } : {}),
-              verifyNote: PUBLISH_VERIFY_NOTE,
+              verifyNote: publishVerifyNote(plan.publishState),
             };
           },
         });
@@ -854,6 +1204,11 @@ function buildCreateVideoPost() {
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
+    // An upload is the longest-running write here, so the pre-handler line is
+    // often the only trace if the process dies mid-transfer. It records that a
+    // transfer was armed, not what was transferred: `video` is a file path and
+    // `description`/`title` are content.
+    logFields: ['profile', 'apply', 'plan_id', 'published', 'scheduled_publish_time'],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, {
@@ -918,11 +1273,12 @@ function buildCreateVideoPost() {
           notPerformedNotice:
             'This was a dry run — no bytes were uploaded and no video was created.',
           classifyOutcome: classifyPublishFailure,
+          classifyResult: createVideoVerdict,
           metadata: {
             publishState: plan.publishState,
             delivery: source.kind === 'url' ? 'file-url' : 'resumable-upload',
           },
-          perform: async (): Promise<Record<string, unknown>> => {
+          perform: async (): Promise<CreateVideoOutcome> => {
             const common = {
               pageId: base.page.pageId,
               publishState: plan.publishState,
@@ -930,21 +1286,30 @@ function buildCreateVideoPost() {
               // CC-MEDIA-7: "uploaded" is not "live".
               isPublishedAndProcessed: false,
               processingNote: VIDEO_CREATED_NOT_READY_NOTE,
-              verifyNote: PUBLISH_VERIFY_NOTE,
+              verifyNote:
+                plan.publishState === 'published'
+                  ? PUBLISH_VERIFY_NOTE
+                  : VIDEO_UNPUBLISHED_VERIFY_NOTE,
             };
 
             if (source.kind === 'url') {
-              const res = await ctx.fbRequest<FeedPostResponse>(
+              const res = await ctx.fbRequest<unknown>(
                 videoByUrlRequest(
                   base.page.pageId,
                   plan.params,
                   requestScope(ctx, base.page),
                 ),
               );
+              const videoId = ackId(ackOf(res.data).id) ?? null;
               return {
-                videoId: res.data.id ?? null,
+                videoId,
                 delivery: 'file-url',
                 ...common,
+                processingNote: videoProcessingNote(
+                  undefined,
+                  videoId,
+                  plan.publishState,
+                ),
               };
             }
 
@@ -991,6 +1356,11 @@ function buildCreateVideoPost() {
               resumes: result.resumes,
               accepted: result.success,
               ...common,
+              processingNote: videoProcessingNote(
+                result.success,
+                result.videoId,
+                plan.publishState,
+              ),
             };
           },
         });
@@ -1042,6 +1412,10 @@ function buildCreateReel() {
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
+    // Reels swap `published` for `video_state`, which is the argument that
+    // decides whether this goes live — and the Reels flow has no unpublish step,
+    // so that value is the one most worth having on stderr afterwards.
+    logFields: ['profile', 'apply', 'plan_id', 'video_state', 'scheduled_publish_time'],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, {
@@ -1155,6 +1529,9 @@ function buildCreateReel() {
             const { finish, transfer } = published;
             return {
               videoId: finish.videoId,
+              // The state that was REQUESTED on the finish call, echoed back —
+              // Graph's finish response carries no state to read, and the Reel
+              // is still encoding (`isPublishedAndProcessed: false` below).
               videoState: finish.videoState,
               postId: finish.postId ?? null,
               accepted: finish.success,
@@ -1208,6 +1585,20 @@ function memoizedPostState(
   };
 }
 
+/**
+ * The applied `verifyNote` of a post update. Only `publish_now` is a publish; an
+ * edit or a reschedule is not on the published listing's terms — a changed text
+ * or a moved time shows on the post itself, and a rescheduled post sits on the
+ * scheduled queue, not the published listing (CC-PUB-1).
+ */
+function updateVerifyNote(action: UpdatePostAction, postId: string): string {
+  if (action === 'publish_now') return PUBLISH_NOW_VERIFY_NOTE;
+  if (action === 'reschedule') {
+    return `A reschedule that times out may still have moved the post. Never re-send it blindly — verify with facebook_list_scheduled_posts (or facebook_get_post with post_id "${postId}"), comparing its scheduled_publish_time with the time in this plan.`;
+  }
+  return `An edit that times out may still have been applied. Never re-send it blindly — verify with facebook_get_post with post_id "${postId}", comparing it with the change in this plan.`;
+}
+
 function absentPostError(postId: string): ToolInputError {
   return new ToolInputError(
     'post_id',
@@ -1256,12 +1647,27 @@ function buildUpdatePost() {
         .min(1)
         .optional()
         .describe(
-          'action:"reschedule" only. ISO-8601 WITH an explicit offset. Must be more than 10 minutes and at most 75 days ahead, and at most 29 days after the post was originally created.',
+          'action:"reschedule" only. ISO-8601 WITH an explicit offset. Must be at least 10 minutes and at most 75 days ahead, and at most 29 days after the post was originally created.',
         ),
       page_timezone: pageTimezoneArg,
     }),
     annotations: MUTATE_ANNOTATIONS,
     writeTier: 'reversible',
+    // `action` IS the mutation: an edit overwrites text Graph does not keep, a
+    // publish_now reaches an audience, a reschedule moves the moment it does.
+    // The replacement `message` stays off the list — it is the content — while
+    // the two visibility booleans are state rather than content, and they are
+    // what a later "why is this post hidden/pinned" question needs.
+    logFields: [
+      'profile',
+      'apply',
+      'plan_id',
+      'post_id',
+      'action',
+      'is_hidden',
+      'is_pinned',
+      'scheduled_publish_time',
+    ],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, {
@@ -1271,6 +1677,26 @@ function buildUpdatePost() {
 
         const before = await readPostState(ctx.fbRequest, input.post_id, scope);
         if (!before.present) throw absentPostError(input.post_id);
+        // is_published:true on a live post is a no-op; previewing it as
+        // "Publish ... right now" and applying it would claim a publish that
+        // this call never caused.
+        if (input.action === 'publish_now' && before.isPublished === true) {
+          throw new ToolInputError(
+            'action',
+            `post ${input.post_id} is already published — publish_now has nothing to publish.`,
+            'Use action:"edit" to change a live post, or facebook_get_post to confirm its state.',
+          );
+        }
+        // A live post has no publish time left to move. Previewing "Move post … to
+        // <time>" and applying it would tell the operator the post now waits for
+        // that instant while it stays in front of the audience.
+        if (input.action === 'reschedule' && before.isPublished === true) {
+          throw new ToolInputError(
+            'action',
+            `post ${input.post_id} is already published — reschedule only moves a post that is still waiting to go live.`,
+            'To show this content at a later time, create a new scheduled post (facebook_create_post with scheduled_publish_time) and remove this one with facebook_delete_post.',
+          );
+        }
 
         const action: UpdatePostAction = input.action;
         const createdAtMs = createdAtMsOf(before);
@@ -1314,17 +1740,45 @@ function buildUpdatePost() {
           notPerformedNotice: 'This was a dry run — the post was NOT changed.',
           metadata: { action },
           readState: memoizedPostState(ctx, input.post_id, scope, before),
-          perform: async (): Promise<Record<string, unknown>> => {
-            const res = await ctx.fbRequest<{ success?: boolean }>(
-              updatePostRequest(input.post_id, plan.params, scope),
-            );
+          classifyOutcome: classifyMutationFailure,
+          classifyResult: updatePostVerdict,
+          perform: async (): Promise<UpdatePostOutcome> => {
+            let res;
+            try {
+              res = await ctx.fbRequest<unknown>(
+                updatePostRequest(input.post_id, plan.params, scope),
+              );
+            } catch (err) {
+              // 100/33 on a write is also "cannot be loaded due to missing
+              // permissions, or does not support this operation" — Graph's
+              // answer for a post another app created. Propagated raw it is
+              // mapped `not_found` ("treat it as already gone") about a post
+              // this call just read. Only a re-read that still finds the post
+              // may replace that verdict; any other outcome keeps the original.
+              if (!isPostAbsentError(err) || !before.present) throw err;
+              const after = await readPostState(
+                ctx.fbRequest,
+                input.post_id,
+                scope,
+              ).catch(() => {
+                throw err;
+              });
+              if (!after.present) throw err;
+              return {
+                postId: input.post_id,
+                action,
+                success: false,
+                changed: {},
+                note: `Graph refused the ${action} (${errorMessageOf(err)}), and post ${input.post_id} is still readable — it was NOT changed. ${EDIT_OWN_APP_NOTE}`,
+              };
+            }
             return {
               postId: input.post_id,
               action,
-              success: res.data.success ?? true,
+              success: confirmsWrite(res.data),
               changed: plan.params,
               ...(echo !== undefined ? { schedule: echo } : {}),
-              verifyNote: PUBLISH_VERIFY_NOTE,
+              verifyNote: updateVerifyNote(action, input.post_id),
             };
           },
         });
@@ -1354,6 +1808,11 @@ function buildDeletePost() {
     }),
     annotations: MUTATE_ANNOTATIONS,
     writeTier: 'irreversible',
+    // The one write with no undo gets the fullest record — and still not
+    // `confirm_token`. That value is the operator's out-of-band secret; the
+    // redactor would mask a known token, but an allowlist must not depend on the
+    // redactor having seen it first.
+    logFields: ['profile', 'apply', 'plan_id', 'post_id'],
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, { needTimezone: false });
@@ -1379,14 +1838,16 @@ function buildDeletePost() {
             'This was a dry run — the post was NOT deleted and still exists.',
           metadata: { presentAtPlanTime: before.present },
           readState: memoizedPostState(ctx, input.post_id, scope, before),
-          perform: async (): Promise<Record<string, unknown>> => {
+          classifyOutcome: classifyMutationFailure,
+          classifyResult: deletePostVerdict,
+          perform: async (): Promise<DeletePostOutcome> => {
             try {
-              const res = await ctx.fbRequest<{ success?: boolean }>(
+              const res = await ctx.fbRequest<unknown>(
                 deletePostRequest(input.post_id, scope),
               );
               return {
                 postId: input.post_id,
-                deleted: res.data.success ?? true,
+                deleted: confirmsWrite(res.data),
                 alreadyAbsent: false,
                 note: DELETE_PERMANENT_NOTE,
               };
@@ -1394,6 +1855,30 @@ function buildDeletePost() {
               // CC-PUB-5: "already gone" is the intended end state, not a failure
               // — but say plainly that THIS call deleted nothing.
               if (!isPostAbsentError(err)) throw err;
+              // 100/33 also means "cannot be loaded due to missing permissions,
+              // or does not support this operation" — Graph's answer for a post
+              // another app created. A post this call just read is only "already
+              // absent" once a re-read agrees; one that is still readable was
+              // NOT deleted, and calling it gone would hide a live post.
+              if (before.present) {
+                // A re-read that itself fails proves nothing either way, so the
+                // delete's own error stands instead of an unproven "gone".
+                const after = await readPostState(
+                  ctx.fbRequest,
+                  input.post_id,
+                  scope,
+                ).catch(() => {
+                  throw err;
+                });
+                if (after.present) {
+                  return {
+                    postId: input.post_id,
+                    deleted: false,
+                    alreadyAbsent: false,
+                    note: `Graph refused the delete (${errorMessageOf(err)}), and post ${input.post_id} is still readable — it was NOT deleted and still exists. ${EDIT_OWN_APP_NOTE}`,
+                  };
+                }
+              }
               return {
                 postId: input.post_id,
                 deleted: false,
@@ -1474,6 +1959,9 @@ function buildListScheduledPosts() {
       page_timezone: pageTimezoneArg,
     }),
     annotations: READ_ONLY_ANNOTATIONS,
+    // No `logFields`: the arguments here are the profile selector and paging, so
+    // the line could only say that a Page read its own drafts. The writes above
+    // are where the record earns its place.
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, { needTimezone: true });
@@ -1563,17 +2051,20 @@ function buildGetVideoStatus() {
     title: 'Get Video Status',
     description:
       "Poll where one video stands in Meta's pipeline: uploading, processing, " +
-      'ready or error. facebook_create_video_post returns a video_id long before ' +
+      'ready or error. facebook_create_video_post returns its `videoId` long before ' +
       'the video is playable, so read the state here instead of assuming a fresh ' +
       'video is live — `uploading` and `processing` are not terminal, so wait a ' +
       'few seconds and call again. Takes a video ID, never a post ID; whether a ' +
       'Reel ID resolves on this edge is UNVERIFIED against the live API.',
     inputSchema: z.object({
       profile: profileArg,
-      video_id: videoIdArg,
+      video_id: statusVideoIdArg,
     }),
     outputSchema: videoStatusOutputSchema,
     annotations: READ_ONLY_ANNOTATIONS,
+    // No `logFields`: this tool exists to be POLLED until an upload finishes, so
+    // one line per call is volume, not evidence — and the upload it polls was
+    // already recorded when facebook_create_video_post armed it.
     handler: (input, ctx) =>
       guarded(ctx, async () => {
         const base = await prepareBase(ctx, input, { needTimezone: false });
@@ -1603,10 +2094,17 @@ function buildGetVideoStatus() {
 /**
  * Build the `posts` package.
  *
- * `writeModeDefault: 'plan'` makes publishing plan-first even when the server
- * runs with `FB_WRITE_MODE=apply`: a post is visible to an audience the instant
- * it lands, so the preview is the operator's last checkpoint. The irreversible
- * delete ignores the mode entirely and always demands an explicit `plan_id`.
+ * `writeModeDefault: 'plan'` is only the default for a server that did not
+ * choose: an explicitly set `FB_WRITE_MODE=apply` overrides a package default
+ * outright (see `effectiveWriteMode`), so the default is NOT what keeps an
+ * unattended publish off the timeline. The per-call `requirePlanId` is: every
+ * create passes `publishesNow(...)` (the Reel spells it `video_state ===
+ * 'PUBLISHED'`) and the update passes `action === 'publish_now'`. A post is
+ * visible to an audience the instant it lands, so a `plan_id` from a preceding
+ * preview is required whatever mode the server runs in, and no write mode can
+ * substitute for it. The irreversible delete arrives at the same guarantee by a
+ * different route — its tier ignores the mode entirely and always demands an
+ * explicit `plan_id`.
  */
 export function createPostsPackage(): PackageSpec {
   return {

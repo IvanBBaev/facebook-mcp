@@ -12,10 +12,13 @@
 
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, constants as fsConstants } from 'node:fs';
 import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   realpath,
   rm,
   symlink,
@@ -30,7 +33,7 @@ import {
   fbOk,
   type FakeFbRequest,
 } from '../core/fakes/index.js';
-import { GraphApiError } from '../core/index.js';
+import { GraphApiError, ambiguousWriteAction, toGraphApiError } from '../core/index.js';
 import type {
   FbRequest,
   FbRequestFn,
@@ -264,7 +267,11 @@ test('detectPhotoContentType: magic numbers outrank a lying extension', () => {
     'image/tiff',
   );
   assert.equal(
-    detectPhotoContentType(bytes(0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 1), 'x.png'),
+    // ISO-BMFF `ftyp` plus a HEIF major brand (`heic`) — `ftyp` alone is also MP4.
+    detectPhotoContentType(
+      bytes(0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63),
+      'x.png',
+    ),
     'image/heic',
   );
 });
@@ -300,6 +307,33 @@ test('resolveRemoteMediaUrl: accepts and normalizes an https URL', () => {
   assert.equal(
     resolveRemoteMediaUrl('https://cdn.example.com:443/a b.jpg?v=1'),
     'https://cdn.example.com/a%20b.jpg?v=1',
+  );
+});
+
+// Regression coverage (anti-over-refusal): the CC-MEDIA-4 allowlist is a SCHEME
+// check and nothing more. Uppercase scheme spelling, an explicit non-default
+// port, a query string, an IP-literal host and a fragment are all legitimate
+// ways to address a public image and must never be swept up by the refusal.
+test('resolveRemoteMediaUrl: unusual but legitimate https URLs are accepted, not over-refused', () => {
+  assert.equal(
+    resolveRemoteMediaUrl('HTTPS://CDN.Example.com/Photo.JPG'),
+    'https://cdn.example.com/Photo.JPG',
+    'the scheme and host are case-normalized; the path is left alone',
+  );
+  assert.equal(
+    resolveRemoteMediaUrl('https://cdn.example.com:8443/a.jpg?sig=abc&exp=1'),
+    'https://cdn.example.com:8443/a.jpg?sig=abc&exp=1',
+    'a non-default port and a signed-URL query string survive intact',
+  );
+  assert.equal(
+    resolveRemoteMediaUrl('https://203.0.113.7/a.jpg'),
+    'https://203.0.113.7/a.jpg',
+    "an IP-literal host is Meta's problem to reach, not ours to police",
+  );
+  assert.equal(
+    resolveRemoteMediaUrl('https://[2001:db8::1]/a.jpg'),
+    'https://[2001:db8::1]/a.jpg',
+    'an IPv6 literal is not mistaken for embedded credentials',
   );
 });
 
@@ -726,6 +760,132 @@ test('single photo: a 2xx carrying no id is an AMBIGUOUS write, not a silent suc
   );
 });
 
+test('single photo: an id-less 2xx that still names a post_id hands that id to the operator (C2)', async () => {
+  // Graph answered without the photo id but WITH a post id: the write clearly
+  // landed as a post. Swallowing the one handle we were given would send the
+  // operator hunting the whole Page for "a stray photo" they could have looked
+  // up directly. The id must be surfaced, and only when it is a real string —
+  // never minted from a number that has already lost digits in JSON.parse.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ post_id: '777_888' }, {}, 201));
+
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE) }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous', 'still ambiguous — no photo id');
+      assert.equal(err.action?.retryable, false);
+      assert.match(
+        err.message,
+        /post id 777_888/,
+        'the post id Graph DID report is named, so the operator can go straight to it',
+      );
+      assert.match(
+        err.action?.operatorText ?? '',
+        /777_888/,
+        'the structured action detail carries the same handle',
+      );
+      return true;
+    },
+  );
+});
+
+// Regression coverage (CC-NET-2, mirrored from the video/reels lanes): a NUMERIC
+// id off the wire is never minted into a string. Graph ids run past the
+// safe-integer range, so `String(12345)` could be a plausible handle that has
+// already lost digits in JSON.parse — the honest answer is "no id".
+test('single photo: a numeric id or post_id is never minted into a string handle (CC-NET-2)', async () => {
+  const fb = createFakeFbRequest();
+
+  fb.enqueue(fbOk({ id: 12345 }));
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE) }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.doesNotMatch(
+        err.message,
+        /12345/,
+        'the number is not echoed as if it were a handle',
+      );
+      return true;
+    },
+  );
+
+  // A numeric post_id next to a good photo id: the photo is a success and the
+  // post id is dropped, not stringified.
+  fb.enqueue(fbOk({ id: 'photo-1', post_id: 777888 }));
+  const uploaded = await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+  });
+  assert.deepEqual(uploaded, { id: 'photo-1' });
+
+  // Both numeric: there is nothing honest to name, so the generic hint stands.
+  fb.enqueue(fbOk({ id: 12345, post_id: 777888 }));
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE) }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.doesNotMatch(err.message, /777888|12345/);
+      assert.match(err.message, /check the Page for a stray photo first/);
+      return true;
+    },
+  );
+});
+
+// Regression coverage (CC-NET-2): `fbRequest` CASTS a 2xx body to the declared
+// type — a bodiless 2xx arrives as `undefined`, a JSON literal as itself and a
+// non-JSON body as its raw string. None of these carries a photo id, so every
+// one must be the C2 ambiguous error, never a TypeError from `.id` on a
+// non-object and never a silent success.
+test('single photo: a 2xx whose body is not an object is ambiguous, not a crash (CC-NET-2)', async () => {
+  const fb = createFakeFbRequest();
+  const bodies: unknown[] = [
+    undefined,
+    null,
+    false,
+    0,
+    '',
+    'null',
+    '<html>maintenance</html>',
+    [],
+  ];
+  for (const body of bodies) {
+    fb.enqueue(fbOk(body, {}, 200));
+    await assert.rejects(
+      uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE) }),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof GraphApiError,
+          `body ${JSON.stringify(body)} must be a GraphApiError`,
+        );
+        assert.equal(err.action?.category, 'ambiguous');
+        assert.equal(err.httpStatus, 200);
+        return true;
+      },
+    );
+  }
+  assert.equal(
+    fb.calls.length,
+    bodies.length,
+    'each body cost exactly one call — no retry',
+  );
+});
+
+// Regression coverage (C10, anti-over-refusal): a caption is content, not a
+// format this module validates. Newlines, emoji, hashtags, `&`/`=` and quotes
+// all ride through the JSON body verbatim — there is no encoding step here for
+// them to be mangled by, and no length or character policy to trip over.
+test('single photo: a caption with newlines, emoji and form-hostile characters is passed verbatim (C10)', async () => {
+  const caption = 'Line one\nLine two — “quotes” & a=b?c #hashtag 🎉';
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1', post_id: '777_888' }));
+
+  await uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE), caption });
+  assert.equal(jsonAt(fb, 0).body?.caption, caption);
+});
+
 test('single photo: a Graph error propagates unchanged (mapping stays in the client)', async () => {
   const fb = createFakeFbRequest();
   const boom = new GraphApiError('(#200) Permissions error', {
@@ -741,6 +901,101 @@ test('single photo: a Graph error propagates unchanged (mapping stays in the cli
       return true;
     },
   );
+});
+
+test('url photo: Graph code 324 (image could not be fetched/read) names the URL as the problem, not "unclassified"', async () => {
+  const fb = createFakeFbRequest();
+  const original = toGraphApiError(
+    {
+      code: 324,
+      message: '(#324) Missing or invalid image file',
+      type: 'OAuthException',
+      fbtrace_id: 'TRACE324',
+    },
+    400,
+  );
+  fb.enqueue(fbErr(original));
+
+  const err = await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+  }).catch((e: unknown) => e);
+
+  assert.ok(err instanceof GraphApiError, 'still a GraphApiError');
+  assert.equal(err.code, 324, 'the Graph code is preserved');
+  assert.equal(err.fbtraceId, 'TRACE324', 'the trace id is preserved');
+  assert.equal(err.httpStatus, 400);
+  assert.equal(err.message, original.message, 'the Graph line is not re-worded');
+  assert.equal(err.cause, original, 'the original rides as cause');
+  assert.equal(
+    err.action?.category,
+    'validation',
+    `a URL Facebook could not turn into an image is a source problem, got ${String(err.action?.category)}`,
+  );
+  assert.equal(err.action?.retryable, false);
+  assert.ok(
+    err.action?.operatorText.includes(REMOTE),
+    `the guidance names the URL: ${String(err.action?.operatorText)}`,
+  );
+  assert.match(err.action?.operatorText ?? '', /publicly reachable/);
+  assert.doesNotMatch(err.action?.operatorText ?? '', /unclassified/i);
+  assert.equal(fb.calls.length, 1, 'never re-sent');
+});
+
+test('url photo: a code-100 "could not fetch" refusal names the URL, not a generic bad argument', async () => {
+  const fb = createFakeFbRequest();
+  const original = toGraphApiError(
+    { code: 100, message: '(#100) Could not fetch the image from the given url' },
+    400,
+  );
+  fb.enqueue(fbErr(original));
+
+  const err = await uploadUnpublishedPhotos(makeDeps(fb), {
+    pageId: PAGE_ID,
+    sources: [url(REMOTE)],
+  }).catch((e: unknown) => e);
+
+  assert.ok(err instanceof MultiPhotoUploadError);
+  const cause = err.cause;
+  assert.ok(cause instanceof GraphApiError);
+  assert.equal(cause.code, 100);
+  assert.equal(cause.action?.category, 'validation');
+  assert.ok(
+    cause.action?.operatorText.includes(REMOTE),
+    `the guidance names the URL: ${String(cause.action?.operatorText)}`,
+  );
+  assert.equal(
+    err.cleanup.unconfirmedUploads,
+    undefined,
+    'a clean fetch refusal created nothing, so no possible orphan is reported',
+  );
+});
+
+test('url photo: an unrelated code-100 refusal and a local-file 324 keep the transport verdict', async (t) => {
+  const fb = createFakeFbRequest();
+  const unrelated = toGraphApiError(
+    { code: 100, message: '(#100) Invalid parameter: targeting' },
+    400,
+  );
+  fb.enqueue(fbErr(unrelated));
+  const first = await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+  }).catch((e: unknown) => e);
+  assert.equal(first, unrelated, 'a refusal about another argument is not re-worded');
+
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'a.png'), pngBytes());
+  const local = toGraphApiError(
+    { code: 324, message: '(#324) Missing or invalid image file' },
+    400,
+  );
+  fb.enqueue(fbErr(local));
+  const second = await uploadPhoto(makeDeps(fb, { mediaDir: fx.mediaDir }), {
+    pageId: PAGE_ID,
+    source: { kind: 'local', path: 'a.png' },
+  }).catch((e: unknown) => e);
+  assert.equal(second, local, 'there is no URL to blame on the multipart path');
 });
 
 // ---------------------------------------------------------------------------
@@ -888,6 +1143,204 @@ test('multi photo: each child is uploaded unpublished and returned in source ord
     assert.equal(call.token, PAGE_TOKEN);
     assert.equal(call.path, '/777/photos');
   }
+});
+
+// ---------------------------------------------------------------------------
+// Verify tools — which read can show an ambiguous photo write (wave 18)
+// ---------------------------------------------------------------------------
+
+test('verify tool: a published photo upload names facebook_list_posts on both protocols', async (t) => {
+  // A lost response on a published photo leaves a Page post that only the
+  // published listing can show; without `verifyTool` the transport's guidance
+  // names no read at all, so the model cannot check before deciding to retry.
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'shot.png'), pngBytes());
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1', post_id: '777_1' })).enqueue(
+    fbOk({ id: 'photo-2', post_id: '777_2' }),
+  );
+  const deps = makeDeps(fb, { mediaDir: fx.mediaDir });
+
+  await uploadPhoto(deps, { pageId: PAGE_ID, source: url(REMOTE) });
+  await uploadPhoto(deps, { pageId: PAGE_ID, source: local('shot.png') });
+
+  assert.equal(jsonAt(fb, 0).verifyTool, 'facebook_list_posts');
+  assert.equal(multipartAt(fb, 1).verifyTool, 'facebook_list_posts');
+});
+
+test('verify tool: a scheduled photo names facebook_list_scheduled_posts', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1' }));
+
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    published: false,
+    extraParams: { scheduled_publish_time: 1_900_000_000 },
+  });
+
+  assert.equal(jsonAt(fb, 0).verifyTool, 'facebook_list_scheduled_posts');
+});
+
+test('verify tool: a published no_story photo names no listing', async () => {
+  // `no_story` publishes the photo WITHOUT a feed story, so facebook_list_posts
+  // can never show it. Naming that listing tells the model to look where the
+  // write cannot appear, read "absent", and retry into a duplicate photo.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1' }))
+    .enqueue(fbOk({ id: 'photo-2' }))
+    .enqueue(fbOk({ id: 'photo-3' }));
+
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    extraParams: { no_story: true },
+  });
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    extraParams: { no_story: 'true' },
+  });
+  // An explicit `no_story: false` still produces a story on the published listing.
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    extraParams: { no_story: false },
+  });
+
+  assert.equal(jsonAt(fb, 0).verifyTool, undefined);
+  assert.equal(jsonAt(fb, 1).verifyTool, undefined);
+  assert.equal(jsonAt(fb, 2).verifyTool, 'facebook_list_posts');
+});
+
+test('verify tool: a draft photo and an unpublished carousel child name no listing', async () => {
+  // Regression coverage: no listing tool can show an unpublished photo, so the
+  // guidance must stay neutral rather than name a read that can never show it.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1' }))
+    .enqueue(fbOk({ id: 'ph1' }))
+    .enqueue(fbOk({ id: 'ph2' }));
+
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    published: false,
+  });
+  await uploadUnpublishedPhotos(makeDeps(fb), {
+    pageId: PAGE_ID,
+    sources: [url(REMOTE), url('https://cdn.example.com/c.jpg')],
+  });
+
+  assert.equal(fb.calls.length, 3);
+  for (const call of fb.calls) assert.equal(call.verifyTool, undefined);
+});
+
+test('verify tool: an id-less 2xx on a published photo points at facebook_list_posts', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({}, {}, 200));
+
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE) }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.nextTool, 'facebook_list_posts');
+      assert.match(err.action?.operatorText ?? '', /verify via facebook_list_posts/);
+      return true;
+    },
+  );
+});
+
+test('verify tool: an id-less 2xx on a scheduled photo points at facebook_list_scheduled_posts', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({}, {}, 200));
+
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), {
+      pageId: PAGE_ID,
+      source: url(REMOTE),
+      published: false,
+      extraParams: { scheduled_publish_time: 1_900_000_000 },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.nextTool, 'facebook_list_scheduled_posts');
+      return true;
+    },
+  );
+});
+
+test('verify tool: an id-less 2xx on an unpublished child names no listing', async () => {
+  // Regression coverage: an unpublished child is on no listing.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({}, {}, 200));
+
+  await assert.rejects(
+    uploadPhoto(makeDeps(fb), { pageId: PAGE_ID, source: url(REMOTE), published: false }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.category, 'ambiguous');
+      assert.equal(err.action?.nextTool, undefined);
+      return true;
+    },
+  );
+});
+
+test('multi photo: a throwing progress sink never destroys children that already uploaded', async () => {
+  // The tools layer bridges onProgress onto an MCP progress notification, which
+  // can throw on a closing transport (CC-MCP-1). Reporting is advisory: a failed
+  // notification must not delete children Graph has already accepted, and must
+  // not blame a child that uploaded cleanly.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'ph1' })).enqueue(fbOk({ id: 'ph2' }));
+  const logger = makeLogger();
+  let sinkCalls = 0;
+
+  const result = await uploadUnpublishedPhotos(makeDeps(fb, { logger }), {
+    pageId: PAGE_ID,
+    sources: [url(REMOTE), url(REMOTE)],
+    token: PAGE_TOKEN,
+    onProgress: () => {
+      sinkCalls += 1;
+      throw new Error('progress notification failed');
+    },
+  });
+
+  assert.equal(sinkCalls, 2, 'the sink is still offered every accepted child');
+  assert.deepEqual(
+    [...result.children],
+    [
+      { id: 'ph1', index: 0 },
+      { id: 'ph2', index: 1 },
+    ],
+  );
+  assert.equal(fb.calls.length, 2, 'no DELETE was issued against a successful child');
+  assert.ok(
+    logger.entries.some((e) => e.level === 'warn' && /progress sink/.test(e.msg)),
+    'the contained throw is logged, never silently dropped',
+  );
+});
+
+test('multi photo: a broken logger cannot turn a contained sink throw into a failure', async () => {
+  // Containing the sink throw is pointless if the log call that records it can
+  // fail the same upload — the rule `cleanupNeverThrows` already applies to the
+  // cleanup pass (CC-MEDIA-10) holds for progress bookkeeping too.
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'ph1' })).enqueue(fbOk({ id: 'ph2' }));
+
+  const result = await uploadUnpublishedPhotos(
+    makeDeps(fb, { logger: makeBrokenLogger() }),
+    {
+      pageId: PAGE_ID,
+      sources: [url(REMOTE), url(REMOTE)],
+      onProgress: () => {
+        throw new Error('progress notification failed');
+      },
+    },
+  );
+
+  assert.deepEqual([...result.children.map((child) => child.id)], ['ph1', 'ph2']);
+  assert.equal(fb.calls.length, 2, 'no DELETE was issued against a successful child');
 });
 
 test('attachedMediaParams: indexed /feed params in child order; empty for no children', () => {
@@ -1050,7 +1503,7 @@ test('CC-MEDIA-10: a cleanup failure reports the orphan IDs and never masks the 
     [...err.cleanup.failures],
     [
       { id: 'ph1', message: 'DELETE ph1 exploded' },
-      { id: 'ph2', message: 'Graph reported success:false for the delete' },
+      { id: 'ph2', message: 'Graph did not confirm the delete (success: false)' },
     ],
   );
   assert.match(err.message, /ph1, ph2/);
@@ -1224,6 +1677,30 @@ test('cleanupUnpublishedPhotos: an explicitly passed signal is used for the DELE
   assert.equal(jsonAt(fb, 0).signal, controller.signal, 'the caller opts in explicitly');
 });
 
+test('cleanupUnpublishedPhotos: a non-boolean success flag is a decline, not a delete', async () => {
+  const fb = createFakeFbRequest();
+  // Graph is not disciplined about JSON types on this edge: a REFUSED delete can
+  // arrive as the string "false", as `0`, or as `null`. Every one of those is
+  // Facebook saying the photo is still there, so every one of them belongs in
+  // `orphans` — telling the operator the Page was cleaned up while unpublished
+  // media survives is exactly the failure CC-MEDIA-10 exists to prevent.
+  fb.enqueue(fbOk({ success: 'false' }))
+    .enqueue(fbOk({ success: 0 }))
+    .enqueue(fbOk({ success: null }))
+    .enqueue(fbOk({ success: true }));
+
+  const report = await cleanupUnpublishedPhotos(makeDeps(fb), ['a', 'b', 'c', 'd']);
+
+  assert.deepEqual([...report.deleted], ['d'], 'only an explicit true confirms');
+  assert.deepEqual([...report.orphans], ['a', 'b', 'c']);
+  assert.deepEqual(
+    report.failures.map((f) => f.id),
+    ['a', 'b', 'c'],
+    'failures line up with orphans',
+  );
+  assert.match(describeOrphans(report) ?? '', /3 unpublished photo\(s\)/);
+});
+
 test('describeOrphans: silent on a clean report, actionable when something survived', () => {
   assert.equal(describeOrphans({ deleted: ['a'], orphans: [], failures: [] }), undefined);
   const note = describeOrphans({
@@ -1237,4 +1714,371 @@ test('describeOrphans: silent on a clean report, actionable when something survi
   assert.match(note ?? '', /2 unpublished photo\(s\)/);
   assert.match(note ?? '', /DELETE \/\{photo-id\}/);
   assert.match(note ?? '', /x, y/);
+});
+
+// ---------------------------------------------------------------------------
+// Wave 11 — ambiguous child uploads, read-time races, ISO-BMFF brands
+// ---------------------------------------------------------------------------
+
+/** A C2-ambiguous upload failure, shaped exactly as the http client throws it. */
+function ambiguousUploadFailure(detail: string): GraphApiError {
+  return new GraphApiError(
+    `ambiguous write outcome (${detail}) — do NOT retry; verify first`,
+    { code: 0, httpStatus: 502, action: ambiguousWriteAction({ detail }) },
+  );
+}
+
+test('CC-MEDIA-10: an AMBIGUOUS child upload is reported as a possible orphan, not as "nothing left behind"', async () => {
+  const fb = createFakeFbRequest();
+  const boom = ambiguousUploadFailure('HTTP 502 on POST');
+  fb.enqueue(fbOk({ id: 'ph1' }))
+    .enqueue(fbOk({ id: 'ph2' }))
+    .enqueue(fbErr(boom)) // photo 3 of 5: may have landed, id never returned
+    .enqueue(fbOk({ success: true }))
+    .enqueue(fbOk({ success: true }));
+
+  const err = await rejectsMultiPhotoError(
+    uploadUnpublishedPhotos(makeDeps(fb), {
+      pageId: PAGE_ID,
+      sources: [url(REMOTE), url(REMOTE), url(REMOTE), url(REMOTE), url(REMOTE)],
+    }),
+  );
+
+  // Exactly children 1-2 are deleted; photos 4-5 were never attempted.
+  assert.deepEqual([...err.cleanup.deleted], ['ph1', 'ph2']);
+  assert.deepEqual([...err.cleanup.orphans], []);
+  assert.equal(fb.calls.length, 5);
+  // ...but photo 3 itself may exist, and the operator must be told so.
+  assert.deepEqual(
+    (err.cleanup.unconfirmedUploads ?? []).map((u) => u.index),
+    [2],
+    'the ambiguous upload is carried on the report',
+  );
+  const note = describeOrphans(err.cleanup);
+  assert.ok(note !== undefined, 'a possible orphan is not "nothing was left behind"');
+  assert.match(note, /photo 3/);
+  assert.match(note, /photo library/);
+  assert.match(err.message, /photo 3 of 5 failed to upload/);
+  assert.match(err.message, /may exist/);
+});
+
+test('CC-MEDIA-10: an id-less 2xx on the FIRST child is still a possible orphan (no DELETE possible)', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({})); // 2xx, no photo id: ambiguous
+
+  const err = await rejectsMultiPhotoError(
+    uploadUnpublishedPhotos(makeDeps(fb), {
+      pageId: PAGE_ID,
+      sources: [url(REMOTE), url(REMOTE)],
+    }),
+  );
+  assert.equal(err.failedIndex, 0);
+  assert.equal(fb.calls.length, 1, 'nothing to DELETE by id');
+  assert.deepEqual(
+    (err.cleanup.unconfirmedUploads ?? []).map((u) => u.index),
+    [0],
+  );
+  assert.match(describeOrphans(err.cleanup) ?? '', /photo 1/);
+});
+
+test('CC-MEDIA-10: a non-Graph fault mid-upload (cancellation) is a possible orphan too', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'ph1' }))
+    .enqueue(fbErr(new Error('This operation was aborted')))
+    .enqueue(fbOk({ success: true }));
+
+  const err = await rejectsMultiPhotoError(
+    uploadUnpublishedPhotos(makeDeps(fb), {
+      pageId: PAGE_ID,
+      sources: [url(REMOTE), url(REMOTE)],
+    }),
+  );
+  assert.deepEqual([...err.cleanup.deleted], ['ph1']);
+  assert.deepEqual(
+    (err.cleanup.unconfirmedUploads ?? []).map((u) => u.index),
+    [1],
+  );
+  assert.match(describeOrphans(err.cleanup) ?? '', /photo 2/);
+});
+
+test('CC-MEDIA-10: a clean Graph refusal or a local read failure adds no possible-orphan note', async (t) => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'ph1' }))
+    .enqueue(
+      fbErr(new GraphApiError('(#100) Invalid photo', { code: 100, httpStatus: 400 })),
+    )
+    .enqueue(fbOk({ success: true }));
+  const refused = await rejectsMultiPhotoError(
+    uploadUnpublishedPhotos(makeDeps(fb), {
+      pageId: PAGE_ID,
+      sources: [url(REMOTE), url(REMOTE)],
+    }),
+  );
+  assert.equal(refused.cleanup.unconfirmedUploads, undefined);
+  assert.equal(describeOrphans(refused.cleanup), undefined);
+
+  // A file that vanished before its upload never reached the wire.
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'a.png'), pngBytes());
+  const fb2 = createFakeFbRequest();
+  const fbRequest: FbRequestFn = async <T = unknown>(
+    req: FbRequest,
+  ): Promise<FbResponse<T>> => {
+    const res = await fb2.fn<T>(req);
+    await rm(join(fx.mediaDir, 'a.png'), { force: true });
+    return res;
+  };
+  fb2.enqueue(fbOk({ id: 'ph1' })).enqueue(fbOk({ success: true }));
+  const vanished = await rejectsMultiPhotoError(
+    uploadUnpublishedPhotos(
+      { fbRequest, mediaDir: fx.mediaDir },
+      { pageId: PAGE_ID, sources: [url(REMOTE), local('a.png')] },
+    ),
+  );
+  assert.ok(vanished.cause instanceof MediaSourceError);
+  assert.equal(vanished.cleanup.unconfirmedUploads, undefined);
+  assert.equal(describeOrphans(vanished.cleanup), undefined);
+});
+
+test('describeOrphans: names both the orphan ids and the unconfirmed uploads', () => {
+  const note = describeOrphans({
+    deleted: [],
+    orphans: ['x'],
+    failures: [{ id: 'x', message: 'nope' }],
+    unconfirmedUploads: [{ index: 3, message: 'HTTP 503' }],
+  });
+  assert.match(note ?? '', /x\./);
+  assert.match(note ?? '', /photo 4/);
+});
+
+test('CC-MEDIA-5: a file swapped for a FIFO after validation is refused, not read forever', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('no FIFOs on win32');
+    return;
+  }
+  const fx = await mediaFixture(t);
+  const a = join(fx.mediaDir, 'a.png');
+  const b = join(fx.mediaDir, 'b.png');
+  await writeFile(a, pngBytes());
+  await writeFile(b, pngBytes());
+  // If the read blocked on the FIFO, give it a writer so the process can exit.
+  t.after(async () => {
+    try {
+      const w = await open(b, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+      await w.close();
+    } catch {
+      // No blocked reader (ENXIO) — nothing to unblock.
+    }
+  });
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.protocol === 'multipart', fbOk({ id: 'ph1' }), 1).on(
+    (req) => req.method === 'DELETE',
+    fbOk({ success: true }),
+  );
+  const fbRequest: FbRequestFn = async <T = unknown>(
+    req: FbRequest,
+  ): Promise<FbResponse<T>> => {
+    const res = await fb.fn<T>(req);
+    if (req.method === 'POST') {
+      await rm(b, { force: true });
+      execFileSync('mkfifo', [b]);
+    }
+    return res;
+  };
+
+  let timer: NodeJS.Timeout | undefined;
+  const hung = new Promise<'hung'>((resolve) => {
+    timer = setTimeout(() => {
+      resolve('hung');
+    }, 2000);
+  });
+  const outcome = await Promise.race([
+    uploadUnpublishedPhotos(
+      { fbRequest, mediaDir: fx.mediaDir },
+      { pageId: PAGE_ID, sources: [local('a.png'), local('b.png')] },
+    ).then(
+      () => 'resolved' as const,
+      (err: unknown) => err,
+    ),
+    hung,
+  ]);
+  clearTimeout(timer);
+  assert.notEqual(outcome, 'hung', 'the upload blocked forever opening a FIFO');
+  assert.ok(outcome instanceof MultiPhotoUploadError, `got ${String(outcome)}`);
+  const cause: unknown = outcome.cause;
+  assert.ok(cause instanceof MediaSourceError);
+  assert.equal(cause.reason, 'not_a_regular_file');
+  assert.deepEqual([...outcome.cleanup.deleted], ['ph1']);
+});
+
+test('readLocalPhoto: a file that grows after the size check never buffers past the ceiling', async (t) => {
+  const fx = await mediaFixture(t);
+  const target = join(fx.mediaDir, 'grow.png');
+  await writeFile(target, pngBytes('ab')); // 10 bytes, under the 16-byte ceiling
+
+  // Grow the file right after the handle's own size check, i.e. in the window
+  // between that check and the read.
+  const probe = await open(target, 'r');
+  const proto = Object.getPrototypeOf(probe) as {
+    stat: (...a: unknown[]) => Promise<unknown>;
+  };
+  await probe.close();
+  const original = proto.stat;
+  proto.stat = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
+    const info = await original.apply(this, args);
+    appendFileSync(target, new Uint8Array(100));
+    return info;
+  };
+  try {
+    await rejectsMediaSourceError(
+      readLocalPhoto('grow.png', { mediaDir: fx.mediaDir, maxBytes: 16 }),
+      'file_too_large',
+    );
+  } finally {
+    proto.stat = original;
+  }
+});
+
+test('readLocalPhoto: a file of exactly the ceiling is accepted, one byte more is not', async (t) => {
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'exact.png'), pngBytes('12345678')); // 16 bytes
+  const file = await readLocalPhoto('exact.png', { mediaDir: fx.mediaDir, maxBytes: 16 });
+  assert.equal(file.bytes, 16);
+  assert.equal(file.data.byteLength, 16);
+  await rejectsMediaSourceError(
+    readLocalPhoto('exact.png', { mediaDir: fx.mediaDir, maxBytes: 15 }),
+    'file_too_large',
+  );
+});
+
+test('detectPhotoContentType: an ISO-BMFF VIDEO is not labelled image/heic — the ftyp brand decides', () => {
+  const box = (brand: string): Uint8Array =>
+    Uint8Array.from([
+      0,
+      0,
+      0,
+      0x18,
+      ...Buffer.from(`ftyp${brand}`, 'latin1'),
+      0,
+      0,
+      0,
+      0,
+    ]);
+  // An MP4 / QuickTime file renamed to .jpg must not travel as a HEIC image.
+  assert.equal(detectPhotoContentType(box('isom'), 'clip.jpg'), 'image/jpeg');
+  assert.equal(detectPhotoContentType(box('mp42'), 'clip.bin'), FALLBACK_CONTENT_TYPE);
+  assert.equal(detectPhotoContentType(box('qt  '), 'clip.bin'), FALLBACK_CONTENT_TYPE);
+  // Real HEIF brands still sniff as HEIC whatever the extension says.
+  for (const brand of ['heic', 'heix', 'hevc', 'mif1', 'msf1']) {
+    assert.equal(detectPhotoContentType(box(brand), 'x.jpg'), 'image/heic', brand);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Wave 21 — containment and cleanup truthfulness
+// ---------------------------------------------------------------------------
+
+test('CC-MEDIA-5: with a symlinked FB_MEDIA_DIR, a missing file under it is file_not_found, not outside', async (t) => {
+  const fx = await mediaFixture(t);
+  // FB_MEDIA_DIR configured through a symlink (macOS `/tmp`, `/var` and many
+  // home-directory layouts are exactly this). An absolute path spelled under the
+  // configured directory IS inside the allowlist — a missing file there must be
+  // reported as missing, not as a path that escapes the directory.
+  const linked = join(fx.root, 'media-link');
+  await symlink(fx.mediaDir, linked, 'junction');
+  await writeFile(join(fx.mediaDir, 'real.png'), pngBytes());
+
+  // Control: an existing file spelled through the link resolves fine.
+  const ok = await resolveLocalMediaPath(join(linked, 'real.png'), { mediaDir: linked });
+  assert.equal(ok.path, join(fx.mediaDir, 'real.png'));
+
+  const err = await rejectsMediaSourceError(
+    resolveLocalMediaPath(join(linked, 'nope.png'), { mediaDir: linked }),
+    'file_not_found',
+  );
+  assert.doesNotMatch(err.message, /outside/);
+  // A missing path genuinely outside is still reported as the boundary.
+  await rejectsMediaSourceError(
+    resolveLocalMediaPath(join(fx.outside, 'nope.png'), { mediaDir: linked }),
+    'outside_media_dir',
+  );
+});
+
+test('cleanupUnpublishedPhotos: a bare false / "false" / null body is a decline, not a delete', async () => {
+  const fb = createFakeFbRequest();
+  // Graph answers some DELETEs with a bare JSON boolean instead of
+  // `{success:…}`. A bare `false` is Facebook refusing the delete; counting it
+  // as confirmed tells the operator an orphan is gone while it survives.
+  fb.enqueue(fbOk(false))
+    .enqueue(fbOk('false'))
+    .enqueue(fbOk(null))
+    .enqueue(fbOk(true))
+    .enqueue(fbOk(undefined));
+
+  const report = await cleanupUnpublishedPhotos(makeDeps(fb), ['a', 'b', 'c', 'd', 'e']);
+
+  assert.deepEqual(
+    [...report.deleted],
+    ['d', 'e'],
+    'bare true and a bodiless 2xx confirm',
+  );
+  assert.deepEqual([...report.orphans], ['a', 'b', 'c']);
+  assert.match(report.failures[0]?.message ?? '', /false/);
+});
+
+test('CC-MEDIA-5: a directory swapped for an outbound symlink after validation is never uploaded from', async (t) => {
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'a.png'), pngBytes('first'));
+  await mkdir(join(fx.mediaDir, 'sub'));
+  await writeFile(join(fx.mediaDir, 'sub', 'b.png'), pngBytes('allowed'));
+  await writeFile(join(fx.outside, 'b.png'), pngBytes('SECRET-OUTSIDE'));
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.protocol === 'multipart', fbOk({ id: 'ph1' })).on(
+    (req) => req.method === 'DELETE',
+    fbOk({ success: true }),
+  );
+
+  // While the first upload is in flight (after phase-1 validation accepted
+  // `sub/b.png`), the INTERMEDIATE directory is swapped for a symlink pointing
+  // outside FB_MEDIA_DIR. O_NOFOLLOW guards only the final path component, so
+  // the read must re-prove containment itself.
+  let swapped = false;
+  const fbRequest: FbRequestFn = async <T = unknown>(
+    req: FbRequest,
+  ): Promise<FbResponse<T>> => {
+    const res = await fb.fn<T>(req);
+    if (!swapped) {
+      swapped = true;
+      await rm(join(fx.mediaDir, 'sub'), { recursive: true, force: true });
+      await symlink(fx.outside, join(fx.mediaDir, 'sub'), 'junction');
+    }
+    return res;
+  };
+  const deps: MediaPhotoDeps = { fbRequest, mediaDir: fx.mediaDir };
+
+  let outcome: unknown;
+  try {
+    await uploadUnpublishedPhotos(deps, {
+      pageId: PAGE_ID,
+      sources: [local('a.png'), local('sub/b.png')],
+    });
+    outcome = 'resolved';
+  } catch (err) {
+    outcome = err;
+  }
+  const secret = Buffer.from('SECRET-OUTSIDE', 'utf8');
+  const leaked = fb.calls.some(
+    (call) =>
+      call.protocol === 'multipart' &&
+      call.files.some((f) => Buffer.from(f.data).includes(secret)),
+  );
+  assert.equal(leaked, false, 'bytes from outside FB_MEDIA_DIR reached the wire');
+  assert.ok(
+    outcome instanceof MultiPhotoUploadError,
+    `expected MultiPhotoUploadError, got ${String(outcome)}`,
+  );
+  const cause: unknown = outcome.cause;
+  assert.ok(cause instanceof MediaSourceError);
+  assert.equal(cause.reason, 'outside_media_dir');
+  assert.deepEqual([...outcome.cleanup.deleted], ['ph1']);
 });

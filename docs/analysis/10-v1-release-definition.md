@@ -27,10 +27,26 @@ reading and publishing land together in `0.2.0`, then insights and moderation in
 `0.3.0`. Phases are development gates and did not move; only their packaging into
 versions did. Nothing before `1.0.0` is published, so no consumer was affected.
 
+✎ **Amended 2026-08-25.** The history ran past the bottom of this table. The
+milestones were re-cut again as the packages landed, and the released line reads
+`0.5.0` (moderation + messages), `0.6.0` (ads read + control, shipped off by
+default) and `0.7.0` (distribution rail, the first public release). The `1.0.0`
+and `1.1.0` rows are unchanged and still binding: `1.0.0` is the live-verification
+gate, `1.1.0` turns the ads package on as a supported capability.
+
 - Nothing is published to npm before `1.0.0` — pre-1.0 versions exist only as
   git tags. This avoids shipping a half-surface package under the reserved name
   (the name itself is reserved at Phase 0 exit with a placeholder publish only
   if npm policy requires it — decide with G2).
+
+  ✎ **Superseded 2026-08-25.** `0.7.0` was published to npm as
+  `@ivanbaev/facebook-mcp` with dist-tag `latest`. The rule was written to stop a
+  half-surface package reaching users under a name that implies completeness; what
+  actually shipped is the opposite case — the full seven-package surface, held
+  pre-1.0 precisely because it is *unverified against live Graph*, and the version
+  number is the warning. The reasoning held; the situation it was written for did
+  not arise. What replaces it: the `0.x` line may publish, and `1.0.0` remains
+  gated on live verification, not on surface area.
 - **v1.0.0 therefore ships without the ads package.** That is deliberate: the
   Pages surface is the product (doc 02); ads lands in 1.1.0 already rescoped
   to read + status/budget control (A12).
@@ -149,6 +165,16 @@ versions did. Nothing before `1.0.0` is published, so no consumer was affected.
 - Generated error-catalog README section (from the error→action matrix) —
   nice-to-have; the matrix itself ships in Phase 0.
 - Doctor machine-readable output (`--json`, exit codes) for scripting.
+
+  ✎ **Half unparked 2026-08-30.** The exit-code half shipped early:
+  `doctor` now derives an overall verdict and `doctor --strict` turns it into an
+  exit code (2 = cannot serve requests, 1 = degraded or unverified, 0 = ok). It
+  was pulled forward because the 1.0 gate is *live verification*, and a doctor a
+  CI job cannot gate on leaves that verification a manual reading exercise. The
+  default exit code stays 0, so nothing that runs `doctor` for its text breaks.
+  `--json` stays parked: the rendered report plus an exit code covers scripting,
+  and a machine-readable schema is a compatibility promise not worth making
+  before 1.0.
 - Everything already in the roadmap's Deferred list (Batch API, MCP Tasks,
   elicitation UI, custom audiences, HUMAN_AGENT, IG/Threads, webhook relay,
   OAuth flow, SDK v2).
@@ -162,7 +188,7 @@ versions did. Nothing before `1.0.0` is published, so no consumer was affected.
 | G-TOOL-3 Reels lifecycle (delete-by-video-id, scheduled-Reel edge) | 2 | open ✎ — needs live Graph |
 | G-TOOL-1 get_comment, G-RUN-2 platform pin | 3 | shipped |
 | G-TOOL-4 mark_seen | 3 | decided: not shipped |
-| G-DOC-1…6 (hygiene, disclosure, runbooks, policy, compat, scope) | 4 | G-DOC-3 done; rest open |
+| G-DOC-1…6 (hygiene, disclosure, runbooks, policy, compat, scope) | 4 | shipped ✎ |
 | §1 version map | governs all phases | binding |
 
 These items are additive to the roadmap v2 gates. Every one of them is now
@@ -172,3 +198,14 @@ closes it. What each shipped item lacks is live verification, which is the whole
 point of the 1.0 milestone (§1) rather than a gap in this list. The G-DOC set
 joins the Phase 4 exit gate (a 1.0 without them fails the "non-author
 onboarding" spirit of PM #3).
+
+✎ **G-DOC-1…6 shipped 2026-08-25**, so the row above no longer reads
+"G-DOC-3 done; rest open". Artifacts, in the order the bullets in §4 list them:
+`CONTRIBUTING.md`, `SUPPORT.md`, `.github/ISSUE_TEMPLATE/` and
+`.github/PULL_REQUEST_TEMPLATE.md` with the no-telemetry statement in both
+`README.md` and `SECURITY.md` (G-DOC-1); the supported-versions table and private
+disclosure channel in `SECURITY.md` (G-DOC-2); seven runbooks under
+`docs/runbooks/` (G-DOC-3); the Platform Terms paragraph in `README.md` and
+[04](04-auth-and-security.md) (G-DOC-4); the *Client compatibility* table in
+`README.md` (G-DOC-5); and the enumerated non-coverage — Stories, boosting, and
+the rest — also in `README.md` (G-DOC-6).

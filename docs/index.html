@@ -1660,7 +1660,11 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
               Packages are the unit of exposure: <code>FB_TOOL_PACKAGES</code> enables or
               disables whole packages, <code>FB_PACKAGES_DENY</code> removes one
               regardless, and <code>FB_PACKAGES_READONLY</code> keeps a package's reads
-              while dropping its writes. <code>core</code> is always on.
+              while dropping its writes. <code>core</code> is always on. All three read
+              the same namespace of packages <em>and</em> profiles, and a profile wins
+              over a same-spelled package — so <code>FB_PACKAGES_DENY=core</code> denies
+              the whole six-package core profile, not the single <code>core</code>
+              package.
             </p>
           </div>
 
@@ -2279,16 +2283,17 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <td><code>FB_PACKAGES_DENY</code></td>
                       <td>—</td>
                       <td>
-                        Packages to exclude even if enabled by
-                        <code>FB_TOOL_PACKAGES</code>.
+                        Packages or profiles to exclude even if enabled by
+                        <code>FB_TOOL_PACKAGES</code>; the <code>core</code> package
+                        always survives.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PACKAGES_READONLY</code></td>
                       <td>—</td>
                       <td>
-                        Packages whose write tools are not registered; their read tools
-                        stay.
+                        Packages or profiles whose write tools are not registered; their
+                        read tools stay.
                       </td>
                     </tr>
                     <tr>
@@ -2333,6 +2338,15 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <td>
                         Stderr log verbosity: <code>debug</code>, <code>info</code>,
                         <code>warn</code>, <code>error</code>.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_SETUP_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        <strong>Secret.</strong> Short-lived user token consumed once by
+                        <code>setup-token</code>; the safe alternative to passing it as a
+                        CLI argument.
                       </td>
                     </tr>
                     <tr>
