@@ -51,8 +51,9 @@ only be confirmed against a live Page/portfolio are marked ✎ with their phase.
   additionally needs `unpublished_content_type=SCHEDULED`.
 - **Video:** `POST /{page-id}/videos` on graph-video; modern path is the
   Resumable Upload API (`/{app-id}/uploads` session → chunked upload →
-  `fbuploader_video_file_chunk`). Query `GET /{page-id}?fields=video_upload_limits`
-  at runtime instead of hardcoding size/length limits. Request `publish_video`
+  `fbuploader_video_file_chunk`). Graph v25 rejects `video_upload_limits` on the
+  Page node, so do not request it as metadata; keep local validation conservative
+  and surface Meta's upload validation errors readably. Request `publish_video`
   permission defensively.
 - **Reels:** 3-phase `/{page-id}/video_reels` flow (start → rupload binary →
   finish with `video_state PUBLISHED|SCHEDULED|DRAFT`). Specs: 9:16, min 540×960,
