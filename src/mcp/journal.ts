@@ -206,6 +206,12 @@ export function createJournal(deps: JournalDeps): Journal {
     if (stats.isDirectory()) {
       throw new Error(`journal path ${filePath} is a directory, not a file`);
     }
+    // Nor can a FIFO, a socket or a device, and a FIFO is worse than useless:
+    // opening it to append blocks until some reader opens it, so the awaited
+    // append would hang the tool call whose Graph write already happened.
+    if (!stats.isFile()) {
+      throw new Error(`journal path ${filePath} is not a regular file`);
+    }
     return { size: stats.size, mode: stats.mode & 0o777 };
   }
 
@@ -263,7 +269,17 @@ export function createJournal(deps: JournalDeps): Journal {
       // the fresh live file, so there is nothing to terminate. Failing here cost
       // the record of a write that really happened.
       if (errnoOf(err) === 'ENOENT') return true;
-      throw err;
+      // A journal this process may append to but not read — a write-only audit
+      // log (`0200`, or `0620` owned by another user, whose `chmod` above was
+      // refused) — answers EACCES here. Throwing cost EVERY record of such a
+      // deployment, for a check that only guards against one torn line. The
+      // check is skipped and said; the append below is still the honest test of
+      // whether the record can land.
+      reportNote(
+        `journal tail could not be read to check for a torn last line; appending without ` +
+          `that check: ${errorMessageOf(err)}`,
+      );
+      return true;
     }
     try {
       const { bytesRead, buffer } = await handle.read(Buffer.alloc(1), 0, 1, size - 1);

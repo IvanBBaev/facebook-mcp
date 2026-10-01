@@ -472,3 +472,76 @@ test('an array element whose accessor throws costs that element, not the whole r
     keep: '[REDACTED]',
   });
 });
+
+test('an array Proxy reporting an invalid length does not make redact throw', () => {
+  // Assigning a negative, fractional, NaN or over-2^32 `length` to the copy
+  // threw a RangeError out of `redact` — on the error path, where it replaces
+  // the failure being logged.
+  const r = createRedactor({ secrets: [TOKEN] });
+  for (const length of [-1, 1.5, Number.NaN, 2 ** 40]) {
+    const hostile = new Proxy([TOKEN], {
+      get: (target, key) =>
+        key === 'length' ? length : (Reflect.get(target, key) as unknown),
+    });
+    let out: unknown;
+    assert.doesNotThrow(
+      () => {
+        out = r.redact({ list: hostile, keep: TOKEN });
+      },
+      `length ${String(length)}`,
+    );
+    assert.deepEqual(out, { list: [], keep: '[REDACTED]' });
+  }
+});
+
+test('a Proxy whose traps throw costs its own contents, not the whole record', () => {
+  const r = createRedactor({ secrets: [TOKEN] });
+  const refusesKeys = new Proxy(
+    { secret: TOKEN },
+    {
+      ownKeys(): never {
+        throw new Error('ownKeys trap exploded');
+      },
+    },
+  );
+  const refusesHas = new Proxy(['a', TOKEN], {
+    has(): never {
+      throw new Error('has trap exploded');
+    },
+  });
+  const errWithHostileCause = new Proxy(new Error(`boom ${TOKEN}`), {
+    has(): never {
+      throw new Error('has trap exploded');
+    },
+  });
+  let out: Record<string, unknown> = {};
+  assert.doesNotThrow(() => {
+    out = r.redact({
+      obj: refusesKeys,
+      arr: refusesHas,
+      err: errWithHostileCause,
+      keep: TOKEN,
+    }) as Record<string, unknown>;
+  });
+  assert.deepEqual(out.obj, {});
+  // Every index reads as absent, so the copy keeps the length but only holes.
+  assert.equal((out.arr as unknown[]).length, 2);
+  assert.equal(Object.keys(out.arr as unknown[]).length, 0);
+  assert.equal((out.err as { message: string }).message, 'boom [REDACTED]');
+  assert.ok(!('cause' in (out.err as object)));
+  assert.equal(out.keep, '[REDACTED]');
+  assert.ok(!JSON.stringify(out).includes(TOKEN));
+});
+
+test('a secret holding a lone surrogate is still registered and masked', () => {
+  // `encodeURIComponent` throws on a lone surrogate; the other wire forms must
+  // still be registered rather than the whole addSecret call failing.
+  const lone = 'lone-\uD800-surrogate-secret';
+  const r = createRedactor();
+  assert.doesNotThrow(() => r.addSecret(lone));
+  assert.equal(r.redactString(`t=${lone}`), 't=[REDACTED]');
+  // JSON escapes a lone surrogate as `\ud800`, the spelling an NDJSON line holds.
+  const line = JSON.stringify({ t: lone });
+  assert.ok(line.includes('\\ud800'), line);
+  assert.equal(r.redactString(line), '{"t":"[REDACTED]"}');
+});

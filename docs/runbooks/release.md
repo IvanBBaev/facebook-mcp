@@ -165,8 +165,8 @@ tag deletion.
 
 1. **CI is green on the commit you intend to tag.** `npm run check` (no install
    scripts, typecheck, lint, format, build, test) passes on the Node 22/24/26
-   matrix and the Windows leg, `coverage` and `audit` are green, and CodeQL is
-   clean. This matters more than it looks: **a tag push does not run `ci.yml`**
+   matrix and the Windows leg, `coverage`, `audit` and the three-OS `cold-start`
+   (`npx -y` of the packed tarball) are green, and CodeQL is clean. This matters more than it looks: **a tag push does not run `ci.yml`**
    (it triggers on `push: main` and `pull_request` only). The release gate
    re-runs `check`, `metadata:check` and the production `npm audit`, but the
    coverage and Windows legs exist only in the CI run on the commit — so tag a
@@ -380,6 +380,11 @@ npx -y @ivanbaev/facebook-mcp@1.0.0 --version
 #    -> `facebook-mcp 1.0.0 (node v22…, …)`. Cross-check against the registry:
 npm view @ivanbaev/facebook-mcp version
 npx -y @ivanbaev/facebook-mcp@1.0.0 doctor
+#    Then the full MCP handshake from a cold npm cache — the same check the
+#    `cold-start` CI job runs on the packed tarball of every commit, here
+#    against what the registry actually serves (no credential needed):
+npm run cold-start -- --spec @ivanbaev/facebook-mcp@1.0.0
+#    -> `initialize ok … facebook-mcp 1.0.0`, `tools/list ok — N tools`, `PASS`.
 
 # 4. The bundle on the Release page matches the checksum next to it.
 curl -fLO https://github.com/IvanBBaev/facebook-mcp/releases/download/v1.0.0/facebook-mcp-1.0.0.mcpb

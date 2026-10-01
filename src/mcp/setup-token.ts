@@ -17,7 +17,7 @@
 //     returned {@link SetupTokenResult}. A broken credential must still produce a
 //     readable explanation.
 //   * `renderSetupTokenReport(result)` turns that result into operator-readable
-//     text ending with the concrete next command (`facebook-mcp doctor`).
+//     text ending with the concrete next command (`doctor`, under the launch form the operator used).
 //   * `parseSetupTokenArgs(argv, env)` is the (equally pure) argument reader, so
 //     the bootstrap's wiring stays three statements and the process concerns
 //     (argv, stderr, exit codes) stay entirely in the bootstrap.
@@ -43,6 +43,7 @@ import {
   debugToken,
   envFilePath as defaultEnvFilePath,
   errorMessageOf,
+  GraphApiError,
   type AtomicWriteResult,
   type Clock,
   type FbRequestFn,
@@ -54,6 +55,7 @@ import {
   type TokenType,
 } from '../core/index.js';
 import { PACKAGE_PERMISSIONS } from './doctor.js';
+import { DEFAULT_LAUNCH_COMMAND, subcommandHint } from './launch-command.js';
 import {
   DEFAULT_PROFILE_PACKAGES,
   expandSelection,
@@ -67,8 +69,13 @@ import {
 /** Env var carrying the pasted short-lived token (preferred over an argument). */
 export const SETUP_TOKEN_ENV_VAR = 'FB_SETUP_TOKEN';
 
-/** The concrete command the report ends with. */
-export const SETUP_NEXT_COMMAND = 'facebook-mcp doctor';
+/**
+ * The command the report ends with when the launch form is unknown. The real
+ * report names the form the operator actually used (see
+ * {@link SetupTokenDeps.launchCommand}): `facebook-mcp` is only on PATH after a
+ * global install, and an npx user told to run it gets "command not found".
+ */
+export const SETUP_NEXT_COMMAND = subcommandHint(DEFAULT_LAUNCH_COMMAND, 'doctor');
 
 /**
  * Scopes without which the flow cannot complete at all: `/me/accounts` needs
@@ -150,6 +157,7 @@ function trimmed(value: string | undefined): string | undefined {
 export function parseSetupTokenArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = {},
+  launchCommand: string = DEFAULT_LAUNCH_COMMAND,
 ): SetupTokenInput {
   const notes: string[] = [];
   const envToken = trimmed(env[SETUP_TOKEN_ENV_VAR]);
@@ -202,7 +210,7 @@ export function parseSetupTokenArgs(
     notes.push(
       'The token was passed as a command-line argument, so it is visible in the ' +
         `process list and your shell history. Prefer ${SETUP_TOKEN_ENV_VAR}=… ` +
-        'facebook-mcp setup-token, and clear the history entry.',
+        `${subcommandHint(launchCommand, 'setup-token')}, and clear the history entry.`,
     );
     if (envToken !== undefined) {
       notes.push(
@@ -341,7 +349,10 @@ export interface SetupTokenResult {
   readonly missingPackageScopes: readonly MissingPackageScope[];
   readonly write: SetupTokenWriteReport;
   readonly warnings: readonly string[];
-  /** Always {@link SETUP_NEXT_COMMAND} — the concrete command to run next. */
+  /**
+   * The concrete command to run next: `doctor` under the launch form the
+   * operator used ({@link SetupTokenDeps.launchCommand}).
+   */
   readonly nextCommand: string;
 }
 
@@ -381,6 +392,12 @@ export interface SetupTokenDeps {
    * Defaults to a UTF-8 read of the path.
    */
   readonly readEnvFile?: (path: string) => Promise<string | undefined>;
+  /**
+   * How the operator launched this binary (`npx -y <package>`, `facebook-mcp`,
+   * `node build/index.js` — see `resolveLaunchCommand`). Every command the
+   * report tells them to run is rendered with it. Defaults to `facebook-mcp`.
+   */
+  readonly launchCommand?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -621,6 +638,8 @@ export function renderEnvFile(
 export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenResult> {
   const now = deps.clock.now();
   const { input, settings, redactor } = deps;
+  const launch = deps.launchCommand ?? DEFAULT_LAUNCH_COMMAND;
+  const nextCommand = subcommandHint(launch, 'doctor');
   const steps: SetupTokenStep[] = [];
   const warnings: string[] = [...input.notes];
   // Warnings composed BEFORE the write step that describe its outcome. Their
@@ -670,7 +689,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
     warnings: warnings.map(
       (warning, index) => writeDependentWarnings.get(index)?.(parts.write) ?? warning,
     ),
-    nextCommand: SETUP_NEXT_COMMAND,
+    nextCommand,
   });
 
   const skippedWrite = (keys: readonly string[] = []): SetupTokenWriteReport => ({
@@ -696,7 +715,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
         `${REQUIRED_SETUP_SCOPES.join(', ')} (plus the scopes of the packages you ` +
         'enable — the README\'s "Permissions you need to grant" table lists ' +
         'them), generate the token, then run: ' +
-        `${SETUP_TOKEN_ENV_VAR}=<token> facebook-mcp setup-token`,
+        `${SETUP_TOKEN_ENV_VAR}=<token> ${subcommandHint(launch, 'setup-token')}`,
     });
     return finish({ write: skippedWrite() });
   }
@@ -733,9 +752,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
       id: 'classify',
       status: 'failed',
       summary: 'debug_token failed',
-      detail:
-        `Graph could not classify the token: ${message}. Check FB_APP_ID / ` +
-        'FB_APP_SECRET (App settings → Basic) and that the token belongs to that app.',
+      detail: classifyFailureDetail(err, message, deps.settings),
     });
     return finish({ token: { ...UNKNOWN_TOKEN, error: message }, write: skippedWrite() });
   }
@@ -760,7 +777,9 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
       summary: 'this is already a Page token, not a User token',
       detail:
         'setup-token exchanges a USER token. A Page token needs no exchange: set ' +
-        'FB_PAGE_TOKEN (and FB_PAGE_ID) directly, then run `facebook-mcp doctor`. ' +
+        'FB_PAGE_TOKEN (and FB_PAGE_ID) directly, then run `' +
+        nextCommand +
+        '`. ' +
         'To run the guided flow, generate a User token in the Graph API Explorer.',
     });
     return finish({ token: classification, write: skippedWrite() });
@@ -814,7 +833,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
   for (const missing of missingPackageScopes) {
     warnings.push(
       `Scope ${missing.scope} was not granted; the ${missing.packages.join(', ')} ` +
-        `package(s) that need it will be blocked (\`${SETUP_NEXT_COMMAND}\` shows the full matrix).`,
+        `package(s) that need it will be blocked (\`${nextCommand}\` shows the full matrix).`,
     );
   }
 
@@ -844,7 +863,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
     if (classification.expiry === 'unknown') {
       warnings.push(
         'Graph did not report an expiry for this System-User token, so whether it ' +
-          `expires is unknown; it is written verbatim — verify with \`${SETUP_NEXT_COMMAND}\` ` +
+          `expires is unknown; it is written verbatim — verify with \`${nextCommand}\` ` +
           "and check the token in the Graph API Explorer's Access Token Debugger.",
       );
     }
@@ -941,7 +960,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
       if (expiresAt === undefined) {
         warnings.push(
           'Graph did not report an expiry for the exchanged token; assume the ' +
-            `standard ~${String(LONG_LIVED_SECONDS / 86_400)} days and verify with \`${SETUP_NEXT_COMMAND}\`.`,
+            `standard ~${String(LONG_LIVED_SECONDS / 86_400)} days and verify with \`${nextCommand}\`.`,
         );
       }
       // "Long-lived" is a claim about the wire, not about the endpoint: Graph
@@ -1590,4 +1609,43 @@ export function renderSetupTokenReport(result: SetupTokenResult): string {
 
   lines.push('', 'Next step:', `  ${result.nextCommand}`);
   return lines.join('\n');
+}
+
+/**
+ * The remedy for a `debug_token` call that did not classify the pasted token.
+ * Mirrors the doctor's verdict: only a real 4xx rejection is Facebook's ruling
+ * on the token. A network fault, a 5xx or a throttle means the token was never
+ * assessed, so sending the operator to regenerate it (or to check app
+ * credentials that may not even be set) would be the wrong fix.
+ */
+function classifyFailureDetail(
+  err: unknown,
+  message: string,
+  settings: Settings,
+): string {
+  const category = err instanceof GraphApiError ? err.action?.category : undefined;
+  const answered =
+    err instanceof GraphApiError &&
+    err.httpStatus >= 400 &&
+    err.httpStatus < 500 &&
+    category !== 'transient' &&
+    category !== 'rate_limit';
+  if (!answered) {
+    const operatorText =
+      err instanceof GraphApiError ? err.action?.operatorText : undefined;
+    return (
+      `Graph did not answer the token check: ${message}` +
+      (operatorText !== undefined ? ` — ${operatorText}` : '') +
+      '. The token was not assessed, so do not regenerate it yet: check the ' +
+      'network (and any HTTPS_PROXY), then re-run while the pasted token is ' +
+      'still valid (Graph API Explorer user tokens last about 1-2 hours).'
+    );
+  }
+  // `debugCredential` inspects with the app token only when both are set.
+  const appCreds = settings.appId !== undefined && settings.appSecret !== undefined;
+  return appCreds
+    ? `Graph could not classify the token: ${message}. Check FB_APP_ID / ` +
+        'FB_APP_SECRET (App settings → Basic) and that the token belongs to that app.'
+    : `Graph rejected the token: ${message}. It may have expired or been ` +
+        'copied incompletely; generate a fresh User token in Graph API Explorer.';
 }

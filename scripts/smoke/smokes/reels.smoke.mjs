@@ -35,6 +35,7 @@
 //     below covers the OTHER tool that shares `videoIdArg`, which nothing else
 //     touches.
 
+import { paced } from '../pace.mjs';
 import { registerSmoke } from '../registry.mjs';
 
 /**
@@ -52,7 +53,7 @@ const VIDEO_STATES = new Set(['uploading', 'processing', 'ready', 'error']);
 
 /** Encoding takes minutes; a smoke may observe it, never wait it out. */
 const STATUS_ATTEMPTS = 6;
-const STATUS_DELAY_MS = 5000;
+const STATUS_DELAY_MS = paced(5000);
 
 /** Pages of `facebook_list_posts` scanned when proving Reels are absent from it. */
 const TIMELINE_MAX_PAGES = 4;

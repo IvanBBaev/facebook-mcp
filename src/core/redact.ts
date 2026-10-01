@@ -186,6 +186,16 @@ function hasField(value: object, key: string): boolean {
   }
 }
 
+/** Whether `value` can be assigned to an array's `length` without a RangeError. */
+function isArrayLength(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= 2 ** 32 - 1
+  );
+}
+
 /**
  * Create a {@link Redactor}. Registered secret values are scrubbed first
  * (longest-first, so a composite secret is replaced before any fragment of it
@@ -300,9 +310,12 @@ export function createRedactor(config: RedactorConfig = {}): Redactor {
         // Element by element through `readField`, like every other read in the
         // walk: `map` invoked an index accessor directly, so one throwing getter
         // threw out of `redact` and cost the whole record. Holes stay holes.
+        // A Proxy over an array answers `length` with whatever it likes, and
+        // assigning a negative, fractional, NaN or over-2^32 value to a real
+        // array's `length` throws a RangeError, so only a valid length is used.
         const length = readField(value, 'length');
         const arrCopy: unknown[] = [];
-        arrCopy.length = typeof length === 'number' ? length : 0;
+        arrCopy.length = isArrayLength(length) ? length : 0;
         for (let i = 0; i < arrCopy.length; i += 1) {
           if (!hasField(value, String(i))) continue;
           arrCopy[i] = redactValue(readField(value, String(i)), path, depth + 1);

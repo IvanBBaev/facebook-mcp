@@ -89,3 +89,39 @@ response. Live-only checks belong in `scripts/smoke/`, outside the test glob.
 Shape-diffing these fixtures against the new version's responses is a required
 step of the pin bump — a field that changed type or disappeared is the entire
 point of it. See [`../../docs/runbooks/app-upkeep.md`](../../docs/runbooks/app-upkeep.md).
+
+`npm run fixtures:shape-diff` (`scripts/fixture-shape-diff.mjs`) does the
+comparison. It is offline: it compares two fixture sets you already have and
+never touches the network. Produce the candidate set by snapshotting the current
+fixtures and re-recording each one against the new version:
+
+```bash
+npm run build
+cp -R test/fixtures "${TMPDIR:-/tmp}/fixtures-baseline"   # the known-good shapes
+FB_RECORD_FIXTURE=1 FB_API_VERSION=v24.0 node scripts/record-fixture.mjs \
+  --endpoint "me?fields=id,name,category,tasks" --out graph-me.json --force
+# ...repeat for every fixture, with the endpoint and fields it was recorded from
+npm run fixtures:shape-diff -- \
+  --baseline "${TMPDIR:-/tmp}/fixtures-baseline" --candidate test/fixtures
+git checkout -- test/fixtures   # unless you mean to keep (and prune) the new captures
+```
+
+Directories are matched by file name (two files are compared directly); `--json`
+gives a machine-readable report. Only **shapes** are compared — keys and JSON
+types, with every string (ids, numeric strings, timestamps) one type and id-valued
+keys collapsed to `<id>` — and no fixture value is ever printed.
+
+| Category                | Meaning                                    | Fails the run |
+| ----------------------- | ------------------------------------------ | ------------- |
+| `removed`               | a baseline field is gone                   | yes           |
+| `type-changed`          | a field's non-null JSON type changed       | yes           |
+| `array-element-changed` | an array's element type changed            | yes           |
+| `nullability-changed`   | a field became, or stopped being, nullable | no (warning)  |
+| `added`                 | a field only the candidate has             | no (info)     |
+
+Exit status: `0` no breaking difference, `1` breaking difference, `2` usage or
+input error (bad arguments, unreadable path, invalid JSON, no common file name).
+A fresh recording is unpruned, so expect `added` lines; and shapes are inferred
+from samples, so a `removed` field may only be absent from this sample (a feed
+with no shared links has no `story`). Explain every breaking line before moving
+the pin.

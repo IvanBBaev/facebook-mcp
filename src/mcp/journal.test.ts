@@ -25,6 +25,7 @@ import fsPromises, {
 } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { execFile } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -504,6 +505,60 @@ test(
       assert.match(errors[0] ?? '', /is a directory/, 'the note says why');
     } finally {
       await chmod(path.join(dir, 'operator-folder'), 0o755).catch(() => undefined);
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a journal path that names a FIFO is refused instead of blocking the append forever',
+  { skip: !isPosix && 'no FIFOs on win32' },
+  async () => {
+    const dir = await tmpJournalDir();
+    const fifo = path.join(dir, 'journal.ndjson');
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      // Opening a FIFO for writing blocks until a reader opens it. The append is
+      // awaited on the write path, so a journal that tried would hang the tool
+      // call whose Graph write already happened, and the journal promises never
+      // to block. A FIFO (like a socket or a device) can never hold a record.
+      await promisify(execFile)('mkfifo', [fifo]);
+      await chmod(fifo, 0o644);
+      const errors: string[] = [];
+      const journal = createJournal({
+        clock: createFakeClock(0),
+        redactor: createFakeRedactor(),
+        journalPath: fifo,
+        onError: (m) => errors.push(m),
+      });
+
+      const hung = new Promise<'hung'>((resolve) => {
+        timer = setTimeout(() => {
+          resolve('hung');
+        }, 2000);
+      });
+      const outcome = await Promise.race([journal.append(entry()), hung]);
+
+      assert.equal(outcome, 'failed', 'nothing can be recorded in a FIFO');
+      assert.equal(
+        (await stat(fifo)).mode & 0o777,
+        0o644,
+        'the FIFO keeps the mode the operator gave it',
+      );
+      assert.equal(errors.length, 1);
+      assert.match(errors[0] ?? '', /not a regular file/, 'the note says why');
+    } finally {
+      clearTimeout(timer);
+      // If the append blocked on the FIFO, give it a reader so it can finish.
+      try {
+        const reader = await fsPromises.open(
+          fifo,
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        );
+        await reader.close();
+      } catch {
+        // No FIFO left — nothing to unblock.
+      }
       await rm(dir, { recursive: true, force: true });
     }
   },
@@ -1076,5 +1131,200 @@ test('a rotation lock that stays held is reported once, and records still land',
     assert.match(notes[0] ?? '', /journal\.ndjson\.rotating/);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a journal this process may append to but not read still records the entry', async () => {
+  // A write-only audit log (0200, or 0620 owned by another user whose chmod is
+  // refused) answers EACCES to the torn-line check's read. That check guards one
+  // torn line; failing on it cost every record of the deployment while the
+  // append itself would have succeeded.
+  const dir = await tmpJournalDir();
+  const journalPath = path.join(dir, 'journal.ndjson');
+  const realOpen = fsPromises.open;
+  const openMock = mock.method(
+    fsPromises,
+    'open',
+    (...args: Parameters<typeof realOpen>) =>
+      String(args[0]) === journalPath && args[1] === 'r'
+        ? Promise.reject(
+            Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+          )
+        : realOpen(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    await writeFile(journalPath, '{"earlier":true}\n', { mode: 0o600 });
+    const notes: string[] = [];
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      onError: (m) => notes.push(m),
+    });
+    assert.equal(await journal.append(entry({ summary: 'write-only' })), 'ok');
+    assert.deepEqual(
+      nonEmptyLines(await readFile(journalPath, 'utf8')).map(
+        (l) => Object.keys(parseLine(l))[0],
+      ),
+      ['earlier', 'tool'],
+    );
+    assert.equal(notes.length, 1);
+    assert.match(notes[0] ?? '', /torn last line/);
+    assert.match(notes[0] ?? '', /EACCES/);
+  } finally {
+    openMock.mock.restore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no onError sink, the failure note goes to stderr, redacted', async () => {
+  const dir = await tmpJournalDir();
+  const errorMock = mock.method(console, 'error', () => undefined);
+  try {
+    const blocker = path.join(dir, 'SECRET');
+    await writeFile(blocker, 'x');
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor({ secrets: ['SECRET'] }),
+      journalPath: path.join(blocker, 'nested', 'journal.ndjson'),
+    });
+    assert.equal(await journal.append(entry()), 'failed');
+    assert.equal(errorMock.mock.callCount(), 1);
+    const line = String(errorMock.mock.calls[0]?.arguments[0]);
+    assert.match(line, /^\[facebook-mcp\] journal append failed: /);
+    assert.ok(!line.includes('SECRET'), line);
+  } finally {
+    errorMock.mock.restore();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a rotation lock released between the failed create and the stale check is taken', async () => {
+  // The holder finishes and deletes the lock after our `wx` saw EEXIST but
+  // before we read its pid: ENOENT on the read means the lock is free, and the
+  // retry takes it instead of skipping this rotation.
+  const dir = await tmpJournalDir();
+  const journalPath = path.join(dir, 'journal.ndjson');
+  const lockPath = `${journalPath}.rotating`;
+  const realReadFile = fsPromises.readFile;
+  let released = false;
+  const readMock = mock.method(
+    fsPromises,
+    'readFile',
+    async (...args: Parameters<typeof realReadFile>) => {
+      if (args[0] === lockPath) {
+        released = true;
+        await rm(lockPath, { force: true }); // the holder releases it
+      }
+      return realReadFile(...args);
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    const maxBytes = 200;
+    await writeFile(lockPath, `${process.pid}\n`);
+    await writeFile(journalPath, `${'A'.repeat(maxBytes)}\n`, { mode: 0o600 });
+    const notes: string[] = [];
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      maxBytes,
+      onError: (m) => notes.push(m),
+    });
+    assert.equal(await journal.append(entry({ summary: 'after release' })), 'ok');
+    assert.ok(released, 'the race was staged');
+    assert.match(await realReadFile(rotatedJournalPath(journalPath), 'utf8'), /^A+$/m);
+    assert.deepEqual(
+      nonEmptyLines(await realReadFile(journalPath, 'utf8')).map(
+        (l) => parseLine(l).summary,
+      ),
+      ['after release'],
+    );
+    assert.deepEqual(notes, []);
+  } finally {
+    readMock.mock.restore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable rotation lock counts as held: rotation is skipped, the record lands', async () => {
+  const dir = await tmpJournalDir();
+  const journalPath = path.join(dir, 'journal.ndjson');
+  const lockPath = `${journalPath}.rotating`;
+  const realReadFile = fsPromises.readFile;
+  const readMock = mock.method(
+    fsPromises,
+    'readFile',
+    (...args: Parameters<typeof realReadFile>) =>
+      args[0] === lockPath
+        ? Promise.reject(
+            Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+          )
+        : realReadFile(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    const maxBytes = 200;
+    await writeFile(lockPath, '1\n');
+    await writeFile(journalPath, `${'A'.repeat(maxBytes)}\n`, { mode: 0o600 });
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      maxBytes,
+      onError: () => undefined,
+    });
+    assert.equal(await journal.append(entry({ summary: 'held' })), 'ok');
+    await assert.rejects(stat(rotatedJournalPath(journalPath)), 'no rotation took place');
+    assert.equal(nonEmptyLines(await realReadFile(journalPath, 'utf8')).length, 2);
+    assert.equal(await realReadFile(lockPath, 'utf8'), '1\n', 'the lock was not stolen');
+  } finally {
+    readMock.mock.restore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a rotation lock that cannot be released is reported, and the rotation still counts', async () => {
+  const dir = await tmpJournalDir();
+  const journalPath = path.join(dir, 'journal.ndjson');
+  const lockPath = `${journalPath}.rotating`;
+  const realRm = fsPromises.rm;
+  const rmMock = mock.method(fsPromises, 'rm', (...args: Parameters<typeof realRm>) =>
+    String(args[0]) === lockPath
+      ? Promise.reject(
+          Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }),
+        )
+      : realRm(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    const maxBytes = 200;
+    await writeFile(journalPath, `${'A'.repeat(maxBytes)}\n`, { mode: 0o600 });
+    const notes: string[] = [];
+    const journal = createJournal({
+      clock: createFakeClock(0),
+      redactor: createFakeRedactor(),
+      journalPath,
+      maxBytes,
+      onError: (m) => notes.push(m),
+    });
+    assert.equal(await journal.append(entry({ summary: 'after rotation' })), 'ok');
+    assert.match(await readFile(rotatedJournalPath(journalPath), 'utf8'), /^A+$/m);
+    assert.deepEqual(
+      nonEmptyLines(await readFile(journalPath, 'utf8')).map((l) => parseLine(l).summary),
+      ['after rotation'],
+    );
+    assert.equal(notes.length, 1);
+    assert.match(notes[0] ?? '', /could not be removed/);
+    assert.doesNotMatch(notes[0] ?? '', /rotation failed/);
+  } finally {
+    rmMock.mock.restore();
+    syncBuiltinESMExports();
+    await realRm(dir, { recursive: true, force: true });
   }
 });

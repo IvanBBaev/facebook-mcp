@@ -35,6 +35,7 @@ import {
   MAX_CHUNK_SIZE,
   MIN_CHUNK_SIZE,
   SESSION_DESYNC_NOTE,
+  SESSION_FINISH_UNCONFIRMED_NOTE,
   SESSION_LOST_NOTE,
   STATUS_NOTES,
   VIDEO_STATUS_FIELDS,
@@ -1471,6 +1472,128 @@ test('a finish whose answer was lost names the video id so the caller can poll i
   );
   assert.equal(err.action?.nextTool, 'facebook_get_video_status');
   assert.equal(err.cause, lost, 'the transport fault is kept as the cause');
+  assert.equal(
+    sessions.get(SESSION_ID)?.phase,
+    'finish_unconfirmed',
+    'a finish that may have landed leaves a tombstone, not a re-finishable session',
+  );
+});
+
+/** A finish fault whose answer was lost after the request went out. */
+function lostFinishAnswer(): GraphApiError {
+  return new GraphApiError('ambiguous write outcome (network fault) — verify first', {
+    code: 0,
+    httpStatus: 0,
+    action: {
+      category: 'ambiguous',
+      retryable: false,
+      nextTool: 'facebook_list_posts',
+      operatorText: 'Write outcome unknown — verify first.',
+    },
+  });
+}
+
+test('a second finish after an ambiguous finish is refused without a wire call', async () => {
+  // The first finish may have created and published the video. Re-issuing it
+  // could publish the same bytes a second time, so the session is a tombstone.
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(lostFinishAnswer()));
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+  const callsAfterFirst = fb.calls.length;
+
+  const err = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.equal(err.action?.category, 'validation');
+  assert.equal(err.action?.retryable, false);
+  assert.equal(err.action?.operatorText, SESSION_FINISH_UNCONFIRMED_NOTE);
+  assert.equal(err.action?.nextTool, 'facebook_get_video_status');
+  assert.match(err.message, new RegExp(`video '${VIDEO_ID}'`));
+  assert.equal(fb.calls.length, callsAfterFirst, 'no second finish reaches the wire');
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finish_unconfirmed', 'still terminal');
+});
+
+test('a transfer after an ambiguous finish is refused without a wire call', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(lostFinishAnswer()));
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+  const callsAfterFirst = fb.calls.length;
+
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.operatorText, SESSION_FINISH_UNCONFIRMED_NOTE);
+  assert.equal(fb.calls.length, callsAfterFirst);
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finish_unconfirmed');
+});
+
+test('a 5xx finish also leaves a tombstone', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(graphErr('transient', 503)));
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finish_unconfirmed');
+});
+
+test('a non-Graph finish fault (abort) is treated as may-have-landed', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  const aborted = new Error('The operation was aborted');
+  aborted.name = 'AbortError';
+  fb.on(isFinish, fbErr(aborted));
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finish_unconfirmed');
+});
+
+test('a clean 4xx finish rejection stays failed and may be re-finished', async () => {
+  // A clean rejection created nothing: re-issuing finish is safe and saves a
+  // re-upload, so this path must NOT become a tombstone.
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(isFinish, fbErr(graphErr('rate_limit', 400)), 1);
+  fb.on(isFinish, fbOk({ video_id: VIDEO_ID, success: true }));
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
+
+  const res = await finishVideoUpload(deps, { uploadSessionId: SESSION_ID });
+  assert.equal(res.videoId, VIDEO_ID);
+  assert.equal(fb.calls.filter(isFinish).length, 2);
+});
+
+test('a finish that provably never left the host stays re-finishable', async () => {
+  const { fb, deps, sessions } = harness();
+  seedCompleted(sessions);
+  fb.on(
+    isFinish,
+    fbErr(
+      new GraphApiError('network request failed: connect ECONNREFUSED', {
+        code: 0,
+        httpStatus: 0,
+        action: classifyNetworkError({
+          phase: 'connect',
+          isWrite: true,
+          reason: 'connect ECONNREFUSED',
+        }),
+      }),
+    ),
+  );
+
+  await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(() => undefined);
+
   assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
 });
 
@@ -1623,7 +1746,16 @@ test('finishVideoUpload reports a desync when no video id can be determined', as
   );
 
   assert.match(err.message, /finish returned no video id/);
-  assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
+  // The edge answered 2xx: a video may exist that nothing can name, so a
+  // second finish is refused rather than risking another one.
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'finish_unconfirmed');
+  const again = asGraphError(
+    await finishVideoUpload(deps, { uploadSessionId: SESSION_ID }).catch(
+      (e: unknown) => e,
+    ),
+  );
+  assert.equal(again.action?.operatorText, SESSION_FINISH_UNCONFIRMED_NOTE);
+  assert.equal(fb.calls.length, 1, 'the refused finish never reaches the wire');
 });
 
 // ---------------------------------------------------------------------------

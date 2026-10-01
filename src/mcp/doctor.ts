@@ -49,6 +49,7 @@ import {
   type StartupProblem,
   type TokenType,
 } from '../core/index.js';
+import { DEFAULT_LAUNCH_COMMAND, subcommandHint } from './launch-command.js';
 
 // ---------------------------------------------------------------------------
 // Static permission tables (the corpus's permission -> capability map, doc 04/06)
@@ -610,6 +611,12 @@ export interface DoctorDeps {
   /** Optional ad-account health probe (V09). Absent ⇒ "not checked". */
   readonly adAccountProbe?: AdAccountProbe;
   /**
+   * How the operator launched this binary (`npx -y <package>`, `facebook-mcp`,
+   * `node build/index.js` — see `resolveLaunchCommand`), so a finding that
+   * names a command names one their shell can run. Defaults to `facebook-mcp`.
+   */
+  readonly launchCommand?: string;
+  /**
    * Metric names the metric-set probe verifies. Defaults to
    * {@link PROBED_PAGE_METRICS}; injectable so tests (and a future generated
    * README table) can drive the check from their own list.
@@ -744,7 +751,7 @@ async function inspectToken(deps: DoctorDeps, now: number): Promise<DoctorTokenR
       expiryUnknown: false,
       expiringSoon: false,
       error:
-        'No access token configured — set FB_ACCESS_TOKEN, FB_SYSTEM_TOKEN, or FB_PAGE_TOKEN.',
+        'No access token configured — set FB_SYSTEM_TOKEN, FB_ACCESS_TOKEN, or FB_PAGE_TOKEN.',
     };
   }
   try {
@@ -1382,6 +1389,18 @@ function skippedMetricSet(reason: string): MetricSetReport {
 }
 
 /**
+ * Why a Graph probe is skipped when `debug_token` itself never got an answer.
+ * Shared with the metric-set probe's wording so the report tells one story.
+ */
+const UNANSWERED_SKIP_REASON =
+  'the token could not be checked (see Token above) — a probe over the same broken connection would only repeat the failure';
+
+/** Is an ad account configured, i.e. would the ad-account probe call Graph? */
+function adAccountConfigured(settings: Settings): boolean {
+  return settings.adAccountId !== undefined && settings.adAccountId.trim() !== '';
+}
+
+/**
  * Ask the live API whether the metric set this server documents still exists
  * (C6 / CC-INS-1).
  *
@@ -1397,13 +1416,13 @@ async function probeMetricSet(
   const metrics = deps.metricSet ?? PROBED_PAGE_METRICS;
   if (!token.configured) {
     return skippedMetricSet(
-      'no token configured — set FB_ACCESS_TOKEN (or FB_SYSTEM_TOKEN / FB_PAGE_TOKEN) and re-run',
+      'no token configured — set FB_SYSTEM_TOKEN (or FB_ACCESS_TOKEN / FB_PAGE_TOKEN) and re-run',
     );
   }
   if (!token.valid) {
     return skippedMetricSet(
       token.diagnosis === 'token_check_failed'
-        ? 'the token could not be checked (see Token above) — a probe over the same broken connection would only repeat the failure'
+        ? UNANSWERED_SKIP_REASON
         : 'the configured token did not check out (see Token above) — probing metric names with a dead token proves nothing',
     );
   }
@@ -1518,7 +1537,7 @@ const APP_CREDENTIAL_REJECTION =
   'FB_APP_ID / FB_APP_SECRET first, and re-issue the token only if they are right.';
 
 /** Token findings — the CC-AUTH-5 diagnosis, mapped to severity. */
-function tokenFindings(token: DoctorTokenReport): DoctorFinding[] {
+function tokenFindings(token: DoctorTokenReport, launch: string): DoctorFinding[] {
   const findings: DoctorFinding[] = [];
   switch (token.diagnosis) {
     case 'no_token':
@@ -1526,7 +1545,9 @@ function tokenFindings(token: DoctorTokenReport): DoctorFinding[] {
         severity: 'fail',
         area: 'token',
         detail:
-          'No credential is configured — set FB_SYSTEM_TOKEN (or FB_ACCESS_TOKEN / FB_PAGE_TOKEN).',
+          'No credential is configured — set FB_SYSTEM_TOKEN (or FB_ACCESS_TOKEN / FB_PAGE_TOKEN), ' +
+          `or run \`FB_SETUP_TOKEN=<token> ${subcommandHint(launch, 'setup-token')}\` with a ` +
+          'Graph API Explorer user token to mint a long-lived one and write the env file for you.',
       });
       break;
     case 'token_malformed':
@@ -1783,10 +1804,13 @@ function configurationFindings(
  * testable without a Graph double, and so a caller holding a report from
  * elsewhere can re-derive the verdict rather than trust a stored one.
  */
-export function summarizeDoctor(report: Omit<DoctorReport, 'summary'>): DoctorSummary {
+export function summarizeDoctor(
+  report: Omit<DoctorReport, 'summary'>,
+  launchCommand: string = DEFAULT_LAUNCH_COMMAND,
+): DoctorSummary {
   const findings = [
     ...configurationFindings(report.packageSelectionError, report.startupProblems),
-    ...tokenFindings(report.token),
+    ...tokenFindings(report.token, launchCommand),
     ...matrixFindings(report.matrix),
     ...credentialFileFindings(report.credentialFile),
     ...metricSetFindings(report.metricSet),
@@ -1832,6 +1856,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
 
   const token = await inspectToken(deps, now);
   const granted = new Set(token.scopes);
+  const checkUnanswered = token.diagnosis === 'token_check_failed';
 
   const report: Omit<DoctorReport, 'summary'> = {
     serverVersion: deps.serverVersion,
@@ -1866,22 +1891,50 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         !(token.configured && !token.valid),
     ),
     overScopePermissions: computeOverScope(deps.packages, granted),
-    metricProbe: await runProbe(
-      deps,
-      deps.metricProbe,
-      'metric probe',
-      'metric probe: unavailable (no insights probe wired — enable the insights package to surface Page/Post reach diagnostics).',
-    ),
+    // Without a credential the probe can only fail on the missing token (or the
+    // missing Page), and that failure used to land in the verdict as a second,
+    // UNKNOWN line next to the token FAIL that already names the one fix. A
+    // first-time operator saw two problems where there is one, so skip it —
+    // the same call the metric-set probe below makes.
+    //
+    // A token check that never got an answer (network fault, 5xx, throttle) is
+    // the same kind of dead end: every dependent probe goes over the same
+    // broken connection, and each one's retry budget added seconds of silence
+    // (~9 s offline) only to print the failure the Token block already names.
+    metricProbe: !token.configured
+      ? {
+          available: false,
+          summary: 'metric probe: skipped (no token configured — see Token above)',
+        }
+      : checkUnanswered
+        ? {
+            available: false,
+            summary: `metric probe: skipped (${UNANSWERED_SKIP_REASON})`,
+          }
+        : await runProbe(
+            deps,
+            deps.metricProbe,
+            'metric probe',
+            'metric probe: unavailable (no insights probe wired — enable the insights package to surface Page/Post reach diagnostics).',
+          ),
     metricSet: await probeMetricSet(deps, token, now),
-    adAccount: await runProbe(
-      deps,
-      deps.adAccountProbe,
-      'ad account',
-      'ad account: not checked (the ads package is off — enable it and set FB_AD_ACCOUNT_ID to diagnose ad-account health).',
-    ),
+    // Only a probe that would actually call Graph is skipped: without
+    // FB_AD_ACCOUNT_ID the wired probe answers "not configured" offline, and
+    // that line is still worth printing.
+    adAccount:
+      checkUnanswered &&
+      deps.adAccountProbe !== undefined &&
+      adAccountConfigured(deps.settings)
+        ? { available: false, summary: `ad account: skipped (${UNANSWERED_SKIP_REASON})` }
+        : await runProbe(
+            deps,
+            deps.adAccountProbe,
+            'ad account',
+            'ad account: not checked (the ads package is off — enable it and set FB_AD_ACCOUNT_ID to diagnose ad-account health).',
+          ),
     credentialFile: await inspectCredentialFile(deps),
   };
-  return { ...report, summary: summarizeDoctor(report) };
+  return { ...report, summary: summarizeDoctor(report, deps.launchCommand) };
 }
 
 // ---------------------------------------------------------------------------

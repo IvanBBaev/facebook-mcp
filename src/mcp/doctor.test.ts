@@ -714,6 +714,136 @@ test('a network failure does not convict the token — CC-NET-6, not a bad crede
   assert.match(report.metricSet.summary, /could not be checked/);
 });
 
+test('a token check that never answered skips the dependent Graph probes', async () => {
+  // Offline with a token: every probe after debug_token goes over the same dead
+  // connection, and their retries added ~9 s of silence before the report.
+  let metricCalls = 0;
+  let adCalls = 0;
+  const metric: MetricProbe = () => {
+    metricCalls++;
+    return Promise.reject(new Error('network request failed'));
+  };
+  const ad: AdAccountProbe = () => {
+    adCalls++;
+    return Promise.reject(new Error('network request failed'));
+  };
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({ accessToken: 'EAA-runtime', adAccountId: 'act_1' }),
+    metricProbe: metric,
+    adAccountProbe: ad,
+  });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('network request failed: ECONNREFUSED', {
+        code: 0,
+        httpStatus: 0,
+        action: {
+          category: 'transient',
+          retryable: true,
+          operatorText: 'Network fault.',
+        },
+      }),
+    ),
+  );
+
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_check_failed');
+  assert.equal(metricCalls, 0, 'the metric probe must not run after token_check_failed');
+  assert.equal(adCalls, 0, 'the ad-account probe must not run after token_check_failed');
+  assert.match(
+    report.metricProbe.summary,
+    /^metric probe: skipped \(the token could not be checked/,
+  );
+  assert.match(
+    report.adAccount.summary,
+    /^ad account: skipped \(the token could not be checked/,
+  );
+  assert.equal(report.metricProbe.failed, undefined);
+  assert.equal(
+    report.summary.findings.some(
+      (f) => f.area === 'metric probe' || f.area === 'ad account',
+    ),
+    false,
+    'a skipped probe adds no second verdict line for the same connection fault',
+  );
+  const text = renderDoctorReport(report);
+  assert.match(text, /metric probe: skipped/);
+  assert.match(text, /ad account: skipped/);
+});
+
+test('a token check that failed still reports an unconfigured ad account (no Graph call)', async () => {
+  const ad: AdAccountProbe = () =>
+    Promise.resolve({
+      available: false,
+      summary: 'ad account: not configured (set FB_AD_ACCOUNT_ID).',
+    });
+  const { fb, deps } = makeDeps({ adAccountProbe: ad });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('Service unavailable', {
+        code: 2,
+        httpStatus: 503,
+        action: {
+          category: 'transient',
+          retryable: true,
+          operatorText: 'Network fault.',
+        },
+      }),
+    ),
+  );
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_check_failed');
+  assert.match(report.adAccount.summary, /not configured/);
+});
+
+test('a token Graph rejected (not a transport fault) still runs the metric probe', async () => {
+  let metricCalls = 0;
+  const metric: MetricProbe = () => {
+    metricCalls++;
+    return Promise.resolve({ available: true, summary: 'metric probe: ok' });
+  };
+  const { fb, deps } = makeDeps({ metricProbe: metric });
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(
+      new GraphApiError('Invalid OAuth access token.', { code: 190, httpStatus: 400 }),
+    ),
+  );
+  const report = await runDoctor(deps);
+  assert.equal(report.token.diagnosis, 'token_malformed');
+  assert.equal(metricCalls, 1);
+});
+
+test('the no-token FAIL names setup-token under the launch form the operator used', async () => {
+  const { deps } = makeDeps({ settings: makeSettings() });
+  const report = await runDoctor({
+    ...deps,
+    launchCommand: 'npx -y @ivanbaev/facebook-mcp',
+  });
+  const fail = report.summary.findings.find((f) => f.area === 'token');
+  assert.ok(fail);
+  assert.match(
+    fail.detail,
+    /`FB_SETUP_TOKEN=<token> npx -y @ivanbaev\/facebook-mcp setup-token`/,
+  );
+  // Unknown launch form: the binary name, as before.
+  const fallback = await runDoctor(deps);
+  const plain = fallback.summary.findings.find((f) => f.area === 'token');
+  assert.match(plain?.detail ?? '', /`FB_SETUP_TOKEN=<token> facebook-mcp setup-token`/);
+});
+
+test('token messages list the credentials in precedence order (system > user > page)', async () => {
+  const { deps } = makeDeps({ settings: makeSettings() });
+  const report = await runDoctor(deps);
+  const order = /FB_SYSTEM_TOKEN[^]*FB_ACCESS_TOKEN[^]*FB_PAGE_TOKEN/;
+  assert.match(report.token.error ?? '', order);
+  assert.match(report.metricSet.summary, order);
+  const fail = report.summary.findings.find((f) => f.area === 'token');
+  assert.match(fail?.detail ?? '', order);
+});
+
 test('a token Graph reports without granular_scopes stays "not reported"', async () => {
   const { fb, deps } = makeDeps();
   withDebugToken(fb, {
@@ -1449,6 +1579,36 @@ test('a missing credential verdicts fail; only --strict turns that into an exit 
   // not start failing because the doctor found what it was asked to look for.
   assert.equal(doctorExitCode(report.summary.verdict, false), 0);
   assert.match(renderDoctorReport(report), /Verdict\n {2}FAIL —/);
+});
+
+test('a first run with no credential points at setup-token and reports one problem, not two', async () => {
+  // The onboarding path is "run the doctor, fix what it says". With no token the
+  // only fix is to mint one, so the FAIL must name the subcommand that does it,
+  // and the metric probe must not add an UNKNOWN line that fails on the very
+  // same missing token (or on the Page a fresh install has not pinned yet).
+  let probeCalls = 0;
+  const probe: MetricProbe = () => {
+    probeCalls++;
+    return Promise.reject(new Error('No default Page configured.'));
+  };
+  const { fb, deps } = makeDeps({ settings: makeSettings(), metricProbe: probe });
+
+  const report = await runDoctor(deps);
+  const fail = report.summary.findings.find(
+    (f) => f.severity === 'fail' && f.area === 'token',
+  );
+  assert.ok(fail, 'expected the token FAIL');
+  assert.match(fail.detail, /setup-token/);
+  assert.match(fail.detail, /FB_SETUP_TOKEN/);
+  assert.equal(probeCalls, 0, 'the metric probe must not run without a credential');
+  assert.equal(report.metricProbe.failed, undefined);
+  assert.match(report.metricProbe.summary, /skipped \(no token configured/);
+  assert.equal(
+    report.summary.findings.some((f) => f.area === 'metric probe'),
+    false,
+    'no second verdict line for the same missing token',
+  );
+  assert.equal(fb.calls.length, 0);
 });
 
 test('an unresolvable package selection fails the verdict and says so first', async () => {

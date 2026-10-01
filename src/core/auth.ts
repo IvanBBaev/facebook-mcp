@@ -66,6 +66,13 @@ export const ERROR_CODE_SESSION = 102;
  */
 export const STALE_OBJECT_SUBCODES: readonly number[] = [21, 33];
 
+/**
+ * The same Page migration as 100/21, shipped as a top-level code: "(#21) Page
+ * ID X was migrated to page ID Y" (the error matrix's `not-found-21` row). A
+ * token derived for the old id is as worthless as on 100/21 (CC-AUTH-7).
+ */
+export const ERROR_CODE_PAGE_MIGRATED = 21;
+
 // ---------------------------------------------------------------------------
 // debug_token — token type detection
 // ---------------------------------------------------------------------------
@@ -504,18 +511,24 @@ function accountBlockOf(err: unknown): string | undefined {
  * renamed or unpublished, so the cached derivation is worthless (CC-AUTH-7).
  */
 function isStalePageObject(err: unknown): boolean {
+  if (!(err instanceof GraphApiError)) return false;
+  if (err.code === ERROR_CODE_PAGE_MIGRATED) return true;
   return (
-    err instanceof GraphApiError &&
     err.code === ERROR_CODE_INVALID_PARAM &&
     err.subcode !== undefined &&
     STALE_OBJECT_SUBCODES.includes(err.subcode)
   );
 }
 
+/** The Graph code a stale-Page error arrived with (100, or a top-level 21). */
+function staleCodeOf(err: unknown): number {
+  return err instanceof GraphApiError ? err.code : ERROR_CODE_INVALID_PARAM;
+}
+
 /**
  * Whether `err` proves a cached Page token is worthless: the token itself is
  * dead (190 / 102), or the Page id it was derived for is a stale object
- * (100 with subcode 21 / 33). A tool layer that turns such an error into its own
+ * (100 with subcode 21 / 33, or a top-level 21). A tool layer that turns such an error into its own
  * result — instead of throwing it to the hub — evicts the Page token on it.
  */
 export function isPageTokenDead(err: unknown): boolean {
@@ -641,14 +654,31 @@ export function createPageTokenResolver(deps: PageTokenResolverDeps): PageTokenR
       // nothing, so `overrides` is empty and this resolver cannot tell the two
       // apart). "Bind" is right for both; "provide a Page token" was wrong for
       // the second.
-      throw tokenDeadError(
+      //
+      // Nothing was sent, so there is no Graph code and no HTTP status: `0` for
+      // both is this codebase's "no wire fact" shape. Inventing 190 / 401 put
+      // "Invalid OAuth access token" into the tool result for a token that does
+      // not exist, and left the model no `retryable` / `nextTool`.
+      throw new GraphApiError(
         `No base token available to derive a Page token for Page ${pageId}. ` +
           `Set FB_SYSTEM_TOKEN or FB_ACCESS_TOKEN so a Page token can be derived, ` +
           `or bind a long-lived Page token to this Page: FB_PAGE_TOKEN with ` +
           `FB_PAGE_ID=${pageId}, or FB_PROFILE_<NAME>_TOKEN with ` +
           `FB_PROFILE_<NAME>_PAGE_ID=${pageId}. A Page token that is set without ` +
           `its Page ID is bound to nothing. Then run the doctor (facebook_whoami).`,
-        undefined,
+        {
+          code: 0,
+          httpStatus: 0,
+          action: {
+            category: 'auth',
+            retryable: false,
+            nextTool: 'facebook_whoami',
+            operatorText:
+              'No credential can act for this Page: set FB_SYSTEM_TOKEN or ' +
+              'FB_ACCESS_TOKEN, or bind a Page token to this Page ID, then run ' +
+              'facebook_whoami. Retrying without a configuration change fails the same way.',
+          },
+        },
       );
     }
 
@@ -781,7 +811,8 @@ export function createPageTokenResolver(deps: PageTokenResolverDeps): PageTokenR
       if (overrideFor(pageId) !== undefined) {
         if (isStalePageObject(err)) {
           throw stalePageError(
-            `Page ${pageId} no longer resolves (Graph error 100) — it was merged, ` +
+            `Page ${pageId} no longer resolves (Graph error ` +
+              `${String(staleCodeOf(err))}) — it was merged, ` +
               `renamed or unpublished. Re-run facebook_list_pages for the current ` +
               `Page ID and update FB_PAGE_ID / FB_PROFILE_<NAME>_PAGE_ID.`,
             err,
@@ -808,7 +839,8 @@ export function createPageTokenResolver(deps: PageTokenResolverDeps): PageTokenR
         if (isStalePageObject(err2)) {
           throw stalePageError(
             `Page ${pageId} still does not resolve after one re-derivation (Graph ` +
-              `error 100) — the Page was merged, renamed or unpublished. Re-run ` +
+              `error ${String(staleCodeOf(err2))}) — the Page was merged, renamed or ` +
+              `unpublished. Re-run ` +
               `facebook_list_pages for the current Page ID and update ` +
               `FB_PAGE_ID / FB_PROFILE_<NAME>_PAGE_ID.`,
             err2,

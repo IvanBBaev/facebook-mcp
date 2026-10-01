@@ -100,6 +100,11 @@ interface RegistryModule {
 
 interface RunnerModule {
   readonly EXIT: Readonly<Record<'ok' | 'failed' | 'refused', number>>;
+  readonly TIMEOUT_CLEANUP_GRACE_MS: number;
+  runWithBudget<T>(
+    run: () => Promise<T>,
+    opts: { timeoutMs: number; graceMs?: number; controller: AbortController },
+  ): Promise<T>;
   parseCliArgs(argv: readonly string[]): {
     list: boolean;
     only: readonly string[];
@@ -138,6 +143,18 @@ const registry = (await import(smokeFile('registry.mjs'))) as RegistryModule;
 // = 2`, which fails the whole suite whatever the assertions say).
 const runner = (await import(smokeFile('run.mjs'))) as RunnerModule;
 const coverage = (await import(smokeFile('coverage.mjs'))) as CoverageModule;
+
+interface CallLog {
+  record(tool: string): void;
+  mark(): number;
+  toolsSince(since?: number): readonly string[];
+}
+
+interface ClientModule {
+  createCallLog(): CallLog;
+}
+
+const client = (await import(smokeFile('client.mjs'))) as ClientModule;
 
 /** A token that satisfies the credential check without resembling a real one. */
 const FAKE_SYSTEM_TOKEN = 'not-a-real-token';
@@ -574,4 +591,92 @@ test('a long uncovered list is truncated with a count rather than printed whole'
   );
   assert.match(line, /\+8 more/, 'twelve names are shown and the rest are counted');
   assert.match(line, /0 of 20 advertised tool\(s\) exercised/);
+});
+
+test('a tool the start sweep called still counts when a smoke calls it again', () => {
+  // Regression: coverage used to be "every answered tool MINUS every tool the
+  // start sweep answered", so facebook_list_posts, facebook_list_scheduled_posts
+  // and facebook_list_comments — which the sweeper and the smokes both call —
+  // were reported NEVER CALLED on every full run. The window is by position in
+  // the call log, not by tool name.
+  const log = client.createCallLog();
+  log.record('facebook_list_posts');
+  log.record('facebook_list_scheduled_posts');
+  const smokesStart = log.mark();
+  log.record('facebook_whoami');
+  log.record('facebook_list_posts');
+  log.record('facebook_whoami');
+  assert.deepEqual(log.toolsSince(smokesStart), [
+    'facebook_list_posts',
+    'facebook_whoami',
+  ]);
+  assert.deepEqual(log.toolsSince(), [
+    'facebook_list_posts',
+    'facebook_list_scheduled_posts',
+    'facebook_whoami',
+  ]);
+});
+
+test('a smoke inside its budget resolves or rejects exactly as it would unbudgeted', async () => {
+  const controller = new AbortController();
+  assert.equal(
+    await runner.runWithBudget(() => Promise.resolve('value'), {
+      timeoutMs: 1000,
+      controller,
+    }),
+    'value',
+  );
+  await assert.rejects(
+    runner.runWithBudget(() => Promise.reject(new Error('assertion failed')), {
+      timeoutMs: 1000,
+      controller,
+    }),
+    /^Error: assertion failed$/,
+  );
+  assert.equal(controller.signal.aborted, false, 'no timeout, no abort');
+});
+
+test('a timed-out smoke is aborted and its cleanup finishes before the run moves on', async () => {
+  // Regression: the budget used to reject the moment the timer fired, so the
+  // smoke's own `finally` cleanup ran detached — its deletions and verdict line
+  // printed under the NEXT smoke's heading and raced that smoke's Graph calls.
+  const controller = new AbortController();
+  const events: string[] = [];
+  const run = async (): Promise<void> => {
+    try {
+      await new Promise<void>((_, reject) => {
+        controller.signal.addEventListener('abort', () => {
+          reject(new Error('aborted'));
+        });
+      });
+    } finally {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      events.push('cleanup done');
+    }
+  };
+  await assert.rejects(
+    runner
+      .runWithBudget(run, { timeoutMs: 10, graceMs: 1000, controller })
+      .finally(() => {
+        events.push('budget settled');
+      }),
+    /timed out after 10 ms; its cleanup finished after the abort/,
+  );
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(events, ['cleanup done', 'budget settled']);
+});
+
+test('a timed-out smoke whose cleanup hangs is abandoned after the grace, and says so', async () => {
+  const controller = new AbortController();
+  const started = Date.now();
+  await assert.rejects(
+    runner.runWithBudget(() => new Promise<never>(() => {}), {
+      timeoutMs: 10,
+      graceMs: 30,
+      controller,
+    }),
+    /timed out after 10 ms; its cleanup was still running 30 ms after the abort/,
+  );
+  assert.ok(Date.now() - started < 1000, 'the grace is bounded');
+  assert.ok(runner.TIMEOUT_CLEANUP_GRACE_MS > 0);
 });

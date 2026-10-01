@@ -566,6 +566,52 @@ test('an ambiguous write is not_applied, says the journal recorded ATTEMPTED, an
   assert.equal(parsed.journalStatus, 'ok');
 });
 
+test('a not_applied notice never claims a journal entry when the journal append failed', async () => {
+  // The envelope echoes journalStatus:"failed" beside the notice; a notice that
+  // still said "the audit journal records this" would contradict it, and for an
+  // ambiguous write it would send the operator to reconcile from a record that
+  // does not exist.
+  const run = async (outcome: 'failed' | 'attempted') =>
+    body(
+      await executeWrite(
+        makeWriteCtx(
+          gateReturning({
+            kind: 'result',
+            result: {
+              applied: false,
+              outcome,
+              result: { id: '100_1' },
+              journalStatus: 'failed',
+            },
+          }).gate,
+        ),
+        {
+          tool: 'facebook_update_post',
+          tier: 'reversible',
+          params: { post_id: '100_1' },
+          summary: 'Edit post 100_1',
+          perform: () => Promise.resolve({ id: '100_1' }),
+        },
+      ),
+    );
+
+  const refused = await run('failed');
+  const refusedNotice = str(refused.notPerformedNotice);
+  assert.equal(refused.journalStatus, 'failed');
+  assert.match(refusedNotice, /nothing landed/, refusedNotice);
+  assert.match(refusedNotice, /journal append failed/, refusedNotice);
+  assert.doesNotMatch(refusedNotice, /records this/, refusedNotice);
+
+  const attempted = await run('attempted');
+  const attemptedNotice = str(attempted.notPerformedNotice);
+  assert.equal(attempted.journalStatus, 'failed');
+  assert.match(attemptedNotice, /unconfirmed/, attemptedNotice);
+  assert.match(attemptedNotice, /journal append failed/, attemptedNotice);
+  assert.match(attemptedNotice, /duplicate/, attemptedNotice);
+  assert.doesNotMatch(attemptedNotice, /records this/, attemptedNotice);
+  assert.doesNotMatch(attemptedNotice, /nothing landed/, attemptedNotice);
+});
+
 test('the journal outcome is echoed on the applied and the refused envelopes', async () => {
   const refused = body(
     await executeWrite(

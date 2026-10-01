@@ -195,6 +195,19 @@ author using Phases 1–3 weekly on the real Page (PM minor).
 **Exit gate:** `npx -y <pkg>` cold-start works in Claude Desktop/Code on
 macOS + Windows; a non-author completes onboarding in ≤20 min (PM #3).
 
+  ✎ **Cold-start half automated.** `scripts/cold-start.mjs` (`npm run
+  cold-start`) spawns `npx -y <spec>` over stdio exactly as the clients do —
+  empty working directory, fresh npm cache/userconfig/prefix — and requires
+  `initialize` to report the package's own name/version and `tools/list` to
+  return a non-empty set, with nothing but JSON-RPC on stdout. The `cold-start`
+  job in `ci.yml` runs it against the packed tarball of every commit on
+  ubuntu/macOS/windows; `--spec @ivanbaev/facebook-mcp@<version>` checks a
+  published release. No credential and no Graph call: the child gets a visibly
+  fake token, and a `fetch` fence preloaded into the spawned tree fails the run
+  if startup touches the network. What stays manual is the client itself (a
+  Claude Desktop/Code config pointing at the package) and the ≤20 min
+  non-author onboarding.
+
 ## Phase 5 — Ads (rescoped: read + status/budget control — A12)
 
 **Entry:** Phase 4 shipped; spending limit set on the ad account.

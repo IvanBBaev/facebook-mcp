@@ -13,15 +13,16 @@ numbered steps and **verify by…** checks. They are grounded in the design in
 
 ## Runbooks
 
-| Runbook                                          | Use it when                                                                                                    |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
-| [onboarding.md](onboarding.md)                   | You are setting the server up for the first time — Meta app, scopes, `setup-token`, `doctor`.                  |
-| [credential-rotation.md](credential-rotation.md) | A token is expiring, leaked, or you suspect compromise — rotate or revoke the System User token or Page token. |
-| [kill-switch.md](kill-switch.md)                 | You need to immediately halt all write activity (posts, moderation, messaging, ads).                           |
-| [app-upkeep.md](app-upkeep.md)                   | The ~4-week maintenance pass — Meta changelog, API-version deprecation, Data Use Checkup, token expiry.        |
-| [offboarding.md](offboarding.md)                 | You are decommissioning the server — clean uninstall, token revocation, and local-state deletion.              |
-| [operator-window.md](operator-window.md)         | You need live QA for the three tools no smoke test can cover — send message, private reply, block user.        |
-| [release.md](release.md)                         | You are cutting a release — tag, CI-only publish, provenance, MCPB bundle, registry listing.                   |
+| Runbook                                          | Use it when                                                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| [onboarding.md](onboarding.md)                   | You are setting the server up for the first time — Meta app, scopes, `setup-token`, `doctor`.                   |
+| [onboarding-trial.md](onboarding-trial.md)       | You need to prove a newcomer reaches the first tool call in ≤ 20 minutes from the docs alone — tester protocol. |
+| [credential-rotation.md](credential-rotation.md) | A token is expiring, leaked, or you suspect compromise — rotate or revoke the System User token or Page token.  |
+| [kill-switch.md](kill-switch.md)                 | You need to immediately halt all write activity (posts, moderation, messaging, ads).                            |
+| [app-upkeep.md](app-upkeep.md)                   | The ~4-week maintenance pass — Meta changelog, API-version deprecation, Data Use Checkup, token expiry.         |
+| [offboarding.md](offboarding.md)                 | You are decommissioning the server — clean uninstall, token revocation, and local-state deletion.               |
+| [operator-window.md](operator-window.md)         | You need live QA for the three tools no smoke test can cover — send message, private reply, block user.         |
+| [release.md](release.md)                         | You are cutting a release — tag, CI-only publish, provenance, MCPB bundle, registry listing.                    |
 
 ## Related
 

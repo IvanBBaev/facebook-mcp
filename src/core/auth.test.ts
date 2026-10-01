@@ -5,6 +5,7 @@ import {
   debugToken,
   createPageTokenResolver,
   ERROR_CODE_INVALID_PARAM,
+  ERROR_CODE_PAGE_MIGRATED,
   ERROR_CODE_TOKEN_INVALID,
   isPageTokenDead,
   STALE_OBJECT_SUBCODES,
@@ -290,7 +291,6 @@ test('the no-base-token guidance tells an operator with an unbound FB_PAGE_TOKEN
   // token route, and name the binding pairs with THIS Page's id filled in.
   await assert.rejects(resolver.resolve('100'), (e: unknown) => {
     assert.ok(e instanceof GraphApiError);
-    assert.equal(e.code, ERROR_CODE_TOKEN_INVALID);
     assert.match(e.message, /No base token available/);
     assert.match(e.message, /FB_SYSTEM_TOKEN or FB_ACCESS_TOKEN/);
     assert.match(e.message, /FB_PAGE_TOKEN with FB_PAGE_ID=100\b/);
@@ -1474,6 +1474,66 @@ test('isPageTokenDead: 190, 102 and 100 with a stale-object subcode evict; other
   assert.equal(isPageTokenDead(new Error('190')), false);
 });
 
+/** Graph's top-level migration error: "(#21) Page ID X was migrated to page ID Y". */
+function pageMigrated(): GraphApiError {
+  return new GraphApiError('(#21) Page ID 100 was migrated to page ID 200.', {
+    code: ERROR_CODE_PAGE_MIGRATED,
+    httpStatus: 400,
+  });
+}
+
+test('isPageTokenDead: a top-level code 21 (Page migrated) evicts like 100/21', () => {
+  // Graph ships the same migration two ways: as 100/21, and as top-level code
+  // 21. The error matrix already carries both rows (`not-found-100-21`,
+  // `not-found-21`); the eviction rail only knew the first, so a token derived
+  // for the old id stayed cached for the rest of its TTL.
+  assert.equal(isPageTokenDead(pageMigrated()), true);
+});
+
+test('runWithPageToken: a top-level code 21 re-derives once like 100/21', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ access_token: 'EAA-page-v1', id: '100' }));
+  fb.enqueue(fbOk({ access_token: 'EAA-page-v2', id: '100' }));
+  const resolver = createPageTokenResolver({
+    fbRequest: fb.fn,
+    baseToken: 'EAA-base',
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+  });
+
+  const seen: string[] = [];
+  const out = await resolver.runWithPageToken('100', (token) => {
+    seen.push(token);
+    return seen.length === 1
+      ? Promise.reject(pageMigrated())
+      : Promise.resolve('recovered');
+  });
+
+  assert.equal(out, 'recovered');
+  assert.deepEqual(seen, ['EAA-page-v1', 'EAA-page-v2']);
+});
+
+test('runWithPageToken: an override token on top-level 21 names code 21, not 100', async () => {
+  const resolver = createPageTokenResolver({
+    fbRequest: createFakeFbRequest().fn,
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+    overrides: { '100': 'EAA-configured-page-token' },
+  });
+
+  await assert.rejects(
+    resolver.runWithPageToken('100', () => Promise.reject(pageMigrated())),
+    (e: unknown) => {
+      assert.ok(e instanceof GraphApiError);
+      assert.equal(e.code, ERROR_CODE_PAGE_MIGRATED);
+      assert.match(e.message, /merged, renamed or unpublished/);
+      assert.match(e.message, /\(Graph error 21\)/);
+      assert.doesNotMatch(e.message, /Graph error 100/);
+      return true;
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Wave 22 — guidance that tells the operator the truth
 // ---------------------------------------------------------------------------
@@ -1583,4 +1643,32 @@ test('a 2xx derivation with no access_token does not claim Graph error 190 or HT
     assert.equal(e.action?.nextTool, 'facebook_whoami');
     return true;
   });
+});
+
+test('no base token: the error claims no Graph code or HTTP status, and carries an action (wave 28)', async () => {
+  // No request was sent — this is a configuration gap, not a Graph answer. It
+  // used to report `code: 190, httpStatus: 401`: two wire facts Graph never
+  // sent. The hub copies both into the tool result, where 190 reads "Invalid
+  // OAuth access token" for a token that does not exist, and with no `action`
+  // the model got no `retryable` / `nextTool`.
+  const fb = createFakeFbRequest();
+  const resolver = createPageTokenResolver({
+    fbRequest: fb.fn,
+    clock: createFakeClock(),
+    redactor: createFakeRedactor(),
+  });
+
+  await assert.rejects(resolver.resolve('100'), (e: unknown) => {
+    assert.ok(e instanceof GraphApiError);
+    assert.match(e.message, /No base token available/);
+    assert.equal(e.code, 0, 'no Graph code: nothing was sent');
+    assert.equal(e.httpStatus, 0, 'no HTTP status: nothing was sent');
+    assert.equal(e.subcode, undefined);
+    assert.equal(isPageTokenDead(e), false);
+    assert.equal(e.action?.category, 'auth');
+    assert.equal(e.action?.retryable, false);
+    assert.equal(e.action?.nextTool, 'facebook_whoami');
+    return true;
+  });
+  assert.equal(fb.calls.length, 0);
 });

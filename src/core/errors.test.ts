@@ -28,6 +28,8 @@ import {
   NO_ERROR_MESSAGE,
   nonJsonBodyAction,
   PROXY_ENV_HINT,
+  DEFAULT_HINT_LAUNCH_COMMAND,
+  setHintLaunchCommand,
   toGraphApiError,
   type GraphErrorEnvelope,
 } from './errors.js';
@@ -384,6 +386,31 @@ test('324 is an unusable media file (validation, not retryable), never "unclassi
   assert.equal(classifyHttpError(400, 324), 'terminal');
 });
 
+// The appsecret_proof hint ends with a doctor command. It used to hard-code
+// `facebook-mcp doctor`, which an operator who launched through npx or from a
+// source checkout cannot type; it now names the launch form injected at startup.
+test('the appsecret_proof hint names the doctor in the injected launch form', () => {
+  const envelope = {
+    code: 100,
+    message: 'Invalid appsecret_proof provided in the API argument',
+  };
+  try {
+    const initial = classifyGraphError(envelope).operatorText;
+    assert.ok(initial.includes(`\`${DEFAULT_HINT_LAUNCH_COMMAND} doctor\``), initial);
+    setHintLaunchCommand('npx -y @ivanbaev/facebook-mcp');
+    const text = classifyGraphError(envelope).operatorText;
+    assert.ok(text.includes('`npx -y @ivanbaev/facebook-mcp doctor`'), text);
+    assert.ok(!text.includes('`facebook-mcp doctor`'), text);
+    // A blank launch form restores the default rather than printing ` doctor`.
+    setHintLaunchCommand('  ');
+    assert.ok(
+      classifyGraphError(envelope).operatorText.includes('`facebook-mcp doctor`'),
+    );
+  } finally {
+    setHintLaunchCommand(DEFAULT_HINT_LAUNCH_COMMAND);
+  }
+});
+
 // Graph rejects a bad or missing `appsecret_proof` as a plain code 100 — no
 // subcode — which the matrix reads as "fix the arguments". The arguments are
 // not what is wrong: the proof is computed from FB_APP_SECRET, so the operator
@@ -488,6 +515,15 @@ test('CC-NET-3: throttles honor estimated_time_to_regain_access (minutes) as sur
     classifyGraphError({ code: 32, estimated_time_to_regain_access: 0 }).retryAfterMs,
     60_000,
   );
+});
+
+test('CC-NET-3: an ETA whose minutes overflow to Infinity ms is no ETA, not an unbounded wait', () => {
+  // 1e307 is a finite number, so the finite guard on the MINUTES passed it, but
+  // ×60_000 it is `Infinity` ms. Surfaced, `retryAfterMs: Infinity` serialises
+  // to `null` in the tool result — the caller is told nothing at all.
+  const a = classifyGraphError({ code: 4, estimated_time_to_regain_access: 1e307 });
+  assert.ok(Number.isFinite(a.retryAfterMs), String(a.retryAfterMs));
+  assert.equal(a.retryAfterMs, DEFAULT_THROTTLE_RETRY_AFTER_MS);
 });
 
 // ---------------------------------------------------------------------------

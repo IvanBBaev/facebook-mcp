@@ -731,6 +731,29 @@ test('fetch_results on a complete run reads the rows from the run edge', async (
   assert.equal(fb.calls.length, 2);
 });
 
+test('fetch_results forwards limit and after to the run edge', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(
+    (r) => r.path === `/${REPORT_RUN_ID}`,
+    fbOk({ async_status: 'Job Completed', async_percent_completion: 100 }),
+  );
+  fb.on(
+    (r) => r.path === `/${REPORT_RUN_ID}/insights`,
+    fbOk({ data: [{ impressions: '30' }] }),
+  );
+
+  await tool('facebook_ads_report_status').handler(
+    { report_run_id: REPORT_RUN_ID, fetch_results: true, limit: 7, after: 'CURSOR_2' },
+    ctx,
+  );
+
+  const rowsRead = fb.calls.find((r) => r.path === `/${REPORT_RUN_ID}/insights`);
+  assert.ok(rowsRead && isJson(rowsRead));
+  const params = obj(rowsRead.params);
+  assert.equal(String(params.limit), '7');
+  assert.equal(params.after, 'CURSOR_2');
+});
+
 test('a stalled run is flagged as stalled rather than reported as progressing', async () => {
   const { ctx, fb } = makeHarness();
   fb.on(
@@ -1387,6 +1410,91 @@ test('an unconfigured ad account whose owner cannot be read still previews a pau
     ),
   );
   assert.equal(preview.status, 'preview');
+});
+
+test('a cancel during the owner-account read is rethrown, not swallowed as "unreadable"', async () => {
+  // An unreadable owner account is tolerated (the write proceeds without a
+  // currency echo), but a caller cancel must still stop the call: swallowing
+  // it would build and journal a preview the caller already walked away from.
+  const { fb, ctx, journal } = makeHarness({ adAccountId: undefined });
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`,
+    fbOk(campaignNode({ status: 'ACTIVE', account_id: BARE_ACCOUNT_ID })),
+  );
+  const controller = new AbortController();
+  const cancellingCtx: WriteToolContext = {
+    ...ctx,
+    signal: controller.signal,
+    fbRequest: async <T>(req: FbRequest) => {
+      if (req.path === `/${ACCOUNT_ID}`) {
+        controller.abort();
+        throw Object.assign(new Error('This operation was aborted'), {
+          name: 'AbortError',
+        });
+      }
+      return fb.fn<T>(req);
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      tool('facebook_update_ad_object').handler(
+        { object_id: CAMPAIGN_ID, level: 'campaign', status: 'PAUSED' },
+        cancellingCtx,
+      ),
+    (err: unknown) => err instanceof Error && err.name === 'AbortError',
+  );
+  assert.equal(writes(fb).length, 0);
+  assert.equal(journal.entries.length, 0);
+});
+
+test('an account_id already in act_ form is compared as-is against the resolved account', async () => {
+  const { fb, ctx } = makeHarness();
+  stubWriteReads(fb, { object: campaignNode({ account_id: ACCOUNT_ID }) });
+
+  const preview = body(
+    await tool('facebook_update_ad_object').handler(
+      { object_id: CAMPAIGN_ID, level: 'campaign', status: 'PAUSED' },
+      ctx,
+    ),
+  );
+  assert.equal(preview.status, 'preview');
+
+  const other = makeHarness();
+  stubWriteReads(other.fb, { object: campaignNode({ account_id: OTHER_ACCOUNT_ID }) });
+  await assert.rejects(
+    () =>
+      tool('facebook_update_ad_object').handler(
+        { object_id: CAMPAIGN_ID, level: 'campaign', status: 'PAUSED' },
+        other.ctx,
+      ),
+    (err: unknown) =>
+      err instanceof GraphApiError && err.message.includes(`${OTHER_ACCOUNT_ID},`),
+  );
+});
+
+test('a lifetime-budget update without a level previews and applies', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  stubWriteReads(fb, {
+    object: campaignNode({ daily_budget: undefined, lifetime_budget: '9000' }),
+  });
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  const update = tool('facebook_update_ad_object');
+  const args = { object_id: CAMPAIGN_ID, lifetime_budget_minor: 8000 };
+  const preview = body(await update.handler(args, ctx));
+  assert.equal(preview.status, 'preview');
+
+  const applied = body(
+    await update.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+  assert.equal(applied.status, 'applied');
+  const post = writes(fb)[0];
+  assert.ok(post && isJson(post));
+  assert.deepEqual(post.body, { lifetime_budget: 8000 });
+  const metadata = obj(journal.entries.at(-1)?.metadata);
+  assert.equal(metadata.level, undefined, 'no level was given, so none is journaled');
+  assert.deepEqual(metadata.changedFields, ['lifetime_budget']);
 });
 
 test('no budget text tells the model that a minor unit is always one hundredth', () => {

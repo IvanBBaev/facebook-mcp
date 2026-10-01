@@ -911,6 +911,37 @@ test('facebook_send_message previews by default and sends nothing', async () => 
   );
 });
 
+test('the plan-time unknown-outcome warning does not promise a journal entry', async () => {
+  // The warning is shown BEFORE the send, when nobody knows whether the journal
+  // append will succeed: it is best-effort and answers `'failed'` on a full disk
+  // or an unwritable path (CC-LIFE-1). "The journal records attempted" is then a
+  // promise about a record that may not exist; the classification is the fact.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [inboundNode({ agoMs: 2 * HOUR_MS, message: 'Is this in stock?' })]);
+
+  const payload = body(
+    await tool(TOOL_SEND).handler(
+      { conversation_id: CONVERSATION_ID, message: 'Yes, it is.' },
+      ctx,
+    ),
+  );
+
+  const warning = list(payload.warnings, 'warnings')
+    .map(String)
+    .find((w) => w.includes('idempotency key'));
+  assert.ok(warning !== undefined, 'the unknown-outcome warning must be shown');
+  assert.ok(
+    warning.includes('"attempted"'),
+    'the ambiguous send is classified attempted',
+  );
+  assert.doesNotMatch(
+    warning,
+    /journal records/,
+    'a journal append can fail, so the warning must not promise the entry',
+  );
+  assert.match(warning, /append can itself fail/, 'the qualification is stated');
+});
+
 test('no write mode can send a bare apply:true — the send is plan-bound', async () => {
   // The package declares writeModeDefault:'plan', but an operator who typed
   // FB_WRITE_MODE=apply overrides a package default outright, so the default is
@@ -1357,6 +1388,45 @@ test('an ambiguous send carries exactly one verify instruction, naming the conve
   );
 });
 
+test('re-aiming an ambiguous send keeps every diagnostic field of the original error', async () => {
+  // The rebuilt error must not shed what support needs to trace the failure
+  // (subcode, type, fbtrace id), nor the chain back to the wrapped Graph error.
+  const { fb, ctx } = makeCtx();
+  const inner = new GraphApiError('(#2) Service temporarily unavailable', {
+    code: 2,
+    httpStatus: 503,
+  });
+  stubSend(
+    fb,
+    fbErr(
+      new GraphApiError('ambiguous write outcome (HTTP 503 on POST) — do NOT retry', {
+        code: 2,
+        subcode: 1234,
+        type: 'OAuthException',
+        fbtraceId: 'trace-amb',
+        httpStatus: 503,
+        action: ambiguousWriteAction({ detail: 'HTTP 503 on POST' }),
+        cause: inner,
+      }),
+    ),
+  );
+
+  await assert.rejects(
+    sendApply({ recipient_id: PSID, message: 'Did this arrive?' }, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.nextTool, TOOL_GET);
+      assert.equal(err.subcode, 1234);
+      assert.equal(err.type, 'OAuthException');
+      assert.equal(err.fbtraceId, 'trace-amb');
+      let link: unknown = err.cause;
+      while (link instanceof Error && link !== inner) link = link.cause;
+      assert.equal(link, inner);
+      return true;
+    },
+  );
+});
+
 test("a window refusal keeps Meta's userTitle / userMessage for the caller", async () => {
   const { fb, ctx } = makeCtx();
   stubSend(
@@ -1543,6 +1613,55 @@ test('a recipient_id that matches the conversation participant is still accepted
   );
   assert.equal(payload.status, 'applied');
   assert.equal(record(journal.entries[0]?.metadata, 'metadata').windowStatus, 'open');
+});
+
+test('an outbound-only thread still binds recipient_id to its `to` participant', async () => {
+  // The only non-Page id in an outbound-only thread is the addressee, so a
+  // recipient_id naming somebody else is refused just like with an inbound
+  // sender, while the addressee itself is accepted.
+  const refused = makeCtx();
+  stubThread(refused.fb, [outboundNode({ agoMs: HOUR_MS, message: 'Anyone there?' })]);
+  stubSend(refused.fb, fbOk({ message_id: 'mid.wrong', recipient_id: '9999' }));
+  await assert.rejects(
+    tool(TOOL_SEND).handler(
+      { conversation_id: CONVERSATION_ID, recipient_id: '9999', message: 'Hello?' },
+      refused.ctx,
+    ),
+    /not a participant/,
+  );
+  assert.equal(posts(refused.fb).length, 0);
+
+  const accepted = makeCtx();
+  stubThread(accepted.fb, [outboundNode({ agoMs: HOUR_MS, message: 'Anyone there?' })]);
+  stubSend(accepted.fb, fbOk({ message_id: 'mid.ok', recipient_id: PSID }));
+  const payload = await sendApplied(
+    { conversation_id: CONVERSATION_ID, recipient_id: PSID, message: 'Hello?' },
+    accepted.ctx,
+  );
+  assert.equal(payload.status, 'applied');
+});
+
+test('a thread naming only the Page, or addressees without ids, identifies no recipient', async () => {
+  // Rows exist, but every `from` and `to` is the Page itself or carries no id:
+  // there is still nobody to send to, so the send is refused, not guessed.
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, [
+    {
+      id: 'm_self',
+      created_time: graphTime(NOW - HOUR_MS),
+      from: { id: PAGE_ID, name: PAGE_NAME },
+      to: { data: [{ id: PAGE_ID, name: PAGE_NAME }, { name: 'Nameless' }] },
+      message: 'Note to self.',
+    },
+  ]);
+  await assert.rejects(
+    tool(TOOL_SEND).handler(
+      { conversation_id: CONVERSATION_ID, message: 'Hello?', apply: true },
+      ctx,
+    ),
+    /no recipient could be identified/,
+  );
+  assert.equal(posts(fb).length, 0);
 });
 
 test('a whitespace-only message is refused before any request', async () => {

@@ -406,6 +406,15 @@ const REFUSED_NOTICE =
   'the audit journal records this as a failure, not as a change.';
 
 /**
+ * The refusal notice when the journal append itself failed. The Graph verdict is
+ * the same; what changes is that no journal entry exists to point an operator
+ * at, and claiming one would send them looking for a record that is not there.
+ */
+const REFUSED_UNJOURNALED_NOTICE =
+  'The write was attempted and nothing landed. Read the per-item outcomes below for why. ' +
+  'The audit journal append failed (see journalStatus), so this failure is not recorded there.';
+
+/**
  * The `not_applied` notice for an ambiguous write. Telling the model "nothing
  * landed" here invites the retry that duplicates a video whose object already
  * exists (CC-PUB-1); the truth is that the journal holds an ATTEMPTED entry
@@ -417,6 +426,35 @@ const ATTEMPTED_NOTICE =
   'journal records this as ATTEMPTED — not as a change, not as a failure. Verify the current ' +
   'state (the result below carries the ids to check) before retrying; a blind retry can ' +
   'create a duplicate.';
+
+/**
+ * The ambiguous-write notice when the journal append failed. This is the case
+ * where the missing entry matters most: the ATTEMPTED record is how an operator
+ * finds the object to reconcile, so the notice must say it does not exist and
+ * hand that job to whoever reads this result.
+ */
+const ATTEMPTED_UNJOURNALED_NOTICE =
+  'The request reached Facebook, but what it did is unconfirmed: the acknowledgement did not ' +
+  'confirm the write, and an object may now exist that this call cannot vouch for. The audit ' +
+  'journal append failed (see journalStatus), so there is no ATTEMPTED entry to reconcile ' +
+  'later — note the ids in the result below now. Verify the current state before retrying; ' +
+  'a blind retry can create a duplicate.';
+
+/**
+ * Pick the `not_applied` notice. Only a journal verdict of `failed` drops the
+ * "the journal records this" clause: an absent status comes from a caller that
+ * computed none, and its wording predates the append being able to fail.
+ */
+function notAppliedNotice(
+  outcome: ApplyResult<unknown>['outcome'],
+  journalStatus: ApplyResult<unknown>['journalStatus'],
+): string {
+  const unjournaled = journalStatus === 'failed';
+  if (outcome === 'attempted') {
+    return unjournaled ? ATTEMPTED_UNJOURNALED_NOTICE : ATTEMPTED_NOTICE;
+  }
+  return unjournaled ? REFUSED_UNJOURNALED_NOTICE : REFUSED_NOTICE;
+}
 
 function applyPayload<T>(tool: string, result: ApplyResult<T>): Record<string, unknown> {
   if (result.diverged !== undefined) {
@@ -452,8 +490,7 @@ function applyPayload<T>(tool: string, result: ApplyResult<T>): Record<string, u
       applied: false,
       ...outcome,
       tool,
-      notPerformedNotice:
-        result.outcome === 'attempted' ? ATTEMPTED_NOTICE : REFUSED_NOTICE,
+      notPerformedNotice: notAppliedNotice(result.outcome, result.journalStatus),
       ...(result.result !== undefined ? { result: result.result } : {}),
       ...(result.journalStatus !== undefined
         ? { journalStatus: result.journalStatus }

@@ -81,16 +81,71 @@ tool wraps one real capability rather than mirroring every Graph edge.
 
 ## Setup
 
+The first run is five steps, in this order. Budget about 20 minutes; most of it
+is Meta's app UI. [docs/runbooks/onboarding.md](docs/runbooks/onboarding.md) is
+the long form with troubleshooting.
+
+1. **Meta app** — create a **Business**-type app at
+   <https://developers.facebook.com/apps> and note its **App ID** and **App
+   Secret** (Settings → Basic). `setup-token` needs both.
+2. **Short-lived token** — in the
+   [Graph API Explorer](https://developers.facebook.com/tools/explorer/) pick
+   your app, **User Token**, tick the [scopes](#permissions-you-need-to-grant)
+   you need (at least `pages_show_list` and `pages_read_engagement`), and
+   **Generate Access Token**. It lives 1–2 hours, so do step 3 right away.
+3. **Exchange it and write the env file** — `setup-token` swaps it for a
+   ~60-day token, resolves your Page and writes the env file:
+
+   ```bash
+   FB_APP_ID='<app id>' FB_APP_SECRET='<app secret>' \
+   FB_SETUP_TOKEN='<explorer token>' \
+     npx -y @ivanbaev/facebook-mcp setup-token
+   ```
+
+   Success is `status: completed` in the **Run** block and `status: written`
+   in the **Env file** block. The file lands at
+   `~/.config/facebook-mcp/.env` (`$XDG_CONFIG_HOME` if set) or
+   `%APPDATA%\facebook-mcp\.env` on Windows, mode `0600`. The server reads it
+   on every start, so the client config below needs **no** `env` block. More
+   than one Page? Re-run with `--page=<id> --force`.
+
+4. **Pre-flight** — every package you plan to use should be `usable`:
+
+   ```bash
+   npx -y @ivanbaev/facebook-mcp doctor
+   ```
+
+5. **Register the server with your client and make the first call** — see the
+   next two subsections, then ask the client to _"run facebook_whoami"_. A
+   reply naming your token type and Page is the first successful tool call.
+
+The `doctor` and `setup-token` reports name commands in the form you launched
+with (`npx -y @ivanbaev/facebook-mcp …`, `facebook-mcp …` after a global
+install, or `node build/index.js …` from a source checkout). `--help` writes
+`facebook-mcp …`; substitute your launch form. Every subcommand takes `--help`
+without touching the network.
+
 ### (a) Via npx
 
-Configure credentials first (see [below](#configure-credentials)), then run the
-pre-flight check:
+**Claude Code** — one command, then check `/mcp` inside a session:
 
 ```bash
-npx -y @ivanbaev/facebook-mcp doctor   # token, scopes, package matrix
+claude mcp add facebook -- npx -y @ivanbaev/facebook-mcp
 ```
 
-Register it with your MCP client:
+It is registered for the current project directory by default; add
+`--scope user` to have it everywhere. Or install it as a plugin, which wires up
+the same command:
+
+```bash
+/plugin marketplace add IvanBBaev/facebook-mcp
+/plugin install facebook-mcp
+```
+
+**Claude Desktop** — Settings → Developer → **Edit Config** opens
+`claude_desktop_config.json` (macOS:
+`~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`). Add the
+server, save, then **quit and restart** Claude Desktop:
 
 ```json
 {
@@ -103,17 +158,19 @@ Register it with your MCP client:
 }
 ```
 
-**Claude Code plugin** (installs the server wired up):
+Claude Desktop does not load your shell profile. If Node comes from a version
+manager (nvm, fnm, asdf) and the server fails to start, put the absolute path of
+`npx` (`which npx`) in `command`.
 
-```bash
-/plugin marketplace add IvanBBaev/facebook-mcp
-/plugin install facebook-mcp
-```
+Any other stdio client takes the same `command` / `args` pair — see
+[Client compatibility](#client-compatibility).
 
-**Claude Desktop** takes the `.mcpb` bundle attached to the
-[latest release](https://github.com/IvanBBaev/facebook-mcp/releases/latest). It
-carries a build-provenance attestation, so you can prove it came out of this
-repository's workflow before you install it:
+**Claude Desktop bundle (alternative)** — the `.mcpb` attached to the
+[latest release](https://github.com/IvanBBaev/facebook-mcp/releases/latest)
+installs by double-click. Its settings form lists every credential as optional:
+leave them blank to use the env file from step 3 (a blank field never overrides
+it). It carries a build-provenance attestation, so you can prove it came out of
+this repository's workflow before you install it:
 
 ```bash
 gh attestation verify facebook-mcp-0.7.0.mcpb --repo IvanBBaev/facebook-mcp
@@ -128,11 +185,14 @@ git clone https://github.com/IvanBBaev/facebook-mcp.git
 cd facebook-mcp
 npm install
 npm run build
-node build/index.js doctor   # pre-flight: token, scopes, package matrix
-node build/index.js          # or: ./bin/facebook-mcp.mjs
+node build/index.js setup-token   # with the same FB_* variables as step 3
+node build/index.js doctor        # pre-flight: token, scopes, package matrix
+node build/index.js               # or: ./bin/facebook-mcp.mjs
 ```
 
-Point your MCP client at that command with an absolute path:
+Point your MCP client at that command with an absolute path. The `env` block is
+optional — without it the server reads the env file, and a non-blank value here
+overrides the file:
 
 ```json
 {
@@ -204,13 +264,15 @@ unusable on its own. Settings are read from an env file at the XDG/`%APPDATA%`
 config path, or from real environment variables (which take precedence).
 
 If you would rather not assemble the env file by hand, run
-`node build/index.js setup-token` — the guided flow exchanges and classifies a
+`npx -y @ivanbaev/facebook-mcp setup-token` (`node build/index.js setup-token`
+from source) — the guided flow exchanges and classifies a
 token and writes the env file for you (`--page=<id>`, `--env-file=<path>`,
 `--force` to overwrite, `--no-write`/`--dry-run` to rehearse; pass the token via
-`FB_SETUP_TOKEN` rather than on the command line). See
+`FB_SETUP_TOKEN` rather than on the command line; the exchange also needs
+`FB_APP_ID` and `FB_APP_SECRET`). See
 [docs/runbooks/onboarding.md](docs/runbooks/onboarding.md) for the full walkthrough.
 
-Then run `node build/index.js doctor` before anything else: it inspects the
+Then run `doctor` (`npx -y @ivanbaev/facebook-mcp doctor`) before anything else: it inspects the
 token, reports type, expiry and granted scopes, and prints a per-package
 usable / partial / blocked matrix so you find a missing permission before a tool
 call does. It ends with a one-line verdict over everything it found.
@@ -241,8 +303,9 @@ facebook-mcp 0.7.0 (node v22.23.0, darwin arm64, sdk 1.30.0)
 The bare server version is always the second field, so `--version | awk '{print
 $2}'` keeps working. The same three versions plus the pinned Graph API version
 are reported by `facebook_whoami` in its `server` object (`name`, `version`,
-`apiVersion`, `sdkVersion`). `--help` (or `-h`) prints the command summary to
-stdout and exits 0, again without reading any credential. `doctor`, `setup-token`,
+`apiVersion`, `sdkVersion`). `--help` (or `-h`) prints the command summary and
+a first-run recipe to stdout and exits 0, again without reading any credential;
+`setup-token --help` and `doctor --help` do the same instead of running. `doctor`, `setup-token`,
 `--version` and `--help` are the only arguments that exit on their own; **anything
 else starts the stdio server** and waits on JSON-RPC. An argument `doctor` does not
 recognise (say `--stric`) never gates, but the report names it — option names

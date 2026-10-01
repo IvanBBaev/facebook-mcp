@@ -635,3 +635,80 @@ test('the final guard never keeps untrusted content without its warning', () => 
   const out = parseObj(text);
   if ('content' in out) assert.ok('warning' in out, 'content kept without its warning');
 });
+
+test('an array element whose accessor throws costs that element, not the whole result', () => {
+  // `map` read each index itself, so one throwing index getter threw out of the
+  // strip — and, since the journal strips every record the same way, cost the
+  // record of a write that really happened. Object keys already degraded to a
+  // marker; array elements now do too.
+  const list: unknown[] = ['a', 'placeholder', 'c'];
+  Object.defineProperty(list, 1, {
+    enumerable: true,
+    get(): never {
+      throw new Error('index getter exploded');
+    },
+  });
+  let stripped: unknown;
+  assert.doesNotThrow(() => {
+    stripped = stripPagingAndTokens({ list, id: '1' });
+  });
+  assert.deepEqual(stripped, { list: ['a', '[UNREADABLE]', 'c'], id: '1' });
+});
+
+test('a Proxy that refuses to enumerate its keys is emptied, not thrown', () => {
+  const refuses = new Proxy(
+    { access_token: FAKE_TOKEN },
+    {
+      ownKeys(): never {
+        throw new Error('ownKeys trap exploded');
+      },
+    },
+  );
+  let stripped: unknown;
+  assert.doesNotThrow(() => {
+    stripped = stripPagingAndTokens({ node: refuses, id: '1' });
+  });
+  assert.deepEqual(stripped, { node: {}, id: '1' });
+});
+
+test('an over-budget top-level string is replaced by a marker inside a JSON object', () => {
+  const text =
+    shapeResult('s'.repeat(5_000), {
+      maxResultChars: 1_000,
+      redactor: createFakeRedactor(),
+    }).content[0]?.text ?? '';
+  assert.ok(text.length <= 1_000, 'within budget');
+  const out = parseObj(text);
+  assert.equal(out.data, '[dropped 5000 chars]');
+  assert.match(String(out._truncation), /1 large field/);
+});
+
+test('an over-budget top-level array keeps a prefix, wrapped with the note', () => {
+  const payload = Array.from({ length: 500 }, (_v, i) => ({ id: String(i) }));
+  const text =
+    shapeResult(payload, { maxResultChars: 1_000, redactor: createFakeRedactor() })
+      .content[0]?.text ?? '';
+  assert.ok(text.length <= 1_000, 'within budget');
+  const out = parseObj(text);
+  assert.ok(Array.isArray(out.data));
+  const data = out.data as Array<{ id: string }>;
+  assert.ok(data.length > 0 && data.length < 500);
+  assert.equal(data[0]?.id, '0');
+  assert.match(String(out._truncation), /list item/);
+});
+
+test('shapeEnvelope keeps structuredContent a record even if the redactor returns a non-record', () => {
+  // `Redactor.redact` returns `unknown`; `structuredContent` must be an object
+  // for the tool's `outputSchema`, so a stray scalar is wrapped, not dropped.
+  const scalarRedactor = {
+    redact: (): unknown => 'scrubbed',
+    redactString: (s: string): string => s,
+    addSecret: (): void => undefined,
+  };
+  const result = shapeEnvelope(
+    { ok: true },
+    { maxResultChars: BIG_BUDGET, redactor: scalarRedactor },
+  );
+  assert.deepEqual(result.structuredContent, { value: 'scrubbed' });
+  assert.equal(result.content[0]?.text, '{"value":"scrubbed"}');
+});

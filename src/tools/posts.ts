@@ -46,6 +46,7 @@ import {
   MultiPhotoUploadError,
   cleanupUnpublishedPhotos,
   describeOrphans,
+  digestLocalMedia,
   preparePhotoSource,
   preparePhotoSources,
   readLocalPhoto,
@@ -57,6 +58,7 @@ import {
   type MediaPhotoDeps,
   type OrphanCleanupReport,
   type PhotoSource,
+  type PreparedPhotoSource,
 } from '../api/media-photos.js';
 import {
   REEL_VIDEO_STATES,
@@ -535,6 +537,55 @@ async function prepareBase(
   };
 }
 
+/**
+ * Read a local video for upload, refusing bytes the plan did not describe.
+ *
+ * The handler resolves the file and binds its size AND content hash into the
+ * plan params, but `perform()` reads the file again. A file rewritten in
+ * between — even to the same size — would otherwise be uploaded under a plan
+ * that showed a different file. The hash is checked on the very buffer that
+ * is uploaded, so the check cannot be raced by a later rewrite.
+ */
+async function readBoundLocalMedia(
+  requested: string,
+  opts: LocalMediaOptions,
+  bound: { readonly bytes: number; readonly sha256: string },
+): Promise<Awaited<ReturnType<typeof readLocalPhoto>>> {
+  const file = await readLocalPhoto(requested, opts, bound.sha256);
+  const boundBytes = bound.bytes;
+  if (file.bytes !== boundBytes) {
+    throw new MediaSourceError(
+      'file_changed',
+      requested,
+      `"${requested}" is now ${String(file.bytes)} bytes, but the plan was built for ${String(boundBytes)} bytes — the file changed after it was validated, so it was not uploaded. Preview the call again to bind the current file.`,
+    );
+  }
+  return file;
+}
+
+/**
+ * Attach the content hash of every local photo to its source, so the plan can
+ * bind it and the upload can refuse bytes that no longer hash the same. URL
+ * sources pass through: Meta fetches those, this process never sees the bytes.
+ */
+async function bindLocalPhotoContent(
+  sources: readonly PhotoSource[],
+  prepared: readonly PreparedPhotoSource[],
+  opts: LocalMediaOptions,
+): Promise<PhotoSource[]> {
+  const bound: PhotoSource[] = [];
+  for (const [index, source] of sources.entries()) {
+    const ready = prepared[index];
+    if (source.kind === 'local' && ready?.kind === 'local') {
+      const digest = await digestLocalMedia(ready.file, source.path, opts);
+      bound.push({ ...source, sha256: digest.sha256 });
+    } else {
+      bound.push(source);
+    }
+  }
+  return bound;
+}
+
 /** Forward a byte/child counter to the MCP client when it asked for progress. */
 function report(
   ctx: ToolContext,
@@ -976,7 +1027,14 @@ function buildCreatePost() {
         // Local media validation runs BEFORE the preview is returned: a bad path
         // or a non-https URL must fail the dry run, never the approved apply.
         const media = mediaDeps(ctx);
-        if (sources.length > 0) await preparePhotoSources(sources, media);
+        const prepared =
+          sources.length > 0 ? await preparePhotoSources(sources, media) : [];
+        // Each local photo's content hash joins the plan: the apply uploads
+        // exactly the bytes the preview described, or refuses (`file_changed`).
+        const boundSources = await bindLocalPhotoContent(sources, prepared, media);
+        const photoHashes = boundSources.map((source) =>
+          source.kind === 'local' ? (source.sha256 ?? null) : null,
+        );
 
         const echo = plan.schedule !== undefined ? toTimeEcho(plan.schedule) : undefined;
         return executeWrite(ctx, {
@@ -989,6 +1047,9 @@ function buildCreatePost() {
           params: {
             ...plan.params,
             ...(input.photos !== undefined ? { photos: input.photos } : {}),
+            ...(photoHashes.some((hash) => hash !== null)
+              ? { photo_sha256: photoHashes }
+              : {}),
           },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
@@ -1008,7 +1069,7 @@ function buildCreatePost() {
             if (sources.length > 0) {
               const uploaded = await uploadUnpublishedPhotos(media, {
                 pageId: base.page.pageId,
-                sources,
+                sources: boundSources,
                 token: base.page.token,
                 ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
                 onProgress: (done, total) => {
@@ -1125,8 +1186,15 @@ function buildCreatePhotoPost() {
         );
 
         const media = mediaDeps(ctx);
-        // Same contract as the carousel: the source is proven usable in the dry run.
-        await preparePhotoSource(source, media);
+        // Same contract as the carousel: the source is proven usable in the dry
+        // run, and a local file's content hash is bound into the plan.
+        const [boundSource] = await bindLocalPhotoContent(
+          [source],
+          [await preparePhotoSource(source, media)],
+          media,
+        );
+        const photoSha256 =
+          boundSource?.kind === 'local' ? boundSource.sha256 : undefined;
 
         const echo = plan.schedule !== undefined ? toTimeEcho(plan.schedule) : undefined;
         const extraParams: Record<string, ParamValue> =
@@ -1139,7 +1207,11 @@ function buildCreatePhotoPost() {
           tier: 'reversible',
           requirePlanId: publishesNow(plan.publishState),
           pageId: base.page.pageId,
-          params: { ...plan.params, photo: input.photo },
+          params: {
+            ...plan.params,
+            photo: input.photo,
+            ...(photoSha256 !== undefined ? { photo_sha256: photoSha256 } : {}),
+          },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
           summary: plan.summary,
@@ -1151,7 +1223,7 @@ function buildCreatePhotoPost() {
           perform: async (): Promise<Record<string, unknown>> => {
             const uploaded = await uploadPhoto(media, {
               pageId: base.page.pageId,
-              source,
+              source: boundSource ?? source,
               ...(input.caption !== undefined ? { caption: input.caption } : {}),
               published: plan.publishState === 'published',
               token: base.page.token,
@@ -1226,6 +1298,11 @@ function buildCreateVideoPost() {
           source.kind === 'local'
             ? await resolveLocalMediaPath(source.path, opts)
             : undefined;
+        // Streamed, not buffered: binding a 256 MB video costs one chunk of memory.
+        const digest =
+          source.kind === 'local' && resolved !== undefined
+            ? await digestLocalMedia(resolved, source.path, opts)
+            : undefined;
         const sourceLabel =
           source.kind === 'url' ? resolveRemoteMediaUrl(source.url) : source.path;
 
@@ -1258,12 +1335,14 @@ function buildCreateVideoPost() {
           tier: 'reversible',
           requirePlanId: publishesNow(plan.publishState),
           pageId: base.page.pageId,
-          // The size joins the bound params: if the file changes between preview
-          // and apply, the plan no longer describes what would be uploaded.
+          // The size and content hash join the bound params: if the file changes
+          // between preview and apply, the plan no longer describes what would
+          // be uploaded.
           params: {
             ...plan.params,
             source: sourceLabel,
             ...(resolved !== undefined ? { byte_length: resolved.bytes } : {}),
+            ...(digest !== undefined ? { sha256: digest.sha256 } : {}),
           },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
@@ -1313,7 +1392,13 @@ function buildCreateVideoPost() {
               };
             }
 
-            const file = await readLocalPhoto(source.path, opts);
+            // `resolved`/`digest` are always set for a local source; a missing
+            // one fails closed (NaN matches no size, '' no hash) rather than
+            // skipping the check.
+            const file = await readBoundLocalMedia(source.path, opts, {
+              bytes: resolved?.bytes ?? Number.NaN,
+              sha256: digest?.sha256 ?? '',
+            });
             const result = await uploadVideo(
               {
                 fbRequest: ctx.fbRequest,
@@ -1432,6 +1517,8 @@ function buildCreateReel() {
           maxBytes: MAX_LOCAL_VIDEO_BYTES,
         };
         const resolved = await resolveLocalMediaPath(path, opts);
+        // Streamed, not buffered: binding the content costs one chunk of memory.
+        const digest = await digestLocalMedia(resolved, path, opts);
 
         // The Reels window is validated in SECONDS by the api layer, while the
         // ISO parser answers in milliseconds — convert once, here.
@@ -1469,6 +1556,7 @@ function buildCreateReel() {
           params: {
             video: resolved.path,
             byte_length: resolved.bytes,
+            sha256: digest.sha256,
             video_state: input.video_state,
             ...(input.description !== undefined
               ? { description: input.description }
@@ -1494,7 +1582,10 @@ function buildCreateReel() {
           classifyOutcome: classifyPublishFailure,
           metadata: { videoState: input.video_state, byteLength: resolved.bytes },
           perform: async (): Promise<Record<string, unknown>> => {
-            const file = await readLocalPhoto(path, opts);
+            const file = await readBoundLocalMedia(path, opts, {
+              bytes: resolved.bytes,
+              sha256: digest.sha256,
+            });
             const deps: ReelsDeps = {
               fbRequest: ctx.fbRequest,
               logger: ctx.logger,

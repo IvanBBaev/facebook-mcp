@@ -102,9 +102,11 @@ import {
   META_ERROR_TEXT_MAX,
 } from './tools/index.js';
 import { withFetch, type FetchMock } from './testing/index.js';
+import { createUsageTracker } from './tools/core.js';
 import {
   adAccountProbe,
   buildServer,
+  cliLogLevel,
   createTransport,
   isStrictFlag,
   isVersionFlag,
@@ -112,8 +114,10 @@ import {
   loadedPackages,
   metricProbe,
   resolveSdkVersion,
+  runCli,
   runDoctorCommand,
   serverStartedFields,
+  usageText,
   versionLine,
   type BuildServerDeps,
   type SdkVersionSources,
@@ -624,6 +628,44 @@ test('an unadvertised tool name returns an error result, not a protocol error', 
     await close();
   }
   assert.equal(fb.calls.length, 0, 'an unknown tool must never reach Graph');
+});
+
+test('a tools/call whose arguments are not an object is a tool error, not -32603', async () => {
+  // The SDK's own request schema rejects `arguments: null` (or an array, or a
+  // scalar) while parsing, which surfaces as a JSON-RPC -32603 "internal error"
+  // — the one code that tells the model the SERVER broke. The caller sent a
+  // malformed call and must be told so in a result it can correct from.
+  const { deps, fb } = makeHarness();
+  const { client, close } = await connect(deps);
+  try {
+    for (const [bad, shape] of [
+      [null, 'null'],
+      [['a'], 'an array'],
+      ['x', 'a string'],
+    ] as const) {
+      const result = await client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'facebook_whoami',
+            arguments: bad as unknown as Record<string, unknown>,
+          },
+        },
+        CallToolResultSchema,
+      );
+      assert.equal(result.isError, true, `arguments ${shape} must be a tool error`);
+      const error = String(parseResult(result)['error']);
+      assert.match(error, /facebook_whoami/);
+      assert.match(error, /`arguments` must be an object/);
+      assert.ok(
+        error.includes(`got ${shape}`),
+        `the message must name ${shape}: ${error}`,
+      );
+    }
+  } finally {
+    await close();
+  }
+  assert.equal(fb.calls.length, 0, 'a malformed call must never reach Graph');
 });
 
 test('the bootstrap injects the profile, the write gate and the confirmer', async () => {
@@ -1601,14 +1643,15 @@ test('the doctor names the missing credential instead of failing', async () => {
   assert.equal(report.token.configured, false);
   assert.match(report.token.error ?? '', /FB_ACCESS_TOKEN/);
   assert.match(rendered, /facebook-mcp doctor/);
-  // Neither the token inspection nor the ad-account probe spends a call it
-  // already knows will fail; only the metric probe (which has a resolved Page
-  // to try) reaches Graph at all.
+  // No check spends a call it already knows will fail: the token inspection,
+  // the ad-account probe and — with no credential to send — the metric probe
+  // all stay off the wire, so the only verdict line is the missing token.
   assert.equal(report.adAccount.available, false);
   assert.match(report.adAccount.summary, /FB_AD_ACCOUNT_ID/);
+  assert.match(report.metricProbe.summary, /skipped \(no token configured/);
   assert.deepEqual(
     fb.calls.map((call) => call.path),
-    ['/1010/insights'],
+    [],
   );
 });
 
@@ -2481,6 +2524,38 @@ test('isVersionFlag recognises only the version flag and its alias', () => {
   }
 });
 
+test('cliLogLevel quiets routine info above the doctor and setup-token reports', () => {
+  // The report is for a human; a JSON "Resolved active Facebook credential…"
+  // line above it was the first thing a newcomer saw.
+  for (const command of ['doctor', 'setup-token']) {
+    assert.equal(cliLogLevel(command, 'info'), 'warn', command);
+    assert.equal(cliLogLevel(command, 'warn'), 'warn', command);
+    assert.equal(cliLogLevel(command, 'error'), 'error', command);
+    // An explicit debug request is honored: the operator asked for everything.
+    assert.equal(cliLogLevel(command, 'debug'), 'debug', command);
+  }
+  // Server mode keeps the configured level: its stderr JSON stream is a contract.
+  for (const command of [undefined, '--stdio', 'serve', 'doctorx']) {
+    for (const level of ['debug', 'info', 'warn', 'error'] as const) {
+      assert.equal(cliLogLevel(command, level), level, `${String(command)}/${level}`);
+    }
+  }
+});
+
+test('the CLI log level drops the credential info line but keeps warnings', () => {
+  const lines: string[] = [];
+  const logger = createLogger({
+    clock: createFakeClock(0),
+    redactor: createFakeRedactor(),
+    level: cliLogLevel('doctor', 'info'),
+    write: (line) => lines.push(line),
+  });
+  logger.info('Resolved active Facebook credential for page resolution', {});
+  logger.warn('startup config warning', {});
+  assert.equal(lines.length, 1);
+  assert.match(lines[0] ?? '', /"level":"warn"/);
+});
+
 test('isStrictFlag reads only the doctor argument list, and only the long form', () => {
   assert.equal(isStrictFlag(['--strict']), true);
   // The flag may sit anywhere after the subcommand.
@@ -2643,10 +2718,12 @@ test('--help prints usage and exits 0 without loading settings or starting a ser
   // missing token instead of waiting on stdin as a stdio server.
   const cwd = mkdtempSync(join(tmpdir(), 'facebook-mcp-help-'));
   try {
-    for (const flag of ['--help', '-h']) {
+    // The subcommand forms are what a first-time operator types to learn the
+    // flags; they used to run the flow (setup-token: a FAIL report, exit 2).
+    for (const flag of ['--help', '-h', 'setup-token --help', 'doctor -h']) {
       const child = spawnSync(
         process.execPath,
-        [fileURLToPath(new URL('./index.js', import.meta.url)), flag],
+        [fileURLToPath(new URL('./index.js', import.meta.url)), ...flag.split(' ')],
         {
           cwd,
           env: { PATH: process.env['PATH'] ?? '', HOME: cwd, USERPROFILE: cwd },
@@ -2660,15 +2737,65 @@ test('--help prints usage and exits 0 without loading settings or starting a ser
         0,
         `${flag}: exit ${String(child.status)}; stderr: ${child.stderr}`,
       );
-      assert.match(child.stdout, /^Usage: facebook-mcp/m, `${flag}: no usage on stdout`);
+      // The child runs `build/index.js` directly, so the usage names that form.
+      assert.match(
+        child.stdout,
+        /^Usage: node build\/index\.js \[command\]/m,
+        `${flag}: no usage on stdout`,
+      );
       for (const word of ['doctor', '--strict', 'setup-token', '--version']) {
         assert.ok(child.stdout.includes(word), `${flag}: usage does not mention ${word}`);
       }
+      // The first-run hint names the npx form with the manifest's real package
+      // name, so an npx user is not left typing a `facebook-mcp` that is not on PATH.
+      assert.match(child.stdout, /First run/, `${flag}: no first-run hint`);
+      // The exchange fails without the app pair, so the recipe must carry it.
+      assert.match(
+        child.stdout,
+        /FB_APP_SECRET=/,
+        `${flag}: first-run hint lacks app creds`,
+      );
+      assert.match(
+        child.stdout,
+        /FB_SETUP_TOKEN=/,
+        `${flag}: first-run hint lacks the env var`,
+      );
+      assert.match(child.stdout, /npx -y @[\w-]+\/facebook-mcp/, `${flag}: no npx form`);
       assert.equal(child.stderr, '', `${flag}: unexpected stderr: ${child.stderr}`);
     }
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test('--help renders every command in the launch form that started the process', () => {
+  // The usage line and the first-run recipe used to say `facebook-mcp`, which is
+  // only on PATH after a global install; an npx user copied a command their
+  // shell does not know.
+  const npx = 'npx -y @ivanbaev/facebook-mcp';
+  const text = usageText('@ivanbaev/facebook-mcp', npx);
+  assert.match(text, /^Usage: npx -y @ivanbaev\/facebook-mcp \[command\]$/m);
+  assert.match(
+    text,
+    /FB_SETUP_TOKEN=<[^>]+> npx -y @ivanbaev\/facebook-mcp setup-token$/m,
+  );
+  assert.match(text, /^ {2}npx -y @ivanbaev\/facebook-mcp doctor$/m);
+  assert.doesNotMatch(
+    text,
+    /^Usage: facebook-mcp|^ {2}facebook-mcp (doctor|setup-token)/m,
+  );
+  // The other launch forms are still listed, without repeating the current one.
+  assert.match(text, /after a global install: +facebook-mcp$/m);
+  assert.match(text, /from a source checkout: +node build\/index\.js$/m);
+  assert.doesNotMatch(text, /through npx:/);
+});
+
+test('--help without a resolved launch form falls back to the binary name', () => {
+  const text = usageText(undefined);
+  assert.match(text, /^Usage: facebook-mcp \[command\]$/m);
+  assert.match(text, /^ {2}facebook-mcp doctor$/m);
+  assert.match(text, /through npx: +npx -y <npm package>$/m);
+  assert.doesNotMatch(text, /after a global install:/);
 });
 
 // ---------------------------------------------------------------------------
@@ -3106,4 +3233,78 @@ test('the production transport sends a multipart upload instead of refusing it',
     return out;
   });
   assert.deepEqual(res.data, { id: 'photo_1' });
+});
+
+test('the production transport feeds the usage tracker from JSON and upload responses', async () => {
+  // main() hands usageTracker.record to createTransport. Without that wiring
+  // facebook_usage only ever saw its own /me probe, which never carries the
+  // Business-use-case bucket that Page calls and uploads report.
+  const tracker = createUsageTracker();
+  const buc =
+    '{"1234":[{"type":"pages","call_count":40,"total_cputime":1,"total_time":1}]}';
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      json: { id: '1' },
+      headers: { 'x-app-usage': '{"call_count":7,"total_cputime":1,"total_time":1}' },
+    });
+    mock.enqueue({
+      json: { id: 'photo_1' },
+      headers: { 'x-business-use-case-usage': buc },
+    });
+    const fbRequest = createTransport({
+      settings: probeSettings(),
+      clock: createFakeClock(1_000),
+      redactor: createFakeRedactor(),
+      logger: silentLogger,
+      onUsage: tracker.record,
+    });
+    await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' });
+    await fbRequest({
+      protocol: 'multipart',
+      host: 'graph',
+      method: 'POST',
+      path: '/1/photos',
+      fields: { published: 'false' },
+      files: [{ name: 'source', data: new Uint8Array([0xff]), filename: 'p.jpg' }],
+    });
+  });
+  const observed = tracker.observed();
+  assert.equal(observed['x-app-usage']?.pct, 7);
+  assert.equal(observed['x-business-use-case-usage']?.pct, 40);
+});
+
+test('runCli says "failed to start" only for a failure before the server started', async () => {
+  // A transport that dies an hour into a session is not a startup failure, and
+  // reporting it as one sends the operator to check the token and settings of
+  // a server that started fine.
+  const outcomes: { line: string; code?: number }[] = [];
+  const io = {
+    writeStderr: (line: string): void => {
+      outcomes.push({ line });
+    },
+    exit: (code: number): void => {
+      const last = outcomes.at(-1);
+      if (last !== undefined) last.code = code;
+    },
+  };
+
+  await runCli(() => Promise.reject(new Error('FB_ACCESS_TOKEN is not set')), io);
+  await runCli(async (onStarted) => {
+    onStarted();
+    await Promise.resolve();
+    throw new Error('stdin closed with a read error');
+  }, io);
+  // A clean shutdown after the start writes nothing and exits nothing.
+  await runCli(async (onStarted) => {
+    onStarted();
+    await Promise.resolve();
+  }, io);
+
+  assert.deepEqual(outcomes, [
+    { line: 'facebook-mcp failed to start: FB_ACCESS_TOKEN is not set\n', code: 1 },
+    {
+      line: 'facebook-mcp stopped unexpectedly: stdin closed with a read error\n',
+      code: 1,
+    },
+  ]);
 });

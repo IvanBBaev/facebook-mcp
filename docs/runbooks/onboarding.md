@@ -14,10 +14,10 @@ people's Pages are involved.
 
 An env file at the platform config path, mode `0600`:
 
-| Platform | Path                                                            |
-| -------- | --------------------------------------------------------------- |
+| Platform    | Path                                                                         |
+| ----------- | ---------------------------------------------------------------------------- |
 | macOS/Linux | `$XDG_CONFIG_HOME/facebook-mcp/.env` (default `~/.config/facebook-mcp/.env`) |
-| Windows  | `%APPDATA%\facebook-mcp\.env`                                    |
+| Windows     | `%APPDATA%\facebook-mcp\.env`                                                |
 
 > **Windows honesty note.** `0600` has no exact NTFS equivalent. The server
 > reports what protection it actually achieved rather than claiming a POSIX mode
@@ -105,16 +105,34 @@ Pass the token through the **environment**, not as an argument. A command-line
 argument is visible to every process on the machine (`ps`) and lands in your
 shell history; the tool warns when you do it anyway.
 
+Put the App ID and App Secret from Step 1 on the **same command** (or export
+them first). Without them the `exchange` step fails and nothing is written:
+
 ```sh
-FB_SETUP_TOKEN='<paste>' npx @ivanbaev/facebook-mcp setup-token
+FB_APP_ID='<app id>' FB_APP_SECRET='<app secret>' \
+FB_SETUP_TOKEN='<paste>' \
+  npx -y @ivanbaev/facebook-mcp setup-token
 ```
 
 From a source checkout:
 
 ```sh
 npm run build
-FB_SETUP_TOKEN='<paste>' node build/index.js setup-token
+FB_APP_ID='<app id>' FB_APP_SECRET='<app secret>' \
+FB_SETUP_TOKEN='<paste>' \
+  node build/index.js setup-token
 ```
+
+On Windows PowerShell, set each variable first
+(`$env:FB_APP_ID='<app id>'`, and so on for `FB_APP_SECRET` and
+`FB_SETUP_TOKEN`), then run `npx -y @ivanbaev/facebook-mcp setup-token`.
+
+`setup-token --help` prints the usage without running anything. The report's
+hints and its `Next step:` line name commands in the form you launched with
+(`npx -y @ivanbaev/facebook-mcp …`, `facebook-mcp …` after a global install, or
+`node build/index.js …` from a source checkout). Routine info logs are not
+printed above the report; warnings and errors still are, and
+`FB_LOG_LEVEL=debug` shows everything.
 
 What it does, in order — these are the five step ids the report prints:
 
@@ -163,8 +181,15 @@ is not on its own a sign that anything worked.
 ## Step 5 — Confirm with `doctor`
 
 ```sh
-npx @ivanbaev/facebook-mcp doctor
+npx -y @ivanbaev/facebook-mcp doctor
 ```
+
+The report goes to stderr and the command exits `0` whatever it finds (add
+`--strict` to make it a gate).
+If the token check itself cannot reach Graph (network fault, a Meta 5xx or a
+throttle), the report says `TOKEN NOT CHECKED` and the metric and ad-account
+probes are shown as `skipped` rather than retried over the same connection —
+fix the connection and re-run.
 
 The doctor never throws for an auth or scope problem — it *reports*. Read the
 permission × package matrix: every package you intend to use should be usable.
@@ -198,11 +223,63 @@ Meta still recommends the 60-day variant plus scheduled rotation — see
 
 ---
 
-## Step 7 — Point your MCP client at it
+## Step 7 — Point your MCP client at it (≈3 min)
 
-See the README's **client compatibility matrix** for the per-client config shape
-and what has actually been verified. The server speaks stdio by default; stdout
-is reserved for the protocol, so **all** diagnostics go to stderr.
+The server reads the env file from Step 4 on every start, so the client config
+needs **no** `env` block. (If you add one, a non-blank value there overrides the
+file; a blank one does not.) The server speaks stdio; stdout is reserved for the
+protocol, so **all** diagnostics go to stderr.
+
+**Claude Code:**
+
+```sh
+claude mcp add facebook -- npx -y @ivanbaev/facebook-mcp
+```
+
+That registers it for the current project directory; add `--scope user` for
+every project. Start `claude` and run `/mcp` — `facebook` should be listed as
+connected.
+
+**Claude Desktop:** Settings → Developer → **Edit Config** opens
+`claude_desktop_config.json` (macOS `~/Library/Application Support/Claude/`,
+Windows `%APPDATA%\Claude\`). Merge in:
+
+```json
+{
+  "mcpServers": {
+    "facebook": {
+      "command": "npx",
+      "args": ["-y", "@ivanbaev/facebook-mcp"]
+    }
+  }
+}
+```
+
+Save, then **quit Claude Desktop completely and start it again** — it reads the
+file only at launch. Claude Desktop does not load your shell profile: if Node
+comes from nvm / fnm / asdf and the server shows as failed, put the absolute
+path from `which npx` in `command`.
+
+For the `.mcpb` bundle, leave every credential field in its settings form blank
+to use the env file.
+
+Other clients: the README's **client compatibility matrix** lists where each one
+keeps its config; the `command` / `args` pair is the same everywhere.
+
+**Verify by…** the client lists the `facebook_*` tools.
+
+---
+
+## Step 8 — First tool call (≈1 min)
+
+Ask the client, in plain words: *"Run facebook_whoami."* Approve the tool call
+if the client asks.
+
+**Verify by…** the result reports your token type (`USER` or `SYSTEM_USER`),
+`valid: true`, the granted scopes and the acting Page. That is a working
+install. A follow-up *"List my Facebook Pages"* (`facebook_list_pages`) is a
+good second check. Writes stay in `plan` mode until you opt in — see
+`FB_WRITE_MODE` in the README.
 
 ---
 
@@ -211,6 +288,7 @@ is reserved for the protocol, so **all** diagnostics go to stderr.
 | Symptom                                                        | Cause                                                                    | Fix                                                                          |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `input` failed, "no short-lived token supplied"                | `FB_SETUP_TOKEN` was unset or blank and no token argument was given.      | Redo Step 3 and pass the token through the env var. Nothing was called and nothing was written. |
+| `classify` failed, "Graph did not answer the token check"      | Graph was not reached (network, proxy, a Meta outage) — the token was never assessed. | Do not regenerate it. Fix the connection (and any `HTTPS_PROXY`) and rerun Step 4 while the Explorer token is still valid. |
 | `classify` failed, "token is not valid"                        | The Explorer token already expired (1–2 hours).                          | Generate a fresh one and rerun Step 4.                                       |
 | `classify` failed, `pages_show_list` missing                   | The scope was not ticked in the Explorer.                                 | Re-tick it, regenerate, rerun. This one is genuinely blocking.               |
 | `classify` failed, "this is already a Page token"              | You copied a Page token, not a User token.                                | Switch the Explorer dropdown to **User Token**. (A Page token needs no exchange at all — set `FB_PAGE_TOKEN` and `FB_PAGE_ID` by hand and run `doctor`.) |
@@ -219,7 +297,7 @@ is reserved for the protocol, so **all** diagnostics go to stderr.
 | `pages` OK, "N Page(s) found; none selected"                   | More than one Page and no `--page=<id>`. The server refuses to guess which Page you meant. | Also not a failure: exit `0`, env file written with no Page pinned, and a warning saying so. Rerun with **both** `--page=<id>` and `--force` — the file this run just wrote is itself the "already exists" that would block the second run. |
 | `pages` failed, "Page … is not among the Pages this token can see" | The `--page=<id>` you gave is not in the listing.                     | Use one of the ids the failure detail lists. If the summary instead says *first 100 Pages … Graph reported more*, your Page is outside the single window this flow reads: pin it by hand with `FB_PAGE_ID` / `FB_PAGE_TOKEN`. |
 | `write` failed, "env file already exists"                      | An env file is already there and `--force` was not given.                 | Rerun with `--force` — but note it **replaces** the file, it does not merge. This is a failed step, so the run exits `2`. |
-| Everything green, but the client shows no tools                | The client injects its own env, or is running a different binary.         | Run `doctor` through the *same* command the client uses.                     |
+| Everything green, but the client shows no tools                | The client was not restarted, injects its own env, or runs a different binary (Claude Desktop does not see an nvm-managed `npx`). | Restart the client fully; run `doctor` through the *same* command the client uses; use an absolute `command` path. |
 | Writes are refused at runtime                                  | `FB_WRITE_MODE` is `plan` (the default for `posts` / `messages` / `ads`). | That is intended. Preview first, then re-call with `apply` and the returned `plan_id`. |
 | Ads tools missing entirely                                     | The `ads` package is off by default.                                      | Add `ads` to `FB_TOOL_PACKAGES` and set `FB_AD_ACCOUNT_ID`.                  |
 

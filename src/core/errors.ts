@@ -9,7 +9,8 @@
 // writes, cursor expiry, non-JSON bodies).
 //
 // Layer: `core` (layer 0) — imports only sibling core modules and the frozen
-// contracts from the core barrel. No api/mcp/tools imports; no I/O; pure.
+// contracts from the core barrel. No api/mcp/tools imports; no I/O; pure, save
+// the launch form injected once at startup (see setHintLaunchCommand).
 //
 // Retry authority (C9 / CC-NET-3/5): the ErrorAction here says WHETHER an error
 // class is retryable and surfaces an ETA; the api-layer retry engine (F07/F08)
@@ -128,7 +129,10 @@ function computeRetryAfterMs(
 ): number | undefined {
   const eta = envelope.estimated_time_to_regain_access;
   if (row.honorEta && typeof eta === 'number' && Number.isFinite(eta) && eta > 0) {
-    return Math.round(eta * ETA_MINUTES_TO_MS);
+    // Finite minutes can still overflow to `Infinity` ms (`1e307`), which a tool
+    // result serialises to `null`: treat it like any other non-wait.
+    const ms = Math.round(eta * ETA_MINUTES_TO_MS);
+    if (Number.isFinite(ms)) return ms;
   }
   return row.retryAfterMs;
 }
@@ -232,6 +236,34 @@ function isAppSecretProofRejection(envelope: GraphErrorEnvelope): boolean {
   return (envelope.message ?? '').toLowerCase().includes('appsecret_proof');
 }
 
+// ---------------------------------------------------------------------------
+// Launch form for operator hints — injected once at startup
+// ---------------------------------------------------------------------------
+
+/**
+ * The command prefix an operator hint names when nothing was injected: the
+ * binary name, which is what a global install puts on PATH. Mirrors
+ * `DEFAULT_LAUNCH_COMMAND` in `../mcp/launch-command.ts` (layer 0 cannot import
+ * it; a test there pins the two together).
+ */
+export const DEFAULT_HINT_LAUNCH_COMMAND = 'facebook-mcp';
+
+let hintLaunchCommand = DEFAULT_HINT_LAUNCH_COMMAND;
+
+/**
+ * Set the launch form (`npx -y <package>`, `facebook-mcp`, `node build/index.js`
+ * — see `resolveLaunchCommand`) that operator text renders commands with.
+ *
+ * The classifier is reached from every transport and API call site, none of
+ * which knows how the process was started, so the entry point resolves the
+ * form once and injects it here rather than threading it through each call. A
+ * blank value restores the default. This is the module's only mutable state.
+ */
+export function setHintLaunchCommand(launch: string): void {
+  const trimmed = launch.trim();
+  hintLaunchCommand = trimmed === '' ? DEFAULT_HINT_LAUNCH_COMMAND : trimmed;
+}
+
 /** The action for {@link isAppSecretProofRejection}: a credential-configuration fault. */
 function appSecretProofAction(): ErrorAction {
   return makeAction({
@@ -243,7 +275,7 @@ function appSecretProofAction(): ErrorAction {
       'The proof is derived from FB_APP_SECRET: check that FB_APP_SECRET is set and is the ' +
       'secret of the SAME Meta app that issued the access token (a token minted in another ' +
       'app, e.g. Graph API Explorer, or a rotated app secret both cause this), then restart ' +
-      'and run `facebook-mcp doctor`.',
+      `and run \`${hintLaunchCommand} doctor\`.`,
   });
 }
 

@@ -9,6 +9,45 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **The `FB_API_VERSION` bump procedure had no tool for its shape-diff step.**
+  `npm run fixtures:shape-diff -- --baseline <dir|file> --candidate <dir|file>`
+  (`scripts/fixture-shape-diff.mjs`) compares two Graph fixture sets by keys and
+  JSON types only — never values — and reports removed, type-changed,
+  array-element-changed, nullability-changed and added fields. It exits `1` only
+  on a breaking difference (`--json` for machine output). Wired into
+  `docs/runbooks/app-upkeep.md` §2 and `test/fixtures/README.md`.
+
+- **G-TOOL-3 could not be closed by anything but ad-hoc Graph calls.** The
+  budget-gated smoke `reels/lifecycle-probe` creates a marked DRAFT and a
+  far-future SCHEDULED Reel on the test Page, probes `DELETE /{video-id}` and
+  `facebook_delete_post` (bare video id and composite) and where each Reel is
+  listed, always deletes both in `finally` through a harness-only Graph escape
+  hatch confined to the test Page token and to ids the run created
+  (`scripts/smoke/graph-escape.mjs`), and prints a machine-readable
+  `G-TOOL-3 verdict:` line. One live run closes the item.
+
+- **The non-author onboarding test had no protocol.** New
+  `docs/runbooks/onboarding-trial.md` gives the tester's brief, what not to tell
+  them, a per-step timing sheet and the ≤20 min pass criterion. The README Setup
+  is now a five-step quickstart with the exact `claude mcp add` command, Claude
+  Desktop config paths and the first tool call; the onboarding runbook gains the
+  app credentials on the `setup-token` command, concrete client steps and a
+  first-call step.
+
+- **Nothing verified that the published package actually starts the way an MCP
+  client starts it.** Every CI job ran the server from `build/`, so a missing
+  `package.json#files` entry, a runtime import of a devDependency or a bin shim
+  that exits silently would first surface after an irreversible publish.
+  `scripts/cold-start.mjs` (`npm run cold-start`) packs the commit and launches
+  it with `npx -y` from an empty directory and a fresh npm cache — as Claude
+  Desktop and Claude Code do — and requires `initialize` to report the
+  package's own name and version and `tools/list` to be non-empty. A new
+  `cold-start` CI job runs it on Ubuntu, macOS and Windows. The child gets a
+  visibly fake token and a preloaded `fetch` fence, so it never reaches Graph;
+  `--spec @ivanbaev/facebook-mcp@<version>` checks a published release instead.
+  This automates the `npx` half of the Phase 4 exit gate; the client
+  configuration and the non-author onboarding run stay manual.
+
 - **A green smoke run said how many scenarios passed, never which tools were
   touched.** The summary counted smokes, so `8 passed` read as a verified
   surface — but a smoke is a scenario, not a tool, and nothing in the run knew
@@ -121,7 +160,76 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   never-loggable patterns — content, identity, secrets, money. Adding a
   twenty-sixth name is now a review event rather than a diff nobody reads.
 
+- **`npm run smoke:rehearse` — an offline end-to-end rehearsal of the live
+  smoke harness.** Every smoke, both sweeps and the Reels lifecycle probe run
+  against a loopback fake Graph through a test-only fetch redirect (active only
+  with explicit `FB_SMOKE_REHEARSAL_*` variables); any request the fake does not
+  model fails the rehearsal. It also runs in `npm test`, so harness bugs surface
+  before the first costly live run.
+
 ### Fixed
+
+- **A same-size rewrite of a local media file still uploaded unapproved bytes.**
+  Local video, Reel and photo posts (carousels included) now bind a SHA-256 of
+  the file content into the plan. A rewrite between preview and apply fails with
+  `plan_mismatch`; a rewrite between plan and upload is refused with
+  `file_changed`, checked on the exact buffer being uploaded. Large videos are
+  hashed as a stream, not buffered.
+
+- **A video upload whose `finish` outcome was unknown could be finished
+  again.** A lost answer, 5xx, abort or a 2xx without a video id now leaves the
+  session in a terminal `finish_unconfirmed` state; any further finish or
+  transfer is refused with guidance to poll `facebook_get_video_status`,
+  preventing a possible double publish. A clean rejection still leaves the
+  session `failed` and re-finishable.
+
+- **`doctor` and `setup-token` hints named a command that is not on PATH under
+  npx.** They now name the launch form actually used:
+  `npx -y @ivanbaev/facebook-mcp`, `facebook-mcp` or `node build/index.js`.
+
+- **`doctor` and `setup-token` reports were preceded by internal JSON info
+  lines.** These subcommands now log at `warn` and above; `FB_LOG_LEVEL=debug`
+  still shows everything, and server mode is unchanged.
+
+- **`doctor` repeated a Graph call that had just failed to answer.** When the
+  token check itself could not reach Graph (`token_check_failed`), the metric
+  and ad-account probes are reported as skipped with the reason instead of
+  retrying for ~9 s.
+
+- **Token-missing messages listed the env names in varying order.** They now
+  follow the credential precedence: `FB_SYSTEM_TOKEN`, `FB_ACCESS_TOKEN`,
+  `FB_PAGE_TOKEN`.
+
+- **`facebook_create_video_post` and `facebook_create_reel` could upload bytes
+  the approved preview never described.** The plan bound the local file's size,
+  but the apply re-read the file without comparing it, so a file rewritten
+  between preview and apply was uploaded — or, for a PUBLISHED Reel, published —
+  under the old approval. The apply now refuses with `reason: "file_changed"`
+  when the size differs, sends nothing and journals `failed`.
+
+- **`--help` ran the command it was meant to describe.** `setup-token --help`
+  ran the exchange flow and exited 2, and `doctor --help` called Graph. `--help`
+  / `-h` now print usage after any subcommand, and the usage ends with a
+  first-run recipe and the exact npx / source command to type where the output
+  says `facebook-mcp`.
+
+- **`doctor` with no credential reported two problems and no way forward.** It
+  now points at `setup-token` / `FB_SETUP_TOKEN` and skips the metric probe, so a
+  first run reports one failure and makes no Graph call.
+
+- **`setup-token` blamed the app credentials for a network fault.** A
+  `debug_token` network error, 5xx or throttle now says the token was not
+  assessed and must not be regenerated yet (with the proxy hint), and
+  `FB_APP_ID` / `FB_APP_SECRET` are named only when they are actually set.
+
+- **`facebook_usage` saw only its own probe.** The transport's usage hook was never connected, so the tool reported the `/me` probe's headers alone — and `/me` never carries the Business-use-case or ads-insights buckets that actually throttle Page and ads work. The latest value of each usage header observed on any Graph response is now reported under `recent`, keyed by header name and tracked per header, so a later `/me` response cannot erase a figure a Page call just reported.
+- **A `tools/call` whose `arguments` was `null`, an array or a primitive was answered as a -32603 internal error.** The SDK's request schema rejected the shape inside the protocol layer, so the model was told the server had broken rather than that its call was malformed. It is now a tool error naming the tool and the shape received; nothing is sent to Graph.
+- **The CLI said "failed to start" for a server that failed long after it started.** A transport dying mid-session sent the operator off to check a token and settings that were fine. A failure after startup now reads "stopped unexpectedly"; "failed to start" is kept for genuine startup failures.
+- **A Page that Graph reports as migrated (top-level code 21) left its dead Page token cached.** `isPageTokenDead` recognised only 100/21 and 100/33, so the stale token stayed in the registry and every call against that Page failed the same way. A top-level code 21 now evicts and re-derives once, like 100/21, and the stale-Page error names the code Graph actually returned instead of always saying 100.
+- **A missing base credential reported itself as an expired token.** With no system, user or bound Page token able to act for a Page, the resolver threw Graph code 190 with HTTP 401 — a Graph verdict for a call that never happened. The error now carries `code: 0` and `httpStatus: 0` (no wire fact) and an `auth` action naming the credential to set, with `nextTool: facebook_whoami`.
+- **A huge throttle ETA surfaced as `retryAfterMs: null` and suppressed retries.** An `estimated_time_to_regain_access` large enough to overflow to Infinity milliseconds serialised as `null` and blocked the retry loop. A non-finite ETA is now treated as no ETA, and the error matrix's default delay applies.
+- **A `not_applied` write claimed a journal entry that the failed journal append never wrote.** The refused and ATTEMPTED notices said "the audit journal records this" beside `journalStatus: "failed"` — and for an ambiguous write that sent the operator to reconcile from a record that does not exist. When the append failed, both notices now say so and, for ATTEMPTED, tell the reader to note the ids in the result now. The same correction applies to the `facebook_send_message` plan-time warning, which now says the send is _classified_ `attempted` rather than promising the journal holds it.
+- **A journal path naming a FIFO hung the tool call after its Graph write had landed.** The journal chmod-ed the FIFO and then blocked in `appendFile` until a reader appeared. Any non-regular file (FIFO, socket, device) is now refused as "not a regular file" and reported through `journalStatus: "failed"`; `FB_JOURNAL_PATH=/dev/null` therefore reports honestly that nothing is recorded.
 
 - **A bulk hide or delete whose ids all came back UNPROVEN was reported, and journaled, as a batch in which nothing happened.** `core/http.ts` marks a write whose request reached Facebook but whose answer was lost as `ambiguous` — it may already have landed — yet `runBulk` flattened that into a plain per-id `error`, indistinguishable from `(#200) Permissions error`. Downstream, `failed === total` then licensed the `failed` verdict, whose own docstring calls "the world is untouched" the more dangerous of the two possible lies: the tool printed _"All N id(s) failed — nothing was applied ... every id is still to do once the cause is fixed"_, the journal recorded `outcome: failed, applied: false`, and the obvious next move was a blind retry — permanent, for `facebook_delete_comment`. An unproven outcome now carries `ambiguous: true` and a verify-first note per id, `tallyBulk` counts them apart from provable failures (`failed` keeps its old meaning), and a batch holding one takes the ATTEMPTED verdict this package already gives every other unconfirmed write: `not_applied` with the notice that says verify before retrying, never `failed`.
 - **An unusable answer from a result classifier crashed the write gate AFTER the mutation had landed, and lost the journal entry with it.** `runApply` read `.outcome` off whatever `classifyResult` returned, below the line whose own comment reads _"`perform` RESOLVED: the mutation is at Graph. Nothing below may throw."_ A hook that fell off the end — or any JS caller of the barrel-exported `createWriteGate` — made that read throw a `TypeError`, so the caller was told the write had failed, no journal entry was written for a write that did land, and the spent plan invited a re-plan and a second mutation on one authorization. A malformed verdict could also put a non-boolean straight onto the frozen `applied` envelope field. The hook's answer is now validated and an unusable one keeps the applied verdict with a recorded classification error — the same fail-safe the gate already applied to a classifier that threw.
@@ -2126,6 +2234,12 @@ setup-token` has nothing to open. The required scopes are named inline now,
 - `facebook_list_comments` keeps the comments it read when the summary call answers 100/33 for the object, instead of failing and evicting a live Page token.
 - An ad update answered with a bare `false`, `null` or `0` 2xx body is no longer journalled as an applied budget or status change.
 - Ads insights now always read `account_currency` alongside money metrics (default fields and caller-chosen fields, sync and async), and the `facebook_ads_insights` description states that spend/cpc are decimal amounts in that currency, not minor units.
+
+- `--help` now shows the usage line and the first-run `setup-token` / `doctor` commands in the form that actually started the server (for example `npx -y @ivanbaev/facebook-mcp`, or `node build/index.js` from a checkout), and lists the other launch forms; the appsecret_proof (code 100) hint likewise names the doctor in that form instead of a hard-coded `facebook-mcp doctor`.
+- Smoke harness: the coverage report no longer lists `list_posts`, `list_scheduled_posts` and `list_comments` as never called when the start sweep also called them; `insights/reel-guardrail` no longer asserts refusal wording the server stopped emitting; a timed-out smoke now gets a bounded grace period for its cleanup before the next smoke starts, instead of cleaning up in the background under another smoke's heading.
+- The redactor no longer throws on an array-like Proxy that reports an invalid `length`.
+- The write journal still appends when the journal file is writable but not readable (for example EACCES while checking for a torn last line); it reports a note instead of failing the append.
+- Tool results and journal entries no longer fail when an array element's accessor throws; the element is shown as `[UNREADABLE]`.
 
 ### Security
 

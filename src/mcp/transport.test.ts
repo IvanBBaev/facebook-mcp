@@ -1718,3 +1718,166 @@ test('the body cap is not a credential bypass: an oversized unauthenticated body
     await handle.close();
   }
 });
+
+test('HTTP transport rejects a non-loopback IPv6 bind host (Security #4)', async () => {
+  const { logger } = captureLogger();
+  for (const httpHost of ['::', '::2', 'fe80::1']) {
+    await assert.rejects(
+      startTransport(
+        newServer(),
+        makeSettings({
+          transport: 'http',
+          httpToken: 'test-token',
+          httpHost,
+          httpPort: 0,
+        }),
+        { logger },
+      ),
+      /loopback/,
+      `expected "${httpHost}" to be rejected as non-loopback`,
+    );
+  }
+});
+
+test('a server that cannot accept a new session after DELETE shuts down instead of lingering', async () => {
+  // Re-arming after a client ends its session connects a fresh transport. If
+  // that connect fails, a listener left up would answer every later client
+  // with a transport that was never connected, so the server must shut down
+  // and say why.
+  const { logger, lines } = captureLogger();
+  const real = newServer();
+  let connects = 0;
+  const server: ConnectableServer = {
+    connect: (transport: Transport): Promise<void> => {
+      connects += 1;
+      return connects === 1
+        ? real.connect(transport)
+        : Promise.reject(new Error('refused a second transport'));
+    },
+    close: () => real.close(),
+  };
+  const handle = await startTransport(
+    server,
+    makeSettings({
+      transport: 'http',
+      httpToken: 'test-token',
+      httpHost: '127.0.0.1',
+      httpPort: 0,
+    }),
+    { logger, httpJsonResponse: true },
+  );
+  const address = handle.address;
+  assert(address, 'http handle must expose a bound address');
+  const auth = { authorization: 'Bearer test-token' };
+  try {
+    const first = await httpPost(
+      address.port,
+      JSON.stringify(initializeRequest(1)),
+      auth,
+    );
+    assert.equal(first.status, 200);
+    const ended = await httpExchange(address.port, 'DELETE', undefined, {
+      ...auth,
+      'mcp-session-id': String(first.headers['mcp-session-id']),
+    });
+    assert.equal(ended.status, 200);
+
+    await handle.closed;
+    assert.equal(handle.signal.aborted, true);
+    assert.equal(connects, 2);
+    assert.ok(
+      lines.some(
+        (l) =>
+          l.level === 'error' &&
+          /could not accept a new session/.test(l.msg) &&
+          /refused a second transport/.test(String(l.fields?.error)),
+      ),
+      `expected the re-arm failure to be logged; got:\n${JSON.stringify(lines, null, 2)}`,
+    );
+  } finally {
+    await handle.close();
+  }
+});
+
+test('a Host header that does not parse as a host is rejected, not trusted', async () => {
+  const { status, lines } = await initializeOnce({
+    authorization: 'Bearer test-token',
+    host: '[::1',
+  });
+  assert.equal(status, 403);
+  assert.equal(lines.filter((l) => l.msg.includes('disallowed Host')).length, 1);
+});
+
+test('stdin EOF does not wait out the drain window for a request the client cancelled', async () => {
+  // A cancelled request is never answered (the SDK drops its result), so it
+  // must stop counting as in flight the moment the cancel arrives — otherwise
+  // EOF after a cancel stalls for the whole drain window and then reports a
+  // forced shutdown that never happened. Cancels naming no request, or one
+  // that is not in flight, must not disturb the count either.
+  const { logger, lines } = captureLogger();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const gated = gatedServer();
+  const handle = await startTransport(
+    gated.server,
+    makeSettings({ transport: 'stdio' }),
+    { logger, stdin, stdout, eofDrainMs: 60_000 },
+  );
+
+  const initP = nextMessageWithId(stdout, 1);
+  stdin.write(frame(initializeRequest(1)));
+  await initP;
+  stdin.write(frame({ jsonrpc: '2.0', method: 'notifications/initialized' }));
+  stdin.write(
+    frame({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'slow' } }),
+  );
+  await gated.started;
+  stdin.write(
+    frame({ jsonrpc: '2.0', method: 'notifications/cancelled' }) +
+      frame({
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+        params: { requestId: 99 },
+      }),
+  );
+  stdin.write(
+    frame({
+      jsonrpc: '2.0',
+      method: 'notifications/cancelled',
+      params: { requestId: 2 },
+    }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  stdin.end();
+
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    handle.closed.then(() => 'closed' as const),
+    new Promise<'stalled'>((resolve) => {
+      timer = setTimeout(() => resolve('stalled'), 5_000);
+    }),
+  ]);
+  clearTimeout(timer);
+  gated.release();
+  if (outcome === 'stalled') await handle.close();
+  assert.equal(outcome, 'closed', 'EOF must not wait for a cancelled request');
+  assert.ok(!lines.some((l) => /did not finish/.test(l.msg)));
+});
+
+test('a second stdout error does not log or shut down twice', async () => {
+  const { logger, lines } = captureLogger();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const handle = await startTransport(newServer(), makeSettings({ transport: 'stdio' }), {
+    logger,
+    stdin,
+    stdout,
+  });
+
+  stdout.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+  stdout.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+  await handle.closed;
+
+  assert.equal(lines.filter((l) => /stdout failed/.test(l.msg)).length, 1);
+  assert.equal(handle.signal.aborted, true);
+});

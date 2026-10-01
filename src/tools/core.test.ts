@@ -29,7 +29,7 @@ import type {
   ToolSpec,
 } from '../core/index.js';
 import { withFetch, type FetchMock } from '../testing/index.js';
-import { createCorePackage } from './core.js';
+import { createCorePackage, createUsageTracker } from './core.js';
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -1074,4 +1074,90 @@ test('list_pages says how many account entries it dropped as unreadable', async 
   assert.equal(parsed.hasMore, false);
   assert.match(String(parsed.note), /2 account entries/);
   assert.match(String(parsed.note), /could not be read/);
+});
+
+// ---------------------------------------------------------------------------
+// facebook_usage — the latest usage observed on the server's own Graph traffic
+// ---------------------------------------------------------------------------
+
+const BUC_USAGE =
+  '{"1234":[{"type":"pages","call_count":64,"total_cputime":5,"total_time":9}]}';
+
+test('the usage tracker keeps the latest value of each header, per header', () => {
+  const tracker = createUsageTracker();
+  assert.deepEqual(tracker.observed(), {}, 'nothing observed yet');
+
+  tracker.record({
+    businessUseCasePct: 64,
+    raw: { 'x-business-use-case-usage': BUC_USAGE },
+    seenAt: 100,
+  });
+  // A response that carried no usage header says nothing about usage.
+  tracker.record({ raw: {}, seenAt: 150 });
+  // A later /me answer carries only the app header: it must not erase the
+  // business-use-case figure, which only Page and ads calls ever carry.
+  tracker.record({
+    appUsagePct: 12,
+    raw: { 'x-app-usage': '{"call_count":12,"total_cputime":1,"total_time":1}' },
+    seenAt: 200,
+  });
+  // A present-but-unreadable header is still the latest word on that header.
+  tracker.record({ raw: { 'x-app-usage': 'garbled' }, seenAt: 300 });
+
+  assert.deepEqual(tracker.observed(), {
+    'x-business-use-case-usage': { pct: 64, seenAt: 100, value: BUC_USAGE },
+    'x-app-usage': { seenAt: 300, value: 'garbled' },
+  });
+});
+
+test('usage reports the latest usage observed on other Graph calls as `recent`', async () => {
+  const tracker = createUsageTracker();
+  tracker.record({
+    businessUseCasePct: 64,
+    raw: { 'x-business-use-case-usage': BUC_USAGE },
+    seenAt: 500,
+  });
+  const spec = createCorePackage({
+    serverVersion: SERVER_VERSION,
+    sdkVersion: SDK_VERSION,
+    observedUsage: tracker.observed,
+  }).tools.find((t) => t.name === 'facebook_usage');
+  assert.ok(spec);
+
+  // The /me probe runs on the user token, which never carries the
+  // business-use-case header: without `recent` that bucket is invisible.
+  const { fb, ctx } = makeCtx({ nowMs: 1000 });
+  fb.on(
+    (req) => req.path === '/me',
+    fbOk(
+      { id: '123' },
+      { 'x-app-usage': '{"call_count":5,"total_cputime":1,"total_time":1}' },
+    ),
+  );
+  const sc = (await spec.handler({}, ctx)).structuredContent;
+  assert.ok(sc);
+  assert.deepEqual(sc.recent, {
+    'x-business-use-case-usage': { pct: 64, seenAt: 500, value: BUC_USAGE },
+  });
+  assert.equal((sc.usage as Record<string, unknown>)['appUsagePct'], 5);
+  assert.doesNotThrow(
+    () => spec.outputSchema?.parse(sc),
+    'the envelope matches its schema',
+  );
+});
+
+test('usage leaves `recent` off when nothing has been observed', async () => {
+  const withTracker = createCorePackage({
+    serverVersion: SERVER_VERSION,
+    sdkVersion: SDK_VERSION,
+    observedUsage: createUsageTracker().observed,
+  }).tools.find((t) => t.name === 'facebook_usage');
+  assert.ok(withTracker);
+  for (const spec of [withTracker, tool('facebook_usage')]) {
+    const { fb, ctx } = makeCtx();
+    fb.on((req) => req.path === '/me', fbOk({ id: '123' }));
+    const sc = (await spec.handler({}, ctx)).structuredContent;
+    assert.ok(sc);
+    assert.equal('recent' in sc, false);
+  }
 });

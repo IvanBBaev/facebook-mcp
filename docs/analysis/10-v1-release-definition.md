@@ -78,6 +78,14 @@ gate, `1.1.0` turns the ads package on as a supported capability.
   where do **scheduled** Reels appear (`/scheduled_posts` or `/video_reels`)?
   ✎ Verify at Phase 2; `delete_post`/`list_scheduled_posts` descriptions must
   state the answer either way. Phase 2.
+  ✎ **Probe ready.** The budget-gated live smoke `reels/lifecycle-probe`
+  (`npm run smoke -- --only reels/lifecycle-probe`, costs 2 of the test Page's
+  30 Reels/24 h) creates a marked DRAFT and a far-future SCHEDULED Reel, probes
+  `DELETE /{video-id}` and `facebook_delete_post` (bare video id and composite)
+  and where each Reel is listed, deletes both in `finally`, and prints a
+  `G-TOOL-3 verdict:` line. One run closes this item: record the verdict here,
+  then make the `delete_post`/`list_scheduled_posts`/`list_reels` descriptions
+  state it.
 - **G-TOOL-4 `mark seen` on conversations — DECIDED: NOT SHIPPED.** Polling-based
   messaging leaves conversations unread forever, so `unread_count` — the
   designed polling diff signal (doc 03) — never resets, and the candidate fix was
@@ -185,7 +193,7 @@ gate, `1.1.0` turns the ads package on as a supported capability.
 |---|---|---|
 | G-TOOL-5 version surfacing, G-RUN-1 journal rotation | 0 | shipped |
 | G-TOOL-2 Reels insights | 2 | shipped, live-verify pending ✎ |
-| G-TOOL-3 Reels lifecycle (delete-by-video-id, scheduled-Reel edge) | 2 | open ✎ — needs live Graph |
+| G-TOOL-3 Reels lifecycle (delete-by-video-id, scheduled-Reel edge) | 2 | open ✎ — probe ready (`reels/lifecycle-probe`); closes on one live run |
 | G-TOOL-1 get_comment, G-RUN-2 platform pin | 3 | shipped |
 | G-TOOL-4 mark_seen | 3 | decided: not shipped |
 | G-DOC-1…6 (hygiene, disclosure, runbooks, policy, compat, scope) | 4 | shipped ✎ |

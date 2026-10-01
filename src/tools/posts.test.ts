@@ -1821,6 +1821,192 @@ test('create_reel refuses a remote URL because the protocol streams local bytes'
   assert.equal(fb.calls.length, 0);
 });
 
+/**
+ * A context whose write gate rewrites the media file after the handler has
+ * resolved (and bound) its size, but before `perform()` reads the bytes — the
+ * window in which an apply would otherwise upload a file the plan never showed.
+ */
+function withFileSwappedBeforePerform(
+  ctx: ToolContext,
+  path: string,
+  bytes: number,
+): ToolContext {
+  const inner = (ctx as WriteToolContext).writeGate;
+  const writeGate = {
+    execute: async <T>(action: Parameters<typeof inner.execute<T>>[0]) => {
+      await writeFile(path, Buffer.alloc(bytes, 9));
+      return inner.execute(action);
+    },
+  };
+  return { ...ctx, writeGate } as WriteToolContext;
+}
+
+test('create_video_post refuses to upload a local file whose size changed after it was bound', async (t) => {
+  const media = await mediaFixture(t, 'clip.mp4', 64);
+  const { fb, ctx, journal } = makeCtx({
+    settings: makeSettings({ mediaDir: media.dir }),
+  });
+  stubVideoUploadPhases(fb, { video_id: 'vid-1', success: true });
+
+  await tool('facebook_create_video_post').handler({ video: media.name }, ctx);
+  const result = await tool('facebook_create_video_post').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 128),
+  );
+
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['reason'], 'file_changed');
+  assert.equal(fb.calls.length, 0, 'no upload session is opened for unapproved bytes');
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('create_reel refuses to upload a local file whose size changed after it was bound', async (t) => {
+  const media = await mediaFixture(t, 'reel.mp4', 512);
+  const { fb, ctx, journal } = makeCtx({
+    settings: makeSettings({ mediaDir: media.dir }),
+  });
+  stubReelPhases(fb, { success: true });
+
+  await tool('facebook_create_reel').handler({ video: media.name }, ctx);
+  const result = await tool('facebook_create_reel').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 1024),
+  );
+
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['reason'], 'file_changed');
+  assert.equal(fb.calls.length, 0, 'no Reel is started for unapproved bytes');
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+// The same-size rewrites below keep the byte length the plan bound: a size
+// check alone cannot see them, only the bound content hash can.
+
+test('create_video_post refuses a same-size rewrite between the bound preview and the upload', async (t) => {
+  const media = await mediaFixture(t, 'clip.mp4', 64);
+  const { fb, ctx, journal } = makeCtx({
+    settings: makeSettings({ mediaDir: media.dir }),
+  });
+  stubVideoUploadPhases(fb, { video_id: 'vid-1', success: true });
+
+  await tool('facebook_create_video_post').handler({ video: media.name }, ctx);
+  const result = await tool('facebook_create_video_post').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 64),
+  );
+
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['reason'], 'file_changed');
+  assert.match(String(parsed['error']), /SHA-256/);
+  assert.equal(fb.calls.length, 0, 'no upload session is opened for unapproved bytes');
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('create_reel refuses a same-size rewrite between the bound preview and the upload', async (t) => {
+  const media = await mediaFixture(t, 'reel.mp4', 512);
+  const { fb, ctx, journal } = makeCtx({
+    settings: makeSettings({ mediaDir: media.dir }),
+  });
+  stubReelPhases(fb, { success: true });
+
+  await tool('facebook_create_reel').handler({ video: media.name }, ctx);
+  const result = await tool('facebook_create_reel').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 512),
+  );
+
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['reason'], 'file_changed');
+  assert.equal(fb.calls.length, 0, 'no Reel is started for unapproved bytes');
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('create_photo_post refuses a same-size rewrite of a local photo between preview and upload', async (t) => {
+  const media = await mediaFixture(t, 'shot.png', 96);
+  const { fb, ctx, journal } = makeCtx({
+    settings: makeSettings({ mediaDir: media.dir }),
+  });
+  fb.on((req) => req.protocol === 'multipart', fbOk({ id: 'photo-1', post_id: 'p_1' }));
+
+  await tool('facebook_create_photo_post').handler({ photo: media.name }, ctx);
+  const result = await tool('facebook_create_photo_post').handler(
+    { photo: media.name, apply: true, plan_id: 'plan-1' },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 96),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(body(result)['reason'], 'file_changed');
+  assert.equal(fb.calls.length, 0, 'no photo is uploaded for unapproved bytes');
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('create_post refuses a same-size rewrite of a local carousel photo between preview and upload', async (t) => {
+  const media = await mediaFixture(t, 'one.png', 96);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  fb.on((req) => req.protocol === 'multipart', fbOk({ id: 'photo-1' }));
+
+  await tool('facebook_create_post').handler(
+    { message: 'Two photos', photos: [media.name, 'https://cdn.example/b.jpg'] },
+    ctx,
+  );
+  const result = await tool('facebook_create_post').handler(
+    {
+      message: 'Two photos',
+      photos: [media.name, 'https://cdn.example/b.jpg'],
+      apply: true,
+      plan_id: 'plan-1',
+    },
+    withFileSwappedBeforePerform(ctx, join(media.dir, media.name), 96),
+  );
+
+  // The carousel reports through its multi-photo envelope, which leads with
+  // the original failure: the bound-hash refusal of the first child.
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['reason'], 'multi_photo_upload_failed');
+  assert.equal(parsed['failedIndex'], 0);
+  assert.match(String(parsed['error']), /SHA-256/);
+  assert.equal(fb.calls.length, 0, 'no carousel child is uploaded for unapproved bytes');
+});
+
+test('a same-size rewrite between preview and apply no longer matches the plan', async (t) => {
+  // The content hash is part of what the preview binds, so the confirm of a
+  // plan built for other bytes is a plan mismatch before anything is read.
+  const media = await mediaFixture(t, 'clip.mp4', 64);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  stubVideoUploadPhases(fb, { video_id: 'vid-1', success: true });
+
+  await tool('facebook_create_video_post').handler({ video: media.name }, ctx);
+  await writeFile(join(media.dir, media.name), Buffer.alloc(64, 9));
+  const result = await tool('facebook_create_video_post').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(body(result)['reason'], 'plan_mismatch');
+  assert.equal(fb.calls.length, 0);
+});
+
+test('an unchanged local video still applies under the plan its preview bound', async (t) => {
+  const media = await mediaFixture(t, 'clip.mp4', 64);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  stubVideoUploadPhases(fb, { video_id: 'vid-1', success: true });
+
+  await tool('facebook_create_video_post').handler({ video: media.name }, ctx);
+  const result = await tool('facebook_create_video_post').handler(
+    { video: media.name, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+
+  assert.notEqual(result.isError, true, JSON.stringify(body(result)));
+  assert.ok(fb.calls.length > 0);
+});
+
 // ---------------------------------------------------------------------------
 // facebook_update_post
 // ---------------------------------------------------------------------------

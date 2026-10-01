@@ -234,7 +234,21 @@ function stripValue(value: unknown, ancestors: WeakSet<object>, depth: number): 
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => stripValue(item, ancestors, depth + 1));
+      // Element by element through `readOwn`: `map` reads each index itself, so
+      // one throwing index accessor threw out of the strip and cost the whole
+      // result (and, via the journal, the whole record) instead of one element.
+      // A hostile `length` is clamped the way `map` would clamp it.
+      const arr = value as unknown as Record<string, unknown>;
+      const length = readOwn(arr, 'length');
+      const n =
+        typeof length === 'number' && length > 0
+          ? Math.min(Math.floor(length), 2 ** 32 - 1)
+          : 0;
+      const out: unknown[] = [];
+      for (let i = 0; i < n; i += 1) {
+        out.push(stripValue(readOwn(arr, String(i)), ancestors, depth + 1));
+      }
+      return out;
     }
     const obj = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};

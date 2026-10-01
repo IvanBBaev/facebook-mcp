@@ -92,6 +92,16 @@ const BOGUS_METRIC = 'page_vieuws_total';
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The part of `facebook_post_insights`' schema refusal (the `postIdArg` regex
+ * message in src/tools/insights.ts) that names the permalink case. Deliberately
+ * a FRAGMENT, not the whole sentence: the server's wording around it has grown
+ * ("not a Page username, a URL, …") and an exact-prefix match failed a correct
+ * server. src/smoke-rehearsal.test.ts pins that this fragment still occurs in the
+ * server source, so a future rewording breaks a unit test, not a live run.
+ */
+export const PERMALINK_REFUSAL_FRAGMENT = 'a URL, a permalink or a query string';
+
 const MS_PER_DAY = 86_400_000;
 
 /** The UTC calendar date `offsetDays` before today, in Graph's YYYY-MM-DD form. */
@@ -674,9 +684,7 @@ registerSmoke({
       'facebook_post_insights accepted a permalink URL as a post id',
     );
     ctx.assert(
-      String(permalink.payload?.error ?? '').includes(
-        'not a URL, a permalink or a query string',
-      ),
+      String(permalink.payload?.error ?? '').includes(PERMALINK_REFUSAL_FRAGMENT),
       `the permalink refusal is not the schema's: ${String(permalink.payload?.error ?? '')}`,
     );
     ctx.log.step('both id-space guards refused before reaching Graph');

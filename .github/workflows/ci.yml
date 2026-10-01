@@ -105,6 +105,33 @@ jobs:
       - run: npm ci
       - run: npm run check
 
+  # Cold-start gate (doc 08, Phase 4 exit: `npx -y <pkg>` cold-starts on macOS +
+  # Windows). Every other job runs the server from `build/`; this one runs it
+  # the way Claude Desktop/Code do. scripts/cold-start.mjs packs this commit,
+  # starts it with `npx -y <tarball>` from an empty directory and a fresh npm
+  # cache, and requires initialize (serverInfo name/version = package metadata)
+  # and a non-empty tools/list over stdio. A missing entry in
+  # package.json#files, a runtime import of a devDependency or a bin shim that
+  # exits silently fails here, on the PR, instead of after an irreversible
+  # publish. No secret is involved: the child gets a visibly fake token, and a
+  # preloaded fetch fence fails the run if startup reaches for the network.
+  cold-start:
+    name: cold start (npx, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run cold-start
+
   # Bundle gate. scripts/pack-mcpb.mjs runs exactly once in the life of a
   # release: in the `bundle` job of release.yml, on a v*.*.* tag, in parallel
   # with the irreversible npm publish. Nothing else executes it — it has no unit

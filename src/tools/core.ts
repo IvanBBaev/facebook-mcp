@@ -360,6 +360,22 @@ const usageOutputSchema = z.object({
   /** The cool-down surfaced with a throttled probe (ms); an estimate, never a sleep. */
   retryAfterMs: z.number().optional(),
   note: z.string().optional(),
+  /**
+   * The latest value of each usage header seen on ANY Graph response this
+   * process received, keyed by header name. The `/me` probe runs on the user
+   * token and never carries the Business-use-case or ads-insights buckets that
+   * Page and ads calls report, so `usage` alone cannot show them. Absent when no
+   * response has carried a usage header yet.
+   */
+  recent: z
+    .record(
+      z.object({
+        pct: z.number().optional(),
+        seenAt: z.number(),
+        value: z.string(),
+      }),
+    )
+    .optional(),
 });
 
 /**
@@ -470,6 +486,53 @@ const USAGE_HEADER_FIELDS = [
   [USAGE_HEADERS.adsInsightsThrottle, 'adsInsightsThrottlePct'],
 ] as const;
 
+/** The latest reading of one usage header (see {@link createUsageTracker}). */
+export interface ObservedUsageHeader {
+  /** The parsed percentage; absent when the header arrived but was unreadable. */
+  readonly pct?: number;
+  readonly seenAt: number;
+  /** The verbatim header value. */
+  readonly value: string;
+}
+
+/** The latest reading of each usage header, keyed by header name. */
+export type ObservedUsage = Readonly<Record<string, ObservedUsageHeader>>;
+
+/**
+ * The sink for the transport's `onUsage` hook and the source of the usage
+ * envelope's `recent` field.
+ */
+export interface UsageTracker {
+  readonly record: (snapshot: UsageSnapshot) => void;
+  readonly observed: () => ObservedUsage;
+}
+
+/**
+ * Keep the latest reading of each usage header across every Graph response.
+ * Tracked PER HEADER, not per snapshot: most responses carry only
+ * `x-app-usage`, and letting the next `/me` answer replace the whole snapshot
+ * would erase the Business-use-case figure a Page call reported a moment ago.
+ * A response with no usage header says nothing and changes nothing.
+ */
+export function createUsageTracker(): UsageTracker {
+  const latest = new Map<string, ObservedUsageHeader>();
+  return {
+    record: (snapshot) => {
+      for (const [header, field] of USAGE_HEADER_FIELDS) {
+        const value = snapshot.raw[header];
+        if (value === undefined) continue;
+        const pct = snapshot[field];
+        latest.set(header, {
+          ...(pct !== undefined ? { pct } : {}),
+          seenAt: snapshot.seenAt,
+          value,
+        });
+      }
+    },
+    observed: () => Object.fromEntries(latest),
+  };
+}
+
 /**
  * The note for headers that ARRIVED but yielded no percentage (malformed JSON,
  * an unexpected shape). Without it `hasData:true` plus a missing figure reads as
@@ -503,6 +566,7 @@ function joinNotes(...notes: readonly (string | undefined)[]): string | undefine
 function buildUsagePayload(
   snapshot: UsageSnapshot,
   probeFailure?: ProbeFailure,
+  recent: ObservedUsage = {},
 ): Record<string, unknown> {
   const hasData = Object.keys(snapshot.raw).length > 0;
   // A failed probe whose error response carried headers has BOTH facts to
@@ -530,6 +594,7 @@ function buildUsagePayload(
       ? { retryAfterMs: probeFailure.retryAfterMs }
       : {}),
     ...(note !== undefined ? { note } : {}),
+    ...(Object.keys(recent).length > 0 ? { recent } : {}),
   };
 }
 
@@ -543,8 +608,13 @@ function buildUsagePayload(
  * stays inside `rootDir` and this layer keeps no filesystem dependency. All four
  * tools are read-only; `enabledByDefault` is `true` and the registry forces
  * `core` on regardless of selection.
+ *
+ * `observedUsage` is the bootstrap's {@link UsageTracker.observed}; without it
+ * the usage envelope reports the probe alone.
  */
-export function createCorePackage(opts: CoreVersions): PackageSpec {
+export function createCorePackage(
+  opts: CoreVersions & { readonly observedUsage?: () => ObservedUsage },
+): PackageSpec {
   // No tool in this package declares `logFields` (04 §"Log hygiene"). Three of
   // the four take no arguments at all, and facebook_get_page takes only the
   // profile selector, so a per-call line could say nothing beyond "a Page was
@@ -744,7 +814,9 @@ export function createCorePackage(opts: CoreVersions): PackageSpec {
         snapshot = refused ?? { raw: {}, seenAt: ctx.clock.now() };
         probeFailure = probeFailureOf(err, ctx.redactor, refused !== undefined);
       }
-      return shapeEnvelope(buildUsagePayload(snapshot, probeFailure), {
+      // Read AFTER the probe, so the probe's own headers are already in it.
+      const recent = opts.observedUsage?.() ?? {};
+      return shapeEnvelope(buildUsagePayload(snapshot, probeFailure, recent), {
         maxResultChars: ctx.settings.maxResultChars,
         redactor: ctx.redactor,
       });

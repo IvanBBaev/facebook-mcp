@@ -124,6 +124,15 @@ export const SESSION_DESYNC_NOTE =
 export const SESSION_FINISHED_NOTE =
   'upload session already finished — poll the video status instead of finishing it again';
 
+/**
+ * Model-facing note when a session whose `finish` may have landed (the answer
+ * was lost, a 5xx, or a 2xx without a video id) is used again. The session is a
+ * tombstone: a second `finish` could publish the same video twice, and a fresh
+ * transfer would feed bytes into a session Meta may already have closed.
+ */
+export const SESSION_FINISH_UNCONFIRMED_NOTE =
+  'upload session finish outcome unknown — poll the video status; do not finish or upload it again';
+
 /** Model-facing note attached to every successful create: created is not ready — CC-MEDIA-7. */
 export const CREATED_NOT_READY_NOTE =
   'video created but not necessarily ready — poll the video status before treating it as published';
@@ -170,9 +179,20 @@ export function ruploadPathForSession(
 // Public types — session registry
 // ---------------------------------------------------------------------------
 
-/** Where an upload session currently is. `transferred` = all bytes in, `finish` not yet called. */
+/**
+ * Where an upload session currently is. `transferred` = all bytes in, `finish`
+ * not yet called. `finish_unconfirmed` is terminal: a `finish` may have landed
+ * (lost answer, 5xx, or a 2xx without a video id), so the session refuses any
+ * further `finish` or transfer. `failed` stays resumable/re-finishable — it is
+ * only reached by faults that provably did not create a video.
+ */
 export type VideoUploadPhase =
-  'started' | 'transferring' | 'transferred' | 'finished' | 'failed';
+  | 'started'
+  | 'transferring'
+  | 'transferred'
+  | 'finished'
+  | 'finish_unconfirmed'
+  | 'failed';
 
 /**
  * Progress sink: `sent` is the byte count the SERVER has confirmed, `total` the
@@ -529,6 +549,30 @@ function alreadyFinishedError(session: VideoUploadSession): GraphApiError {
   );
 }
 
+/**
+ * The session's `finish` may already have created (and published) the video; a
+ * second `finish` or a fresh transfer could duplicate it. Terminal: the caller
+ * must poll the video status, not retry.
+ */
+function finishUnconfirmedError(session: VideoUploadSession): GraphApiError {
+  const video = session.videoId !== undefined ? ` (video '${session.videoId}')` : '';
+  return uploadError(
+    `upload session '${session.uploadSessionId}'${video} has a finish of unknown outcome — ${SESSION_FINISH_UNCONFIRMED_NOTE}`,
+    {
+      category: 'validation',
+      retryable: false,
+      operatorText: SESSION_FINISH_UNCONFIRMED_NOTE,
+      ...statusNextTool(session.videoId),
+    },
+  );
+}
+
+/** Refuse a session that is terminal (finished, or a finish of unknown outcome). */
+function assertNotTerminal(session: VideoUploadSession): void {
+  if (session.phase === 'finished') throw alreadyFinishedError(session);
+  if (session.phase === 'finish_unconfirmed') throw finishUnconfirmedError(session);
+}
+
 /** A caller-side argument problem — never retryable, never a wire call. */
 function invalidInputError(detail: string): GraphApiError {
   return uploadError(`invalid video upload input (${detail})`, {
@@ -596,6 +640,31 @@ function resumeExhaustedError(
 }
 
 /**
+ * True when a failed `finish` may nonetheless have created the video: an
+ * ambiguous outcome, a 5xx, or no HTTP status at all. With no HTTP status, only
+ * an ambiguous (or unclassified) fault may have landed. Core classifies a
+ * connect-phase fault as `transient` precisely because the request provably
+ * never reached Facebook, and an auth or validation refusal at status 0 was
+ * raised before the wire — telling the caller "the finish may have gone
+ * through" would contradict both. A non-Graph error (an abort, a bug in a
+ * seam) says nothing about the wire, so it is treated as may-have-landed.
+ */
+function finishMayHaveLanded(err: unknown): boolean {
+  if (!(err instanceof GraphApiError)) return true;
+  const action = err.action;
+  const unsentAtStatusZero =
+    err.httpStatus === 0 &&
+    action !== undefined &&
+    action.category !== 'ambiguous' &&
+    action.category !== 'unknown';
+  return (
+    action?.category === 'ambiguous' ||
+    err.httpStatus >= 500 ||
+    (err.httpStatus === 0 && !unsentAtStatusZero)
+  );
+}
+
+/**
  * A `finish` fault that may have landed (ambiguous, 5xx, or no HTTP status at
  * all) re-raised with the video id in its guidance. The generic ambiguous-write
  * action points at the feed, which cannot say whether THIS video was finished;
@@ -606,22 +675,8 @@ function resumeExhaustedError(
  */
 function withFinishVideoId(err: unknown, videoId: string | undefined): unknown {
   if (videoId === undefined || !(err instanceof GraphApiError)) return err;
+  if (!finishMayHaveLanded(err)) return err;
   const action = err.action;
-  // With no HTTP status, only an ambiguous (or unclassified) fault may have
-  // landed. Core classifies a connect-phase fault as `transient` precisely
-  // because the request provably never reached Facebook, and an auth or
-  // validation refusal at status 0 was raised before the wire — telling the
-  // caller "the finish may have gone through" would contradict both.
-  const unsentAtStatusZero =
-    err.httpStatus === 0 &&
-    action !== undefined &&
-    action.category !== 'ambiguous' &&
-    action.category !== 'unknown';
-  const mayHaveLanded =
-    action?.category === 'ambiguous' ||
-    err.httpStatus >= 500 ||
-    (err.httpStatus === 0 && !unsentAtStatusZero);
-  if (!mayHaveLanded) return err;
   const guidance =
     `the finish for video '${videoId}' may have gone through — poll ${VIDEO_STATUS_TOOL} ` +
     `with that id before finishing or uploading again`;
@@ -1040,7 +1095,7 @@ export async function transferVideoUpload(
   input: TransferVideoUploadInput,
 ): Promise<VideoUploadSession> {
   const opened = requireSession(deps.sessions, input.uploadSessionId);
-  if (opened.phase === 'finished') throw alreadyFinishedError(opened);
+  assertNotTerminal(opened);
   if (input.data.byteLength !== opened.totalBytes) {
     throw desyncError(
       `data is ${input.data.byteLength} byte(s) but the session declared ${opened.totalBytes}`,
@@ -1262,7 +1317,7 @@ export async function finishVideoUpload(
   input: FinishVideoUploadInput,
 ): Promise<FinishVideoUploadResult> {
   const session = requireSession(deps.sessions, input.uploadSessionId);
-  if (session.phase === 'finished') throw alreadyFinishedError(session);
+  assertNotTerminal(session);
   if (session.startOffset < session.totalBytes) {
     throw desyncError(
       `only ${session.startOffset} of ${session.totalBytes} byte(s) transferred`,
@@ -1295,12 +1350,14 @@ export async function finishVideoUpload(
   try {
     res = await deps.fbRequest<unknown>(req);
   } catch (err) {
-    // The session is KEPT (marked failed) rather than dropped: the bytes are
-    // already on Meta's side, so a caller may legitimately re-issue `finish`
-    // without re-uploading. Silently re-creating the session would risk a
-    // duplicate video (CC-MEDIA-3).
+    // The session is KEPT rather than dropped: silently re-creating it would
+    // risk a duplicate video (CC-MEDIA-3). A clean rejection (4xx, or a fault
+    // that provably never left the host) created nothing, so the session is
+    // marked `failed` and `finish` may be re-issued without re-uploading. A
+    // fault that may have landed makes it a tombstone instead: a second
+    // `finish` could publish the same video twice.
     deps.sessions.update(input.uploadSessionId, {
-      phase: 'failed',
+      phase: finishMayHaveLanded(err) ? 'finish_unconfirmed' : 'failed',
       lastError: errorMessageOf(err),
     });
     throw withFinishVideoId(err, session.videoId);
@@ -1309,8 +1366,10 @@ export async function finishVideoUpload(
   const rec = asRecord(res.data);
   const videoId = readId(rec?.['video_id']) ?? readId(rec?.['id']) ?? session.videoId;
   if (videoId === undefined) {
+    // The edge ANSWERED 2xx: the finish landed and may have created a video we
+    // cannot name. Re-finishing could create a second one — tombstone it.
     deps.sessions.update(input.uploadSessionId, {
-      phase: 'failed',
+      phase: 'finish_unconfirmed',
       lastError: 'finish returned no video id',
     });
     throw desyncError('finish returned no video id');

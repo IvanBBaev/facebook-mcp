@@ -21,6 +21,7 @@ import {
   type HostSemaphores,
 } from './http.js';
 import { NON_JSON_BODY_MAX, PROXY_ENV_HINT } from './errors.js';
+import { DEFAULT_THROTTLE_RETRY_AFTER_MS } from './error-matrix.js';
 import { createRedactor } from './redact.js';
 import { GraphApiError } from './index.js';
 import type {
@@ -2889,6 +2890,37 @@ test('regression CC-NET-3: a server-named wait exactly at the cap is still slept
       fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
     );
     assert.deepEqual(sleeps, [60_000]);
+    assert.equal(mock.requests.length, 2);
+  });
+});
+
+test('CC-NET-3: an envelope ETA that overflows to Infinity ms is no wait at all', async () => {
+  // `1e307` minutes is a finite number, so it survives the envelope parse, but
+  // ×60_000 it is `Infinity`. That used to become the surfaced `retryAfterMs`
+  // — which serialises to `null`, telling the caller nothing — and, as a wait
+  // "beyond the cap", it also suppressed every retry. Like a `0` or a negative
+  // ETA it is no instruction: the throttle keeps its ordinary retry schedule
+  // and surfaces the matrix's finite default.
+  const { clock, sleeps } = createRecordingClock();
+  await withFetch(async (mock: FetchMock) => {
+    mock.on(() => true, { status: 400, json: throttleBody(4, 1e307) });
+    const fbRequest = createFbRequest(
+      makeDeps({ clock, rng: () => 1, retry: { maxRetries: 1 } }),
+    );
+    await assert.rejects(
+      settle(
+        clock,
+        fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.equal(err.action?.category, 'rate_limit');
+        assert.equal(err.action?.retryAfterMs, DEFAULT_THROTTLE_RETRY_AFTER_MS);
+        return true;
+      },
+    );
+    assert.equal(sleeps.length, 1, 'the ordinary backoff schedule still applies');
+    assert.ok(Number.isFinite(sleeps[0]));
     assert.equal(mock.requests.length, 2);
   });
 });

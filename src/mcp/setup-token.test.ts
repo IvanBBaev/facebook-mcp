@@ -32,7 +32,7 @@ import {
   fbOk,
   type FakeFbRequest,
 } from '../core/fakes/index.js';
-import { loadEnvFile } from '../core/index.js';
+import { GraphApiError, loadEnvFile } from '../core/index.js';
 import type {
   AtomicWriteResult,
   FbRequest,
@@ -525,6 +525,39 @@ test('reports a debug_token failure instead of throwing, with a redacted message
   assert.equal(step(result, 'classify').status, 'failed');
   assert.equal(result.token.error?.includes(PASTED), false);
   assert.match(result.token.error ?? '', /\[REDACTED]/);
+});
+
+test('a debug_token network fault says the token was not assessed, not to fix app creds', async () => {
+  const { deps, fb } = makeDeps();
+  fb.on(
+    (req) => req.path === '/debug_token',
+    fbErr(new GraphApiError('connect ECONNREFUSED', { code: 0, httpStatus: 0 })),
+  );
+
+  const result = await runSetupToken(deps);
+
+  const detail = step(result, 'classify').detail ?? '';
+  assert.match(detail, /did not answer/);
+  assert.match(detail, /do not regenerate it yet/);
+  assert.doesNotMatch(detail, /FB_APP_SECRET/);
+});
+
+test('a debug_token rejection names app creds only when they are set', async () => {
+  const rejection = (): GraphApiError =>
+    new GraphApiError('Invalid OAuth access token', { code: 190, httpStatus: 400 });
+
+  const withApp = makeDeps();
+  withApp.fb.on((req) => req.path === '/debug_token', fbErr(rejection()));
+  const withAppDetail = step(await runSetupToken(withApp.deps), 'classify').detail ?? '';
+  assert.match(withAppDetail, /FB_APP_ID \/ FB_APP_SECRET/);
+
+  const noApp = makeDeps({
+    settings: makeSettings({ appId: undefined, appSecret: undefined }),
+  });
+  noApp.fb.on((req) => req.path === '/debug_token', fbErr(rejection()));
+  const noAppDetail = step(await runSetupToken(noApp.deps), 'classify').detail ?? '';
+  assert.doesNotMatch(noAppDetail, /FB_APP_SECRET/);
+  assert.match(noAppDetail, /fresh User token/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1989,6 +2022,60 @@ test('renders the failure path with its actionable detail', async () => {
   assert.match(text, /\[FAIL] input/);
   assert.match(text, new RegExp(SETUP_TOKEN_ENV_VAR));
   assert.ok(text.trimEnd().endsWith(SETUP_NEXT_COMMAND));
+});
+
+test('every command the report names uses the launch form the operator used', async () => {
+  // An npx user has no `facebook-mcp` on PATH: "run facebook-mcp doctor" is a
+  // "command not found" at the exact moment onboarding should succeed.
+  const npx = 'npx -y @ivanbaev/facebook-mcp';
+  const { deps, fb } = makeDeps();
+  withHappyPath(fb);
+  const result = await runSetupToken({ ...deps, launchCommand: npx });
+  assert.equal(result.nextCommand, `${npx} doctor`);
+  const text = renderSetupTokenReport(result);
+  assert.equal(text.split('\n').at(-1), `  ${npx} doctor`);
+
+  const missing = makeDeps({ input: { token: undefined, tokenSource: 'none' } });
+  const failed = await runSetupToken({
+    ...missing.deps,
+    launchCommand: 'node build/index.js',
+  });
+  assert.equal(failed.nextCommand, 'node build/index.js doctor');
+  const input = failed.steps.find((s) => s.id === 'input');
+  assert.match(
+    input?.detail ?? '',
+    /FB_SETUP_TOKEN=<token> node build\/index\.js setup-token$/,
+  );
+  // Only the report's own title may still say `facebook-mcp setup-token`.
+  const body = renderSetupTokenReport(failed).split('\n').slice(1).join('\n');
+  assert.doesNotMatch(body, /(^|\s)facebook-mcp (doctor|setup-token)/m);
+});
+
+test('a Page token refusal names doctor under the operator launch form', async () => {
+  const { deps, fb } = makeDeps();
+  withDebugToken(fb, { type: 'PAGE', is_valid: true, scopes: [] });
+  const result = await runSetupToken({
+    ...deps,
+    launchCommand: 'npx -y @ivanbaev/facebook-mcp',
+  });
+  const classify = result.steps.find((s) => s.id === 'classify');
+  assert.match(classify?.detail ?? '', /`npx -y @ivanbaev\/facebook-mcp doctor`/);
+});
+
+test('the command-line token advisory names setup-token under the launch form', () => {
+  const input = parseSetupTokenArgs([PASTED], {}, 'npx -y @ivanbaev/facebook-mcp');
+  assert.ok(
+    input.notes.some((note) =>
+      note.includes('FB_SETUP_TOKEN=… npx -y @ivanbaev/facebook-mcp setup-token'),
+    ),
+  );
+  // No launch form given: the binary name, as before.
+  const plain = parseSetupTokenArgs([PASTED], {});
+  assert.ok(
+    plain.notes.some((note) =>
+      note.includes('FB_SETUP_TOKEN=… facebook-mcp setup-token'),
+    ),
+  );
 });
 
 test('an expires_in that cannot be turned into a date is dropped, not carried', async () => {

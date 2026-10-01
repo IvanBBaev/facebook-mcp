@@ -38,15 +38,16 @@ import { createPageTokenResolver, type PageTokenResolver } from './auth.js';
  * Lifetime of a cached derived Page token when the caller sets none.
  *
  * The resolver's own default is "cache until explicitly invalidated" (auth.ts),
- * which is the right contract for a caller that drives the full C1 rail. No
- * production caller does: `runWithPageToken` is not surfaced through this
- * registry, and nothing outside the registry calls `invalidate`. So with no TTL
- * the cache has NO eviction path at all — a Page token that Meta revokes (a
- * password change, a removed role, a permission pulled in app review) stays
- * cached for the whole process lifetime, every call on that Page keeps failing
- * with the same dead token, and the only recovery is restarting the server.
+ * which is the right contract for a caller that drives the full C1 rail. The
+ * production callers only cover part of it: the bootstrap's tool-call hook
+ * invalidates the Pages a call resolved when it throws a dead-token error, and
+ * a few tools invalidate on the failures they recognise, but `runWithPageToken`
+ * is not surfaced through this registry and a dead token that surfaces any
+ * other way is never evicted. With no TTL such a token — revoked by a password
+ * change, a removed role, a permission pulled in app review — would stay cached
+ * for the whole process lifetime, and the only recovery would be a restart.
  *
- * A bounded TTL turns that into a bounded outage. The cost is one `/PAGE_ID`
+ * A bounded TTL caps that residual outage. The cost is one `/PAGE_ID`
  * derivation per Page per window, which is negligible against Graph's own
  * limits; fifteen minutes keeps it that way while capping the blind spot at
  * something an operator will sit through rather than debug.
@@ -73,8 +74,8 @@ export interface PagesRegistryDeps {
   readonly logger?: Logger;
   /**
    * Derived-token cache TTL in ms, forwarded to the token resolver. Omitted ⇒
-   * {@link DEFAULT_TOKEN_CACHE_TTL_MS}, because this registry exposes no way to
-   * invalidate an entry from production code.
+   * {@link DEFAULT_TOKEN_CACHE_TTL_MS}, because `invalidate` is only called on
+   * the dead-token failures production code recognises.
    */
   readonly cacheTtlMs?: number;
   /**

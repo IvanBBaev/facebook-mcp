@@ -42,6 +42,7 @@
 // delete assertions could never pass and even the photo smoke would leak.
 // Refusing up front, naming the variable, beats a permanently red run.
 
+import { paced } from '../pace.mjs';
 import { registerSmoke } from '../registry.mjs';
 
 /**
@@ -59,7 +60,7 @@ const COMPOSITE_POST_ID = /^\d+_\d+$/;
 
 /** Graph is read-your-writes only eventually; give it a bounded chance. */
 const READ_BACK_ATTEMPTS = 5;
-const READ_BACK_DELAY_MS = 2000;
+const READ_BACK_DELAY_MS = paced(2000);
 
 /** Paging bounds for the scheduled-posts queue, same shape as the sweeper. */
 const QUEUE_MAX_PAGES = 10;

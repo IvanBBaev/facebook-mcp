@@ -162,6 +162,33 @@ function parsePayload(tool, result) {
  * @param {{profile: string, pageId: string|undefined}} opts.writeTarget
  * @param {ReturnType<import('./log.mjs').createLogger>} opts.log
  */
+/**
+ * An append-only log of answered tool calls. Pure (no I/O), exported for tests.
+ *
+ * Coverage is "the tools the SMOKES got an answer from", which is a WINDOW of
+ * the session's calls (after the start sweep, before the end sweep), not a set
+ * difference. The window matters: the start sweep calls list tools
+ * (`facebook_list_posts`, `facebook_list_scheduled_posts`,
+ * `facebook_list_comments`) that the smokes call again, and subtracting "every
+ * tool the sweep touched" reported those as never called on every full run.
+ */
+export function createCallLog() {
+  const calls = [];
+  return {
+    record(tool) {
+      calls.push(tool);
+    },
+    /** The current position; calls recorded from now on are "since" it. */
+    mark() {
+      return calls.length;
+    },
+    /** Distinct tools answered at or after `since`, sorted. */
+    toolsSince(since = 0) {
+      return [...new Set(calls.slice(since))].sort();
+    },
+  };
+}
+
 export async function startSmokeClient(opts) {
   const { serverPath, env, cwd, timeoutMs, nonce, writeTarget, log } = opts;
 
@@ -229,7 +256,7 @@ export async function startSmokeClient(opts) {
     );
   }
 
-  // Every tool this session got an ANSWER from, in call order of first answer.
+  // Every tool this session got an ANSWER from, in answer order (`createCallLog`).
   // The run's summary reports coverage from it (`coverage.mjs`), so the bar has
   // to be "the server replied", not "we tried": a call the transport lost or the
   // wall clock killed is not evidence that the tool works, while a call that
@@ -237,13 +264,13 @@ export async function startSmokeClient(opts) {
   // guardrail smoke asserts. `callToolRaw` is the single chokepoint every other
   // helper here funnels through, so recording it once covers `callTool`,
   // `applyWrite` and the sweepers alike.
-  const answered = new Set();
+  const answered = createCallLog();
 
   const callToolRaw = async (tool, args = {}) => {
     const result = await client.callTool({ name: tool, arguments: args }, undefined, {
       timeout: timeoutMs,
     });
-    answered.add(tool);
+    answered.record(tool);
     return {
       result,
       payload: parsePayload(tool, result),
@@ -357,8 +384,13 @@ export async function startSmokeClient(opts) {
     callToolRaw,
     applyWrite,
     listTools: () => client.listTools(undefined, { timeout: timeoutMs }),
-    /** Tool names this session has had an answer from, sorted. */
-    answeredTools: () => [...answered].sort(),
+    /**
+     * Tool names this session has had an answer from, sorted — all of them, or
+     * only those answered at or after `since` (a `callMark()`).
+     */
+    answeredTools: (since = 0) => answered.toolsSince(since),
+    /** A position in the answer log; pass it to `answeredTools` later. */
+    callMark: () => answered.mark(),
     stderrTail,
     close: async () => {
       try {

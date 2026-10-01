@@ -247,7 +247,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
   if (accessToken === undefined && systemToken === undefined && pageToken === undefined) {
     err(
       'no-access-token',
-      'No access token configured. Set at least one of FB_ACCESS_TOKEN, FB_SYSTEM_TOKEN, or FB_PAGE_TOKEN.',
+      'No access token configured. Set at least one of FB_SYSTEM_TOKEN, FB_ACCESS_TOKEN, or FB_PAGE_TOKEN.',
       'FB_ACCESS_TOKEN',
     );
   }

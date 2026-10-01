@@ -642,7 +642,10 @@ export function bodyIsGraphErrorEnvelope(bodyText: string): boolean {
  */
 function throttleEtaMs(etaMinutes: number | undefined): number | undefined {
   if (etaMinutes === undefined || !(etaMinutes > 0)) return undefined;
-  return etaMinutes * ETA_MINUTES_TO_MS;
+  // A finite minute count can still overflow to `Infinity` ms (`1e307`): not a
+  // wait, and surfaced it would serialise to `null` — no instruction at all.
+  const ms = etaMinutes * ETA_MINUTES_TO_MS;
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** Business-use-case throttle codes: the 80000–80099 range. */

@@ -290,6 +290,16 @@ test('an empty string is rendered as an empty body line, not as a closed pair of
   );
 });
 
+test('content JSON cannot represent renders as an empty body, never as the text "undefined"', () => {
+  // `JSON.stringify` returns `undefined` (not a string) for `undefined`, a
+  // function and a symbol — a Graph node with no `message` reaches the renderer
+  // as exactly that. The frame must stay intact around an empty body line.
+  const empty = `${TAINT_WARNING} (source: comment)\n${TAINT_BEGIN} (source: comment)\n\n${TAINT_END}`;
+  for (const content of [undefined, () => 'x', Symbol('s')]) {
+    assert.equal(renderTainted(taint('comment', content)), empty, String(typeof content));
+  }
+});
+
 // --- Wave 11: disguised delimiters -------------------------------------------
 
 const DISGUISED_ENDS: ReadonlyArray<[string, string]> = [

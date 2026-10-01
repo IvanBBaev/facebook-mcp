@@ -52,6 +52,7 @@
 // result shaping — those belong to the `tools` layer (V03), which consumes the
 // signatures below.
 
+import { createHash } from 'node:crypto';
 import { access, open, realpath, stat } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import type { BigIntStats } from 'node:fs';
@@ -141,7 +142,17 @@ export const RESERVED_PHOTO_PARAMS: readonly string[] = [
  * * `url` — a public `https:` URL. META fetches it; this process never does.
  */
 export type PhotoSource =
-  | { readonly kind: 'local'; readonly path: string }
+  | {
+      readonly kind: 'local';
+      readonly path: string;
+      /**
+       * The SHA-256 (lowercase hex) of the content a plan approved, from
+       * {@link digestLocalMedia}. When set, the upload hashes the bytes it is
+       * about to send and refuses with `file_changed` if they differ — a
+       * same-size rewrite between preview and apply cannot slip through.
+       */
+      readonly sha256?: string;
+    }
   | { readonly kind: 'url'; readonly url: string };
 
 /** A local path that passed every containment and readability check. */
@@ -168,7 +179,20 @@ export interface LocalPhotoBytes extends ResolvedLocalMedia {
  */
 export type PreparedPhotoSource =
   | { readonly kind: 'url'; readonly url: string }
-  | { readonly kind: 'local'; readonly file: ResolvedLocalMedia };
+  | {
+      readonly kind: 'local';
+      readonly file: ResolvedLocalMedia;
+      /** The bound content hash carried over from the {@link PhotoSource}. */
+      readonly sha256?: string;
+    };
+
+/** A streamed content digest of a validated local file. */
+export interface LocalMediaDigest {
+  /** SHA-256 of the file content, lowercase hex. */
+  readonly sha256: string;
+  /** The number of bytes that were hashed. */
+  readonly bytes: number;
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -189,6 +213,11 @@ export type MediaSourceErrorReason =
   /** Zero-byte file: Meta would reject it, so it fails fast locally (CC-MEDIA-5). */
   | 'empty_file'
   | 'file_too_large'
+  /**
+   * The file's size or content hash at upload time differs from what the plan
+   * bound: the bytes about to be uploaded are not the bytes that were approved.
+   */
+  | 'file_changed'
   | 'malformed_url'
   /** Any scheme other than `https:` (`http:`, `file:`, `data:`, …). */
   | 'unsupported_url_scheme'
@@ -804,13 +833,21 @@ async function assertHandleStillContained(
   }
 }
 
-/** Buffer an already-validated local file, re-checking its size against the handle. */
-async function readResolvedLocalPhoto(
+/** SHA-256 of a byte buffer, lowercase hex — the form a plan binds. */
+export function sha256Hex(data: Uint8Array): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Open an already-validated local file and re-run the checks against the open
+ * handle, so they describe the bytes that will be read. The caller owns the
+ * returned handle and must close it.
+ */
+async function openValidatedLocalFile(
   resolved: ResolvedLocalMedia,
   requested: string,
-  opts: LocalMediaOptions,
-): Promise<LocalPhotoBytes> {
-  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_LOCAL_BYTES;
+  maxBytes: number,
+): Promise<Awaited<ReturnType<typeof open>>> {
   let handle;
   try {
     handle = await open(resolved.path, OPEN_FLAGS);
@@ -844,11 +881,7 @@ async function readResolvedLocalPhoto(
       );
     }
     if (info.size === 0) {
-      throw new MediaSourceError(
-        'empty_file',
-        requested,
-        `"${requested}" is empty (0 bytes) — Facebook would reject it.`,
-      );
+      throw emptyFileError(requested);
     }
     if (info.size > maxBytes) {
       throw new MediaSourceError(
@@ -858,21 +891,74 @@ async function readResolvedLocalPhoto(
           'local upload ceiling. Resize the image or raise the ceiling.',
       );
     }
+    return handle;
+  } catch (err) {
+    await handle.close();
+    throw err;
+  }
+}
+
+function emptyFileError(requested: string): MediaSourceError {
+  return new MediaSourceError(
+    'empty_file',
+    requested,
+    `"${requested}" is empty (0 bytes) — Facebook would reject it.`,
+  );
+}
+
+function grewPastCeilingError(requested: string, maxBytes: number): MediaSourceError {
+  return new MediaSourceError(
+    'file_too_large',
+    requested,
+    `"${requested}" grew past this server's ${String(maxBytes)}-byte local upload ceiling ` +
+      'while it was being read. Resize the image or raise the ceiling.',
+  );
+}
+
+/**
+ * The refusal for bytes that no longer hash to what the plan bound, worded the
+ * same for every local upload path.
+ */
+function contentChangedError(
+  requested: string,
+  actualSha256: string,
+  boundSha256: string,
+): MediaSourceError {
+  return new MediaSourceError(
+    'file_changed',
+    requested,
+    `"${requested}" no longer has the content the plan was built for (SHA-256 is now ` +
+      `${actualSha256.slice(0, 12)}…, the plan bound ${boundSha256.slice(0, 12)}…) — the file ` +
+      'changed after it was validated, so it was not uploaded. Preview the call again to bind the current file.',
+  );
+}
+
+/**
+ * Buffer an already-validated local file, re-checking its size against the
+ * handle. With `expectedSha256`, the buffered bytes — the very buffer that will
+ * be uploaded, so the check cannot be raced — must hash to it.
+ */
+async function readResolvedLocalPhoto(
+  resolved: ResolvedLocalMedia,
+  requested: string,
+  opts: LocalMediaOptions,
+  expectedSha256?: string,
+): Promise<LocalPhotoBytes> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_LOCAL_BYTES;
+  const handle = await openValidatedLocalFile(resolved, requested, maxBytes);
+  try {
     const data = await readAtMost(handle, maxBytes);
     if (data === undefined) {
-      throw new MediaSourceError(
-        'file_too_large',
-        requested,
-        `"${requested}" grew past this server's ${String(maxBytes)}-byte local upload ceiling ` +
-          'while it was being read. Resize the image or raise the ceiling.',
-      );
+      throw grewPastCeilingError(requested, maxBytes);
     }
     if (data.byteLength === 0) {
-      throw new MediaSourceError(
-        'empty_file',
-        requested,
-        `"${requested}" is empty (0 bytes) — Facebook would reject it.`,
-      );
+      throw emptyFileError(requested);
+    }
+    if (expectedSha256 !== undefined) {
+      const actual = sha256Hex(data);
+      if (actual !== expectedSha256) {
+        throw contentChangedError(requested, actual, expectedSha256);
+      }
     }
     return {
       path: resolved.path,
@@ -889,13 +975,49 @@ async function readResolvedLocalPhoto(
 /**
  * Validate a local path and buffer its bytes. Convenience wrapper over
  * {@link resolveLocalMediaPath} for callers that want the file in one step.
+ *
+ * With `expectedSha256`, the buffered bytes must hash to it or the read fails
+ * with `file_changed` — the upload-time half of a plan's content binding.
  */
 export async function readLocalPhoto(
   requested: string,
   opts: LocalMediaOptions,
+  expectedSha256?: string,
 ): Promise<LocalPhotoBytes> {
   const resolved = await resolveLocalMediaPath(requested, opts);
-  return readResolvedLocalPhoto(resolved, requested, opts);
+  return readResolvedLocalPhoto(resolved, requested, opts, expectedSha256);
+}
+
+/**
+ * Stream a validated local file through SHA-256 without buffering it: one read
+ * chunk is held at a time, so a preview can bind the content of a large video
+ * without loading it into memory. The same open-time checks as an upload read
+ * apply (containment, regular file, size ceiling).
+ */
+export async function digestLocalMedia(
+  resolved: ResolvedLocalMedia,
+  requested: string,
+  opts: LocalMediaOptions,
+): Promise<LocalMediaDigest> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_LOCAL_BYTES;
+  const handle = await openValidatedLocalFile(resolved, requested, maxBytes);
+  try {
+    const hash = createHash('sha256');
+    const chunk = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    let total = 0;
+    for (;;) {
+      const want = Math.min(READ_CHUNK_BYTES, maxBytes + 1 - total);
+      const { bytesRead } = await handle.read(chunk, 0, want, null);
+      if (bytesRead === 0) break;
+      hash.update(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+      if (total > maxBytes) throw grewPastCeilingError(requested, maxBytes);
+    }
+    if (total === 0) throw emptyFileError(requested);
+    return { sha256: hash.digest('hex'), bytes: total };
+  } finally {
+    await handle.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -913,7 +1035,11 @@ export async function preparePhotoSource(
   if (source.kind === 'url') {
     return { kind: 'url', url: resolveRemoteMediaUrl(source.url) };
   }
-  return { kind: 'local', file: await resolveLocalMediaPath(source.path, opts) };
+  return {
+    kind: 'local',
+    file: await resolveLocalMediaPath(source.path, opts),
+    ...(source.sha256 !== undefined ? { sha256: source.sha256 } : {}),
+  };
 }
 
 /**
@@ -1156,7 +1282,12 @@ async function uploadPreparedPhoto(
       ...(req.signal !== undefined ? { signal: req.signal } : {}),
     };
   } else {
-    const file = await readResolvedLocalPhoto(prepared.file, prepared.file.path, deps);
+    const file = await readResolvedLocalPhoto(
+      prepared.file,
+      prepared.file.path,
+      deps,
+      prepared.sha256,
+    );
     request = {
       protocol: 'multipart',
       method: 'POST',

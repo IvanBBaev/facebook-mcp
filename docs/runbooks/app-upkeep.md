@@ -71,13 +71,24 @@ To move the pin:
    smokes first; write smokes only once those are clean.
 3. Shape-diff the recorded fixtures under `test/fixtures/` against the new
    version's responses. A field that changed type or disappeared is the whole
-   point of this step.
+   point of this step. Snapshot the current set (`cp -R test/fixtures
+   "${TMPDIR:-/tmp}/fixtures-baseline"`), re-record each fixture with
+   `FB_RECORD_FIXTURE=1 FB_API_VERSION=<new> node scripts/record-fixture.mjs
+   --endpoint <edge> --out <name>.json --force`, then run
+   `npm run fixtures:shape-diff -- --baseline "${TMPDIR:-/tmp}/fixtures-baseline"
+   --candidate test/fixtures`. Exit `0` means no breaking difference; exit `1`
+   lists every `removed`, `type-changed` and `array-element-changed` path (added
+   fields and nullability changes are reported but do not fail). The comparison
+   is shapes only and never prints a fixture value. Restore or prune the
+   re-recorded files before committing — see
+   [`../../test/fixtures/README.md`](../../test/fixtures/README.md#when-the-api-version-moves).
 4. Only then change `DEFAULT_API_VERSION` in `src/core/settings.ts`, regenerate
    the metadata surfaces (`npm run metadata`), run `npm run check`, and record
    the bump in `CHANGELOG.md`.
 
 **Verify by:** `facebook_whoami` reports the new version, the smoke suite is
-green against it, and no fixture shape-diff is left unexplained.
+green against it, and every line `npm run fixtures:shape-diff` reports as
+breaking is explained.
 
 > Do not bump the pin and release in the same change. A version bump is its own
 > release, so that a regression has exactly one suspect.

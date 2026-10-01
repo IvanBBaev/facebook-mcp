@@ -198,6 +198,72 @@ function formatSmokeRow(smoke) {
 }
 
 /**
+ * How long a timed-out smoke gets, after its signal is aborted, to finish its
+ * own `finally` cleanup before the run moves on. Without this wait the cleanup
+ * ran detached: its deletions and verdict printed under the NEXT smoke's
+ * heading, raced that smoke's Graph calls, and a failed deletion was never
+ * attributed to the smoke that leaked it.
+ */
+export const TIMEOUT_CLEANUP_GRACE_MS = 60_000;
+
+const TIMED_OUT = Symbol('timed-out');
+
+/**
+ * Run `run()` under a time budget. Resolves with its value and rejects with its
+ * error; on timeout it aborts `controller`, waits up to `graceMs` for `run()` to
+ * settle (so the smoke's cleanup finishes before the next smoke starts), then
+ * rejects with a "timed out" error that says whether that cleanup finished.
+ *
+ * @template T
+ * @param {() => Promise<T>} run
+ * @param {{ timeoutMs: number, graceMs?: number, controller: AbortController }} opts
+ * @returns {Promise<T>}
+ */
+export async function runWithBudget(
+  run,
+  { timeoutMs, graceMs = TIMEOUT_CLEANUP_GRACE_MS, controller },
+) {
+  const running = Promise.resolve().then(run);
+  // The late outcome is observed below; it must never surface as unhandled.
+  running.catch(() => {});
+
+  let timer;
+  const budget = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+  });
+  let outcome;
+  try {
+    outcome = await Promise.race([running, budget]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (outcome !== TIMED_OUT) return outcome;
+
+  controller.abort();
+  let graceTimer;
+  const grace = new Promise((resolve) => {
+    graceTimer = setTimeout(() => resolve(TIMED_OUT), graceMs);
+  });
+  let late;
+  try {
+    late = await Promise.race([
+      running.then(
+        () => 'finished',
+        () => 'finished',
+      ),
+      grace,
+    ]);
+  } finally {
+    clearTimeout(graceTimer);
+  }
+  const tail =
+    late === TIMED_OUT
+      ? `; its cleanup was still running ${graceMs} ms after the abort — check the Page for leftovers`
+      : '; its cleanup finished after the abort';
+  throw new Error(`timed out after ${timeoutMs} ms${tail}`);
+}
+
+/**
  * Run one smoke with a wall clock. Never throws; returns a result record whose
  * `status` is one of:
  *
@@ -269,16 +335,8 @@ async function runOneSmoke(smoke, { session, cfg, nonce, log, timeoutMs, control
     },
   };
 
-  let timer;
   try {
-    const budget = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error(`timed out after ${timeoutMs} ms`));
-      }, timeoutMs);
-      timer.unref?.();
-    });
-    await Promise.race([smoke.run(ctx), budget]);
+    await runWithBudget(() => smoke.run(ctx), { timeoutMs, controller });
     const ms = Date.now() - started;
     if (unexercised.length > 0) {
       log.skip(
@@ -299,7 +357,6 @@ async function runOneSmoke(smoke, { session, cfg, nonce, log, timeoutMs, control
       unexercised,
     };
   } finally {
-    clearTimeout(timer);
     controllers.delete(controller);
   }
 }
@@ -591,11 +648,13 @@ async function main() {
     if (cfg.sweepEnabled) {
       startSweep = await runSweep({ phase: 'start', session, pages, nonce, log });
     }
-    // Snapshot AFTER the start sweep and read again before the end sweep, so
-    // the coverage figure counts what the SMOKES exercised. A sweep calls the
+    // Mark AFTER the start sweep and read before the end sweep, so the
+    // coverage figure counts what the SMOKES exercised. A sweep calls the
     // delete tools too, and counting those would report the destructive half of
     // the surface as verified by a run that only tidied up after an earlier one.
-    const sweptTools = new Set(session.answeredTools());
+    // A window, not a set difference: subtracting every tool the sweep touched
+    // also discarded the list tools the smokes then called themselves.
+    const smokesStart = session.callMark();
     for (const smoke of selected) {
       if (interrupted) {
         break;
@@ -617,7 +676,7 @@ async function main() {
     // mismatch between the two is precisely the drift worth surfacing.
     coverage = toolCoverage({
       advertised: (await session.listTools()).tools.map((tool) => tool.name),
-      called: session.answeredTools().filter((name) => !sweptTools.has(name)),
+      called: session.answeredTools(smokesStart),
     });
   } catch (err) {
     // A failure OUTSIDE a smoke (transport died, sweep exploded). Recorded, not

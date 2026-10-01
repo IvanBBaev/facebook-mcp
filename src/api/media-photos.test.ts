@@ -13,6 +13,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFileSync, constants as fsConstants } from 'node:fs';
 import {
   chmod,
@@ -57,11 +58,13 @@ import {
   cleanupUnpublishedPhotos,
   describeOrphans,
   detectPhotoContentType,
+  digestLocalMedia,
   multipartFilename,
   preparePhotoSources,
   readLocalPhoto,
   resolveLocalMediaPath,
   resolveRemoteMediaUrl,
+  sha256Hex,
   uploadPhoto,
   uploadUnpublishedPhotos,
   type MediaPhotoDeps,
@@ -617,6 +620,68 @@ test('readLocalPhoto: buffers the bytes and sniffs the content type', async (t) 
   assert.equal(file.bytes, pngBytes().byteLength);
   assert.equal(file.filename, 'shot.png');
   assert.equal(file.path, join(fx.mediaDir, 'shot.png'));
+});
+
+test('digestLocalMedia: streams the file into the SHA-256 of its exact content', async (t) => {
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'shot.png'), pngBytes());
+  const opts = { mediaDir: fx.mediaDir };
+  const resolved = await resolveLocalMediaPath('shot.png', opts);
+
+  const digest = await digestLocalMedia(resolved, 'shot.png', opts);
+  assert.equal(digest.sha256, createHash('sha256').update(pngBytes()).digest('hex'));
+  assert.equal(digest.sha256, sha256Hex(pngBytes()));
+  assert.equal(digest.bytes, pngBytes().byteLength);
+});
+
+test('digestLocalMedia: a file that grew past the ceiling after validation is refused', async (t) => {
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'grow.png');
+  await writeFile(path, pngBytes('x'));
+  const opts = { mediaDir: fx.mediaDir, maxBytes: 16 };
+  const resolved = await resolveLocalMediaPath('grow.png', opts);
+  await writeFile(path, pngBytes('x'.repeat(64)));
+
+  await rejectsMediaSourceError(
+    digestLocalMedia(resolved, 'grow.png', opts),
+    'file_too_large',
+  );
+});
+
+test('readLocalPhoto: a same-size rewrite fails the bound content hash with file_changed', async (t) => {
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'shot.png');
+  await writeFile(path, pngBytes('approved'));
+  const bound = sha256Hex(pngBytes('approved'));
+
+  const ok = await readLocalPhoto('shot.png', { mediaDir: fx.mediaDir }, bound);
+  assert.deepEqual([...ok.data], [...pngBytes('approved')]);
+
+  // Same length, different bytes: a size check alone would let this through.
+  await writeFile(path, pngBytes('replaced'));
+  const err = await rejectsMediaSourceError(
+    readLocalPhoto('shot.png', { mediaDir: fx.mediaDir }, bound),
+    'file_changed',
+  );
+  assert.match(err.message, /SHA-256/);
+});
+
+test('uploadPhoto: a local source whose bytes no longer match its bound hash sends nothing', async (t) => {
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'a.png');
+  await writeFile(path, pngBytes('approved'));
+  const bound = sha256Hex(pngBytes('approved'));
+  await writeFile(path, pngBytes('replaced'));
+  const fb = createFakeFbRequest();
+
+  await rejectsMediaSourceError(
+    uploadPhoto(makeDeps(fb, { mediaDir: fx.mediaDir }), {
+      pageId: PAGE_ID,
+      source: { kind: 'local', path: 'a.png', sha256: bound },
+    }),
+    'file_changed',
+  );
+  assert.equal(fb.calls.length, 0);
 });
 
 test('preparePhotoSources: validates every source in order, touching no network', async (t) => {

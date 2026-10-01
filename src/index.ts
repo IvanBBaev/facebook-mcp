@@ -33,6 +33,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import {
+  CallToolRequestParamsSchema,
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
@@ -42,6 +43,7 @@ import {
   type ServerRequest,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
+import * as z from 'zod/v4';
 
 import {
   assertStartupOk,
@@ -56,6 +58,7 @@ import {
   GraphApiError,
   isPageTokenDead,
   loadSettings,
+  setHintLaunchCommand,
   type Clock,
   type ConfirmationRequest,
   type Confirmer,
@@ -63,6 +66,7 @@ import {
   type Journal,
   type LogFields,
   type Logger,
+  type LogLevel,
   type PackageSpec,
   type PageResolver,
   type ProgressReporter,
@@ -72,6 +76,7 @@ import {
   type ToolContext,
   type ToolResult,
   type ToolSpec,
+  type UsageSnapshot,
   type WriteMode,
 } from './core/index.js';
 import {
@@ -96,6 +101,13 @@ import {
   type MetricProbe,
   type WriteGate,
 } from './mcp/index.js';
+import {
+  BIN_NAME,
+  DEFAULT_LAUNCH_COMMAND,
+  resolveLaunchCommand,
+  SOURCE_ENTRY,
+  subcommandHint,
+} from './mcp/launch-command.js';
 import { normalizeAdAccountId, readAdAccount } from './api/ads-read.js';
 import { fetchInsights, PAGE_INSIGHTS_LIKES_FLOOR } from './api/insights.js';
 import {
@@ -108,6 +120,7 @@ import {
   createPostsPackage,
   createReaderPackage,
 } from './tools/index.js';
+import { createUsageTracker } from './tools/core.js';
 
 /** Advertised MCP server name (matches the whoami / doctor envelopes). */
 const SERVER_NAME = 'facebook-mcp';
@@ -224,7 +237,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
   }));
 
   // tools/call — resolve the spec, assemble the context, invoke, map errors.
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  server.setRequestHandler(TolerantCallToolRequestSchema, async (request, extra) => {
     const spec = registry.get(request.params.name);
     const args = request.params.arguments ?? {};
     if (spec === undefined) {
@@ -233,6 +246,23 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       return toCallToolResult(
         shapeResult(
           { error: unadvertisedToolMessage(request.params.name) },
+          { maxResultChars: settings.maxResultChars, redactor, isError: true },
+        ),
+      );
+    }
+    const invalid = request.params.invalidArguments;
+    if (invalid !== undefined) {
+      // Answered as a tool error, like every other input the caller got wrong:
+      // the model reads a result, and a protocol error tells it nothing it can
+      // correct. Nothing ran, so there is nothing to retry but the call itself.
+      return toCallToolResult(
+        shapeResult(
+          {
+            error:
+              `invalid call to ${spec.name}: \`arguments\` must be an object of named ` +
+              `parameters (or omitted), got ${invalid}. Nothing was run; resend the ` +
+              'call with an object.',
+          },
           { maxResultChars: settings.maxResultChars, redactor, isError: true },
         ),
       );
@@ -289,6 +319,46 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
   });
 
   return server;
+}
+
+/**
+ * The `tools/call` request schema the handler is registered with: the SDK's own,
+ * except that `arguments` of the wrong shape is moved aside instead of failing
+ * the parse.
+ *
+ * The SDK parses a request against the registered schema before any handler
+ * runs, and a parse failure there is not an `McpError` — so `arguments: null`
+ * (which some clients send for a tool without parameters), an array or a scalar
+ * was answered with JSON-RPC -32603, "internal error": the server blamed itself
+ * for a malformed call and gave the model nothing to correct. The transform
+ * drops the bad value and records its shape on `invalidArguments`, which the
+ * handler answers as a tool error. The SDK re-validates the transformed request
+ * against its strict schema; an absent `arguments` passes that, and the extra
+ * key is ignored by it (not stripped from what the handler receives).
+ */
+const TolerantCallToolRequestSchema = CallToolRequestSchema.extend({
+  params: CallToolRequestParamsSchema.extend({
+    arguments: z.unknown().optional(),
+  }).transform(({ arguments: raw, ...params }) => {
+    const valid = raw === undefined || isArgumentsObject(raw);
+    return {
+      ...params,
+      arguments: valid ? raw : undefined,
+      invalidArguments: valid ? undefined : shapeOf(raw),
+    };
+  }),
+});
+
+/** Whether a `tools/call` `arguments` value is the object the protocol requires. */
+function isArgumentsObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** A malformed `arguments` value, named by its shape and never by its content. */
+function shapeOf(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return `a ${typeof value}`;
 }
 
 /**
@@ -661,17 +731,31 @@ const systemClock: Clock = {
  * back to {@link FALLBACK_VERSION} so a packaging quirk never crashes startup.
  */
 function resolveServerVersion(): string {
+  return readManifestField('version') ?? FALLBACK_VERSION;
+}
+
+/**
+ * The npm package name, read like the version so the `--help` text never names
+ * a package the manifest does not (the scope has changed once already).
+ * `undefined` when the manifest cannot be read.
+ */
+function resolvePackageName(): string | undefined {
+  return readManifestField('name');
+}
+
+/** One string field of the root `package.json`, or `undefined` on any failure. */
+function readManifestField(field: string): string | undefined {
   try {
     const raw = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
     const parsed: unknown = JSON.parse(raw);
     if (parsed !== null && typeof parsed === 'object') {
-      const version = (parsed as Record<string, unknown>)['version'];
-      if (typeof version === 'string') return version;
+      const value = (parsed as Record<string, unknown>)[field];
+      if (typeof value === 'string') return value;
     }
   } catch {
-    // fall through to the safe fallback
+    // fall through to the caller's fallback
   }
-  return FALLBACK_VERSION;
+  return undefined;
 }
 
 /**
@@ -793,30 +877,82 @@ export function isHelpFlag(arg: string | undefined): boolean {
 }
 
 /**
+ * Does this argument vector ask for help — `--help` / `-h` on its own, or
+ * after the `doctor` / `setup-token` subcommand?
+ *
+ * The subcommand form is what a first-time operator types to learn the flags,
+ * and it used to be read as an unknown option: `setup-token --help` ran the
+ * whole flow and ended in a FAIL report, `doctor --help` called Graph. Neither
+ * subcommand takes a value that could legitimately be spelled `-h`.
+ */
+export function wantsHelp(args: readonly string[]): boolean {
+  if (isHelpFlag(args[0])) return true;
+  if (args[0] !== 'doctor' && args[0] !== 'setup-token') return false;
+  return args.slice(1).some((arg) => isHelpFlag(arg));
+}
+
+/**
  * What `--help` prints. Answered before settings are loaded, like `--version`:
  * without it, `--help` fell through to the server start, which either hung
  * silently on stdin (a token configured) or failed on the missing token — the
  * operator asking how to use the binary was told neither.
+ *
+ * Every command is rendered with `launchCommand`, the form that started this
+ * process (see `resolveLaunchCommand`): the usage line used to say
+ * `facebook-mcp`, which is only on PATH after a global install.
  */
-export const USAGE_TEXT = [
-  'Usage: facebook-mcp [command]',
-  '',
-  'With no command, starts the MCP server (stdio by default; FB_TRANSPORT=http',
-  'selects the HTTP transport) and waits for a client. Any argument not listed',
-  'below also starts the server.',
-  '',
-  'Commands:',
-  '  doctor [--strict]      Pre-flight report on stderr: token, scopes, package',
-  '                         matrix. Exits 0 unless --strict is passed and the',
-  '                         verdict is not ok.',
-  '  setup-token [options]  Exchange a short-lived user token for a long-lived',
-  '                         credential. Read the token from FB_SETUP_TOKEN rather',
-  '                         than passing it as an argument. Options: --page=<id>,',
-  '                         --env-file=<path>, --force, --no-write.',
-  '  --version, -v          Print the server, Node and MCP SDK versions.',
-  '  --help, -h             Print this help.',
-  '',
-].join('\n');
+export function usageText(
+  packageName: string | undefined,
+  launchCommand: string = DEFAULT_LAUNCH_COMMAND,
+): string {
+  const npx =
+    packageName !== undefined ? `npx -y ${packageName}` : 'npx -y <npm package>';
+  return [...usageLines(launchCommand), ...firstRunLines(launchCommand, npx)].join('\n');
+}
+
+/**
+ * The first-run hint, in the launch form that started this process, followed by
+ * the other launch forms — the same help is read by an operator deciding how
+ * to wire the server into a client, who may not launch it this way next time.
+ */
+function firstRunLines(launch: string, npx: string): string[] {
+  const others = [
+    { label: 'after a global install:', form: BIN_NAME },
+    { label: 'through npx:', form: npx },
+    { label: 'from a source checkout:', form: SOURCE_ENTRY },
+  ].filter(({ form }) => form !== launch);
+  return [
+    'First run (FB_APP_ID / FB_APP_SECRET from your Meta app, Settings > Basic):',
+    '  FB_APP_ID=<id> FB_APP_SECRET=<secret> \\',
+    `  FB_SETUP_TOKEN=<Graph API Explorer user token> ${subcommandHint(launch, 'setup-token')}`,
+    `  ${subcommandHint(launch, 'doctor')}`,
+    `Launched another way, replace ${launch} with`,
+    ...others.map(({ label, form }) => `  ${label.padEnd(24)} ${form}`),
+    '',
+  ];
+}
+
+function usageLines(launch: string): string[] {
+  return [
+    `Usage: ${launch} [command]`,
+    '',
+    'With no command, starts the MCP server (stdio by default; FB_TRANSPORT=http',
+    'selects the HTTP transport) and waits for a client. Any argument not listed',
+    'below also starts the server.',
+    '',
+    'Commands:',
+    '  doctor [--strict]      Pre-flight report on stderr: token, scopes, package',
+    '                         matrix. Exits 0 unless --strict is passed and the',
+    '                         verdict is not ok.',
+    '  setup-token [options]  Exchange a short-lived user token for a long-lived',
+    '                         credential. Read the token from FB_SETUP_TOKEN rather',
+    '                         than passing it as an argument. Options: --page=<id>,',
+    '                         --env-file=<path>, --force, --no-write.',
+    '  --version, -v          Print the server, Node and MCP SDK versions.',
+    '  --help, -h             Print this help (also after doctor / setup-token).',
+    '',
+  ];
+}
 
 /**
  * The arguments `doctor` did not understand, described without their values,
@@ -859,6 +995,40 @@ export function logStartupWarnings(logger: Logger, report: StartupReport): void 
       message: problem.message,
     });
   }
+}
+
+/** The interactive subcommands that print a human-readable report and exit. */
+const CLI_REPORT_COMMANDS: ReadonlySet<string> = new Set(['doctor', 'setup-token']);
+
+/** Warn is the quietest level a CLI report is preceded by (see {@link cliLogLevel}). */
+const CLI_REPORT_FLOOR: LogLevel = 'warn';
+
+const LOG_LEVEL_RANK: Readonly<Record<LogLevel, number>> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
+
+/**
+ * The log level for this invocation.
+ *
+ * `doctor` and `setup-token` print a report for a human on stderr, and the
+ * collaborators they share with the server (the Pages registry, the transport)
+ * log their routine `info` lines there too — so the first thing a newcomer saw
+ * was a JSON "Resolved active Facebook credential…" line above the report it
+ * was meant to introduce. On those two commands the floor is `warn`: warnings
+ * and errors still print, routine info does not. An explicit
+ * `FB_LOG_LEVEL=debug` is a request for everything and is honored as asked.
+ * Server mode (any other argv) keeps the configured level untouched — its
+ * stderr JSON stream is a contract with log consumers.
+ */
+export function cliLogLevel(command: string | undefined, configured: LogLevel): LogLevel {
+  if (command === undefined || !CLI_REPORT_COMMANDS.has(command)) return configured;
+  if (configured === 'debug') return configured;
+  return LOG_LEVEL_RANK[configured] >= LOG_LEVEL_RANK[CLI_REPORT_FLOOR]
+    ? configured
+    : CLI_REPORT_FLOOR;
 }
 
 /**
@@ -1169,27 +1339,31 @@ export function serverStartedFields(
 }
 
 /**
- * Real bootstrap: resolve settings, build collaborators, then run `doctor` or
- * start the transport. Never called by tests (they drive {@link buildServer}).
- */
-/**
  * The production Graph transport: the JSON client with the multipart / rupload
  * handler wired in, both sharing ONE per-host semaphore set so upload traffic
  * and JSON calls honor a single concurrency budget. Without the upload handler
  * every local-file photo, video chunk and reel upload rejects before it is sent.
+ * `onUsage` receives the usage headers of every response on both paths.
  */
 export function createTransport(deps: {
   readonly settings: Settings;
   readonly clock: Clock;
   readonly redactor: Redactor;
   readonly logger: Logger;
+  readonly onUsage?: (snapshot: UsageSnapshot) => void;
 }): FbRequestFn {
   const semaphores = createHostSemaphores(deps.settings.hostConcurrency);
   const uploadHandler = createUploadHandler({ ...deps, semaphores });
   return createFbRequest({ ...deps, semaphores, uploadHandler });
 }
 
-async function main(): Promise<void> {
+/**
+ * Real bootstrap: resolve settings, build collaborators, then run `doctor` or
+ * start the transport. Never called by tests (they drive {@link buildServer}).
+ * `onStarted` is called once the transport is up, so {@link runCli} can tell a
+ * server that never came up from one that stopped later.
+ */
+async function main(onStarted: () => void = () => undefined): Promise<void> {
   const serverVersion = resolveServerVersion();
   const sdkVersion = resolveSdkVersion();
 
@@ -1202,8 +1376,17 @@ async function main(): Promise<void> {
     process.stdout.write(`${versionLine(serverVersion, sdkVersion)}\n`);
     process.exit(0);
   }
-  if (isHelpFlag(process.argv[2])) {
-    process.stdout.write(USAGE_TEXT);
+  // Hints — the help, the CLI reports and the Graph error texts — name the
+  // command the operator can actually type. Resolved before `--help`, which
+  // prints it, and injected into the core classifier, which cannot import it.
+  const launchCommand = resolveLaunchCommand({
+    env: process.env,
+    argv: process.argv,
+    packageName: resolvePackageName(),
+  });
+  setHintLaunchCommand(launchCommand);
+  if (wantsHelp(process.argv.slice(2))) {
+    process.stdout.write(usageText(resolvePackageName(), launchCommand));
     process.exit(0);
   }
 
@@ -1211,8 +1394,21 @@ async function main(): Promise<void> {
 
   const clock = systemClock;
   const redactor = createRedactor({ secrets: collectSecrets(settings) });
-  const logger = createLogger({ clock, redactor, level: settings.logLevel });
-  const fbRequest = createTransport({ settings, clock, redactor, logger });
+  const logger = createLogger({
+    clock,
+    redactor,
+    level: cliLogLevel(process.argv[2], settings.logLevel),
+  });
+  // Every Graph response feeds facebook_usage, not only its own `/me` probe:
+  // the probe never carries the Page and ads buckets that throttle real work.
+  const usageTracker = createUsageTracker();
+  const fbRequest = createTransport({
+    settings,
+    clock,
+    redactor,
+    logger,
+    onUsage: usageTracker.record,
+  });
   const journal = createJournal({ clock, redactor, journalPath: settings.journalPath });
   const pages = createPagesRegistry({ settings, fbRequest, clock, redactor, logger });
 
@@ -1222,7 +1418,11 @@ async function main(): Promise<void> {
   // registry then applies selection / deny-list / read-only posture from
   // `settings`; no other change here is required as further packages land.
   const packages: PackageSpec[] = [
-    createCorePackage({ serverVersion, sdkVersion }),
+    createCorePackage({
+      serverVersion,
+      sdkVersion,
+      observedUsage: usageTracker.observed,
+    }),
     createReaderPackage(),
     createInsightsPackage(),
     createModerationPackage(),
@@ -1249,6 +1449,7 @@ async function main(): Promise<void> {
         serverVersion,
         metricProbe: metricProbe(pages),
         adAccountProbe: adAccountProbe(),
+        launchCommand,
       },
       process.argv.slice(3),
       report,
@@ -1269,7 +1470,8 @@ async function main(): Promise<void> {
       clock,
       logger,
       redactor,
-      input: parseSetupTokenArgs(process.argv.slice(3), process.env),
+      input: parseSetupTokenArgs(process.argv.slice(3), process.env, launchCommand),
+      launchCommand,
     });
     process.stderr.write(`${renderSetupTokenReport(setupResult)}\n`);
     process.exit(setupResult.ok ? 0 : 2);
@@ -1302,6 +1504,7 @@ async function main(): Promise<void> {
     'facebook-mcp server started',
     serverStartedFields(handle.kind, serverVersion, packages, settings),
   );
+  onStarted();
 
   // Graceful shutdown: aborting the controller drives the transport's own
   // shutdown path (close listener + unwind in-flight work — CC-MCP-5).
@@ -1325,14 +1528,43 @@ async function main(): Promise<void> {
  * install and a `node build/index.js` run behave identically — a silently
  * exiting binary is the worst possible first impression.
  */
-export async function runCli(): Promise<void> {
+export async function runCli(
+  entry: CliEntry = main,
+  io: CliIo = processIo,
+): Promise<void> {
+  // Everything after the transport came up — a transport that dies mid-session,
+  // a shutdown that throws — is not a startup failure, and calling it one sends
+  // the operator to check the token and settings of a server that started fine.
+  let started = false;
   try {
-    await main();
+    await entry(() => {
+      started = true;
+    });
   } catch (err: unknown) {
-    process.stderr.write(`facebook-mcp failed to start: ${errorMessageOf(err)}\n`);
-    process.exit(1);
+    const what = started ? 'stopped unexpectedly' : 'failed to start';
+    io.writeStderr(`facebook-mcp ${what}: ${errorMessageOf(err)}\n`);
+    io.exit(1);
   }
 }
+
+/** What {@link runCli} runs: a bootstrap that reports when it has started. */
+export type CliEntry = (onStarted: () => void) => Promise<void>;
+
+/** The process seams {@link runCli} reports a fatal error through. */
+export interface CliIo {
+  readonly writeStderr: (text: string) => void;
+  readonly exit: (code: number) => void;
+}
+
+/** The real process streams and exit. */
+const processIo: CliIo = {
+  writeStderr: (text) => {
+    process.stderr.write(text);
+  },
+  exit: (code) => {
+    process.exit(code);
+  },
+};
 
 // Run only when this module is the process entry point (not on import — tests
 // import `buildServer` without ever triggering the bootstrap).

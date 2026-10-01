@@ -163,7 +163,8 @@ const SEND_VISIBILITY_WARNING =
 
 const SEND_UNKNOWN_OUTCOME_WARNING =
   'This endpoint has no idempotency key. If the response is lost the delivery is ' +
-  'UNKNOWN, not failed: the journal records "attempted" and you must verify with ' +
+  'UNKNOWN, not failed: the send is classified "attempted" (the outcome handed to ' +
+  'the audit journal, whose append can itself fail) and you must verify with ' +
   'facebook_get_conversation before considering a resend.';
 
 // ---------------------------------------------------------------------------
