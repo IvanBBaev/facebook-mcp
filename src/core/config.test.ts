@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -467,5 +468,45 @@ test('regression: loadEnvFile strips a UTF-8 BOM from the first key', async (t) 
       'FB_TESTONLY_BOM2',
     ]);
     assert.equal(process.env.FB_TESTONLY_BOM, 'first');
+  });
+});
+
+// --- loadEnvFile default path & statFileProtection on special files ---
+
+test('loadEnvFile with no path reads .env from the working directory', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-cfg-cwd-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const key = 'FBMCP_TEST_CWD_ENV_KEY';
+  await writeFile(path.join(dir, '.env'), `${key}=from-cwd\n`);
+
+  const previous = process.cwd();
+  process.chdir(dir);
+  try {
+    const result = loadEnvFile();
+    assert.equal(result.loaded, true);
+    assert.ok(result.parsedKeys.includes(key));
+    assert.equal('path' in result, false, 'no explicit path is echoed back');
+    assert.equal(process.env[key], 'from-cwd');
+  } finally {
+    process.chdir(previous);
+    delete process.env[key];
+  }
+});
+
+test('statFileProtection refuses a non-regular, non-directory file as EINVAL', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('mkfifo is POSIX-only');
+    return;
+  }
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-cfg-fifo-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fifo = path.join(dir, 'pipe.env');
+  execFileSync('mkfifo', [fifo]);
+
+  await assert.rejects(statFileProtection(fifo), (err: NodeJS.ErrnoException) => {
+    assert.equal(err.code, 'EINVAL');
+    assert.match(err.message, /is not a regular file/);
+    assert.ok(!err.message.includes('directory'), err.message);
+    return true;
   });
 });

@@ -2147,3 +2147,115 @@ test('CC-MEDIA-5: a directory swapped for an outbound symlink after validation i
   assert.equal(cause.reason, 'outside_media_dir');
   assert.deepEqual([...outcome.cleanup.deleted], ['ph1']);
 });
+
+// ---------------------------------------------------------------------------
+// Open-time re-validation: what changed between the preview's checks and the
+// read is refused with a typed reason, never a raw errno.
+// ---------------------------------------------------------------------------
+
+test('resolveLocalMediaPath: a blank path is refused as file_not_found', async (t) => {
+  const fx = await mediaFixture(t);
+  const err = await rejectsMediaSourceError(
+    resolveLocalMediaPath('   ', { mediaDir: fx.mediaDir }),
+    'file_not_found',
+  );
+  assert.match(err.message, /empty/);
+});
+
+test('resolveLocalMediaPath: a file inside an unsearchable directory is file_unreadable', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip(
+      'chmod does not restrict directory traversal on win32 — protection is the NTFS ACL',
+    );
+    return;
+  }
+  if (process.getuid?.() === 0) {
+    t.skip('running as root — permission bits do not restrict traversal');
+    return;
+  }
+  const fx = await mediaFixture(t);
+  const locked = join(fx.mediaDir, 'locked');
+  await mkdir(locked);
+  await writeFile(join(locked, 'shot.png'), pngBytes());
+  await chmod(locked, 0o000);
+  try {
+    const err = await rejectsMediaSourceError(
+      resolveLocalMediaPath('locked/shot.png', { mediaDir: fx.mediaDir }),
+      'file_unreadable',
+    );
+    assert.match(err.message, /EACCES|EPERM/);
+  } finally {
+    // Restore the mode so the fixture's recursive `rm` can descend into it.
+    await chmod(locked, 0o700);
+  }
+});
+
+test('digestLocalMedia: a file emptied after validation is refused as empty_file', async (t) => {
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'shot.png');
+  await writeFile(path, pngBytes());
+  const opts = { mediaDir: fx.mediaDir };
+  const resolved = await resolveLocalMediaPath('shot.png', opts);
+  await writeFile(path, new Uint8Array(0));
+
+  await rejectsMediaSourceError(
+    digestLocalMedia(resolved, 'shot.png', opts),
+    'empty_file',
+  );
+});
+
+test('digestLocalMedia: a file deleted after validation is refused as file_unreadable', async (t) => {
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'shot.png');
+  await writeFile(path, pngBytes());
+  const opts = { mediaDir: fx.mediaDir };
+  const resolved = await resolveLocalMediaPath('shot.png', opts);
+  await rm(path);
+
+  const err = await rejectsMediaSourceError(
+    digestLocalMedia(resolved, 'shot.png', opts),
+    'file_unreadable',
+  );
+  assert.match(err.message, /ENOENT/);
+});
+
+test('digestLocalMedia: a file swapped for a symlink after validation is not followed', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('no O_NOFOLLOW on win32, and symlinks need elevated rights');
+    return;
+  }
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'shot.png');
+  const elsewhere = join(fx.outside, 'secret.png');
+  await writeFile(path, pngBytes());
+  await writeFile(elsewhere, pngBytes('secret'));
+  const opts = { mediaDir: fx.mediaDir };
+  const resolved = await resolveLocalMediaPath('shot.png', opts);
+  await rm(path);
+  await symlink(elsewhere, path);
+
+  const err = await rejectsMediaSourceError(
+    digestLocalMedia(resolved, 'shot.png', opts),
+    'outside_media_dir',
+  );
+  assert.match(err.message, /became a symlink/);
+});
+
+test('digestLocalMedia: a file swapped for a directory after validation is refused', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('win32 refuses to open a directory as a file before any fstat runs');
+    return;
+  }
+  const fx = await mediaFixture(t);
+  const path = join(fx.mediaDir, 'shot.png');
+  await writeFile(path, pngBytes());
+  const opts = { mediaDir: fx.mediaDir };
+  const resolved = await resolveLocalMediaPath('shot.png', opts);
+  await rm(path);
+  await mkdir(path);
+
+  await rejectsMediaSourceError(
+    digestLocalMedia(resolved, 'shot.png', opts),
+    'not_a_regular_file',
+  );
+});

@@ -703,8 +703,13 @@ function extractProfile(args: Record<string, unknown>): string | undefined {
 // main — the real process bootstrap
 // ---------------------------------------------------------------------------
 
-/** System clock: real time + an abortable sleep (mirrors the transport fixture). */
-const systemClock: Clock = {
+/**
+ * System clock: real time + an abortable sleep (mirrors the transport fixture).
+ * A completed sleep detaches its abort listener: callers pass the long-lived
+ * per-request signal, and a polling loop would otherwise accumulate one listener
+ * per sleep for the lifetime of the request.
+ */
+export const systemClock: Clock = {
   now: () => Date.now(),
   sleep: (ms, signal) =>
     new Promise((resolve, reject) => {
@@ -712,15 +717,15 @@ const systemClock: Clock = {
         reject(new Error('aborted'));
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(new Error('aborted'));
-        },
-        { once: true },
-      );
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(new Error('aborted'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
     }),
 };
 

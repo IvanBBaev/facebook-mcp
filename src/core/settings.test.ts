@@ -911,3 +911,57 @@ test('regression: every documented FB_* variable, profile vars, tooling vars and
       .join('\n'),
   );
 });
+
+// --- Profile and unknown-setting edge cases ---
+
+test('a profile page id whose name has a forbidden character is an invalid-profile-name error', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      'FB_PROFILE_bad.name_PAGE_ID': '123',
+    },
+  });
+  const bad = report.problems.find((p) => p.code === 'invalid-profile-name');
+  assert.ok(
+    bad,
+    `expected invalid-profile-name, got: ${codes(report.problems).join(', ')}`,
+  );
+  assert.equal(bad.severity, 'error');
+  assert.equal(bad.field, 'FB_PROFILE_bad.name_PAGE_ID');
+  assert.deepEqual(settings.profiles, {});
+});
+
+test('an unknown setting with no close match gets no did-you-mean hint', () => {
+  const { report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      FB_ZZZZZZZZZZZZZZZZ: 'x',
+    },
+  });
+  const unknown = report.warnings.find((p) => p.field === 'FB_ZZZZZZZZZZZZZZZZ');
+  assert.ok(
+    unknown,
+    `expected unknown-setting, got: ${codes(report.problems).join(', ')}`,
+  );
+  assert.equal(unknown.code, 'unknown-setting');
+  assert.ok(!unknown.message.includes('did you mean'), unknown.message);
+});
+
+test('a blank profile token without a page id is not reported as an orphan', () => {
+  const { report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      FB_PROFILE_ACME_TOKEN: '   ',
+    },
+  });
+  assert.ok(!codes(report.problems).includes('orphan-profile-token'));
+});

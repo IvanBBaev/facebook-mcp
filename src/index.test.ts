@@ -30,8 +30,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { getEventListeners } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,6 +119,7 @@ import {
   runCli,
   runDoctorCommand,
   serverStartedFields,
+  systemClock,
   usageText,
   versionLine,
   type BuildServerDeps,
@@ -2236,6 +2239,31 @@ test('a declined elicitation refuses the write', async () => {
   assert.equal(appliedEntries(journal).length, 0, 'a refused write must not apply');
 });
 
+test('a cancelled elicitation refuses the write and says it was cancelled', async () => {
+  const { deps, journal } = makeHarness({
+    settings: confirmSettings(),
+    packages: confirmPackages(),
+  });
+  // Dismissing the prompt is not consent either; the note names what happened.
+  const session = await connectEliciting(deps, () => ({ action: 'cancel' }));
+
+  try {
+    const { applied } = await planThenApply(session.client, CONFIRM_TOOL, {
+      note: 'remove the spam comment',
+    });
+
+    assert.equal(applied.isError, true);
+    const record = parseResult(applied);
+    assert.equal(record['code'], 'confirmation_denied');
+    assert.match(String(record['error']), /cancelled/);
+    assert.equal(session.prompts.length, 1);
+  } finally {
+    await session.close();
+  }
+
+  assert.equal(appliedEntries(journal).length, 0, 'a cancelled write must not apply');
+});
+
 test('an accepted elicitation with the box unticked still refuses the write', async () => {
   const { deps, journal } = makeHarness({
     settings: confirmSettings(),
@@ -3080,6 +3108,7 @@ test('a Graph refusal carrying usage headers names the full bucket in the error 
         'x-app-usage': '{"call_count":100,"total_cputime":40,"total_time":35}',
         'x-business-use-case-usage':
           '{"1234":[{"type":"pages","call_count":12,"total_cputime":5,"total_time":5,"estimated_time_to_regain_access":0}]}',
+        'x-fb-ads-insights-throttle': '{"app_id_util_pct":95,"acc_id_util_pct":10}',
       },
     });
     const fbRequest = createFbRequest({
@@ -3133,7 +3162,13 @@ test('a Graph refusal carrying usage headers names the full bucket in the error 
     assert.equal(record['nextTool'], 'facebook_usage');
     // facebook_usage probes `/me`, not the refused call, so only the refusing
     // response names the bucket that refused it.
-    assert.deepEqual(record['usage'], { appUsagePct: 100, businessUseCasePct: 12 });
+    assert.deepEqual(record['usage'], {
+      appUsagePct: 100,
+      businessUseCasePct: 12,
+      // The ads-insights bucket ships too: an Insights refusal is otherwise
+      // indistinguishable from an app-level one.
+      adsInsightsThrottlePct: 95,
+    });
   } finally {
     await close();
   }
@@ -3307,4 +3342,249 @@ test('runCli says "failed to start" only for a failure before the server started
       code: 1,
     },
   ]);
+});
+
+test('a tool that evicts a Page token reaches the real resolver through the bootstrap', async () => {
+  // The bootstrap wraps the resolver to record which Pages a call resolved; the
+  // wrapper must forward `invalidate`, or a tool's eviction is silently dropped
+  // and the dead token keeps being served from the cache.
+  const evict = defineTool({
+    name: 'facebook_probe_evict',
+    description: 'Test-only: evict a Page token through ctx.pages.',
+    inputSchema: z.object({}),
+    annotations: READ_ONLY_ANNOTATIONS,
+    handler: (_input, ctx) => {
+      ctx.pages.invalidate('page-to-evict');
+      return Promise.resolve(textResult({ ok: true }));
+    },
+  });
+  const { deps } = makeHarness({
+    settings: probeSettings(),
+    packages: [
+      createCorePackage({ serverVersion: '1.2.3-test', sdkVersion: '1.29.0-test' }),
+      {
+        name: 'ads',
+        title: 'Probe',
+        description: 'Test-only package injected through the packages seam.',
+        tools: [evict],
+        enabledByDefault: false,
+      },
+    ],
+  });
+  const pages = createFakePageResolver();
+  const { client, close } = await connect({ ...deps, pages });
+  try {
+    const result = (await client.callTool({
+      name: 'facebook_probe_evict',
+      arguments: {},
+    })) as CallToolResult;
+    assert.notEqual(result.isError, true, firstText(result));
+  } finally {
+    await close();
+  }
+  assert.deepEqual([...pages.invalidated], ['page-to-evict']);
+});
+
+test('the system clock sleeps for real and detaches its abort listener afterwards', async () => {
+  // Regression: every completed sleep used to leave its abort listener on the
+  // caller's signal. Callers pass the per-request signal, so a long video or
+  // reel status poll accumulated one listener per poll interval.
+  const controller = new AbortController();
+  const before = systemClock.now();
+  for (let i = 0; i < 12; i += 1) {
+    await systemClock.sleep(1, controller.signal);
+  }
+  assert.ok(systemClock.now() >= before);
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
+  // A signal-less sleep resolves too.
+  await systemClock.sleep(1);
+});
+
+test('the system clock rejects a sleep on an aborted signal, before or during it', async () => {
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(systemClock.sleep(10_000, aborted.signal), /aborted/);
+  assert.equal(getEventListeners(aborted.signal, 'abort').length, 0);
+
+  const live = new AbortController();
+  const pending = systemClock.sleep(60_000, live.signal);
+  live.abort();
+  await assert.rejects(pending, /aborted/);
+});
+
+// ---------------------------------------------------------------------------
+// main() as a real process: the startup and shutdown paths nothing injectable
+// reaches. Each child gets a throwaway cwd and config dirs (so no operator
+// `.env` or config file is read) and inherits NODE_V8_COVERAGE so its coverage
+// still counts.
+// ---------------------------------------------------------------------------
+
+const ENTRY_POINT = fileURLToPath(new URL('./index.js', import.meta.url));
+
+/** A fake but well-formed environment for a child server rooted at `dir`. */
+function childEnv(dir: string, extra: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: process.env['PATH'] ?? '',
+    HOME: dir,
+    USERPROFILE: dir,
+    XDG_CONFIG_HOME: dir,
+    APPDATA: dir,
+    FB_ACCESS_TOKEN: 'EAAfake-child-process-token',
+    FB_JOURNAL_PATH: join(dir, 'journal.jsonl'),
+    ...extra,
+  };
+  const coverage = process.env['NODE_V8_COVERAGE'];
+  if (coverage !== undefined) env['NODE_V8_COVERAGE'] = coverage;
+  const systemRoot = process.env['SystemRoot'];
+  if (systemRoot !== undefined) env['SystemRoot'] = systemRoot;
+  return env;
+}
+
+/** Ask the OS for a port that is free right now. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createNetServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      probe.close(() => {
+        resolve(port);
+      });
+    });
+  });
+}
+
+interface ChildOutcome {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+}
+
+/**
+ * Run the built entry point. `onStderr` sees the accumulated stderr after every
+ * chunk, so a test can act (send a signal, close stdin) once a line appears.
+ */
+function runServer(
+  env: Record<string, string>,
+  cwd: string,
+  onStderr?: (stderr: string, child: ChildProcess) => void,
+): Promise<ChildOutcome> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [ENTRY_POINT], {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`child did not exit in time; stderr: ${stderr}`));
+    }, 20_000);
+    child.stdout.resume();
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+      onStderr?.(stderr, child);
+    });
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stderr });
+    });
+  });
+}
+
+test('main() over stdio starts, then exits 0 when the client closes stdin', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'facebook-mcp-stdio-'));
+  try {
+    let closed = false;
+    const outcome = await runServer(
+      // The app pair is set so the redactor's secret collection sees it too.
+      childEnv(dir, { FB_APP_ID: '1234567890', FB_APP_SECRET: 'fake-app-secret-value' }),
+      dir,
+      (stderr, child) => {
+        if (!closed && stderr.includes('server started')) {
+          closed = true;
+          child.stdin?.end();
+        }
+      },
+    );
+    assert.equal(outcome.code, 0, outcome.stderr);
+    assert.match(outcome.stderr, /server started/);
+    assert.match(outcome.stderr, /stdio transport shutting down/);
+    assert.doesNotMatch(outcome.stderr, /fake-app-secret-value/);
+    assert.doesNotMatch(outcome.stderr, /failed to start|stopped unexpectedly/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('main() over http shuts down cleanly on SIGTERM and SIGINT', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX signals cannot be delivered to a child process on Windows');
+    return;
+  }
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    const dir = mkdtempSync(join(tmpdir(), 'facebook-mcp-http-'));
+    try {
+      const port = await freePort();
+      let sent = false;
+      const outcome = await runServer(
+        childEnv(dir, {
+          FB_TRANSPORT: 'http',
+          FB_HTTP_PORT: String(port),
+          FB_HTTP_TOKEN: 'h'.repeat(40),
+        }),
+        dir,
+        (stderr, child) => {
+          if (!sent && stderr.includes('server started')) {
+            sent = true;
+            child.kill(signal);
+          }
+        },
+      );
+      assert.equal(outcome.code, 0, `${signal}: ${outcome.stderr}`);
+      assert.match(outcome.stderr, /shutdown signal received/);
+      assert.ok(outcome.stderr.includes(`"signal":"${signal}"`), outcome.stderr);
+      assert.match(outcome.stderr, /http transport shutting down/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('main() reports a transport that cannot start as a startup failure, exit 1', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'facebook-mcp-busy-'));
+  const blocker = createNetServer();
+  try {
+    const port = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(port, '127.0.0.1', () => {
+        resolve();
+      });
+    });
+    const outcome = await runServer(
+      childEnv(dir, {
+        FB_TRANSPORT: 'http',
+        FB_HTTP_PORT: String(port),
+        FB_HTTP_TOKEN: 'h'.repeat(40),
+      }),
+      dir,
+    );
+    assert.equal(outcome.code, 1, outcome.stderr);
+    assert.match(outcome.stderr, /facebook-mcp failed to start: .*EADDRINUSE/);
+    assert.doesNotMatch(outcome.stderr, /server started/);
+  } finally {
+    await new Promise<void>((resolve) => {
+      blocker.close(() => {
+        resolve();
+      });
+    });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

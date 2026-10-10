@@ -2254,6 +2254,8 @@ setup-token` has nothing to open. The required scopes are named inline now,
 - The write journal still appends when the journal file is writable but not readable (for example EACCES while checking for a torn last line); it reports a note instead of failing the append.
 - Tool results and journal entries no longer fail when an array element's accessor throws; the element is shown as `[UNREADABLE]`.
 
+- The built-in wait between retries and status polls no longer leaves an abort listener on the request signal after each wait; long video and Reel status polls used to accumulate them.
+
 ### Security
 
 - **The credential file and the write journal could be created outside the

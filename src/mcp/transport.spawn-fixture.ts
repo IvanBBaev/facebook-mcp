@@ -24,15 +24,15 @@ const systemClock: Clock = {
         reject(new Error('aborted'));
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(new Error('aborted'));
-        },
-        { once: true },
-      );
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(new Error('aborted'));
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
     }),
 };
 

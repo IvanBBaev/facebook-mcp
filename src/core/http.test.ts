@@ -3097,3 +3097,109 @@ test('regression: a 2xx JSON string, array or empty body still passes through as
     }
   });
 });
+
+test('a DELETE with a body sends it form-encoded and keeps the proof in the query', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: { success: true } });
+    const fbRequest = createFbRequest(makeDeps());
+
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'DELETE',
+      path: '/123_456',
+      body: {
+        reason: 'spam',
+        count: 3,
+        notify: false,
+        meta: { a: 1 },
+        skipped: undefined,
+      },
+    });
+
+    const req = mock.lastRequest();
+    assert.ok(req);
+    assert.equal(req.method, 'DELETE');
+    assert.equal(
+      new URL(req.url).searchParams.get('appsecret_proof'),
+      computeAppSecretProof(TOKEN, APP_SECRET),
+    );
+    assert.equal(req.body.kind, 'urlencoded');
+    if (req.body.kind === 'urlencoded') {
+      assert.equal(req.body.params['reason'], 'spam');
+      assert.equal(req.body.params['count'], '3');
+      assert.equal(req.body.params['notify'], 'false');
+      // Objects travel as JSON strings, the way Graph reads structured params.
+      assert.equal(req.body.params['meta'], '{"a":1}');
+      assert.equal('skipped' in req.body.params, false);
+      assert.equal('appsecret_proof' in req.body.params, false);
+    }
+  });
+});
+
+test('resolveHostBase refuses a host whose hostname is not configured', () => {
+  assert.throws(
+    () => resolveHostBase({ ...HOSTS, rupload: '' }, 'rupload'),
+    /no hostname configured for host 'rupload'/,
+  );
+});
+
+test('a response body lost on every attempt of a read ends as a network error', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ status: 200, json: { ok: 1 } });
+    breakNextBodyRead('terminated');
+    const fbRequest = createFbRequest(makeDeps({ retry: { maxRetries: 0 } }));
+
+    await assert.rejects(
+      fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.match(err.message, /terminated/);
+        assert.equal(err.action?.category, 'transient');
+        return true;
+      },
+    );
+    assert.equal(mock.requests.length, 1);
+  });
+});
+
+test('an unrecognized code on a 429 or a 5xx still gets operator text for its category', async () => {
+  // Codes the error matrix has no row for fall back to a status-derived
+  // category, and that category's generic guidance must still reach the operator.
+  for (const [status, category] of [
+    [429, 'rate_limit'],
+    [503, 'transient'],
+  ] as const) {
+    await withFetch(async (mock: FetchMock) => {
+      mock.enqueue({
+        status,
+        json: {
+          error: { message: 'Something new', type: 'OAuthException', code: 987_654 },
+        },
+      });
+      const fbRequest = createFbRequest(makeDeps({ retry: { maxRetries: 0 } }));
+      await assert.rejects(
+        fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' }),
+        (err: unknown) => {
+          assert.ok(err instanceof GraphApiError);
+          assert.equal(err.action?.category, category, `HTTP ${status}`);
+          assert.ok((err.action?.operatorText.length ?? 0) > 0, `HTTP ${status}`);
+          assert.notEqual(err.action?.operatorText, 'request failed', `HTTP ${status}`);
+          return true;
+        },
+      );
+    });
+  }
+});
+
+test('usageOfGraphError stops following re-wrapped errors after a bounded depth', () => {
+  let err = new GraphApiError('innermost', { code: 1, httpStatus: 400 });
+  for (let i = 0; i < 6; i += 1) {
+    err = new GraphApiError(`wrap ${String(i)}`, {
+      code: 1,
+      httpStatus: 400,
+      cause: err,
+    });
+  }
+  assert.equal(usageOfGraphError(err), undefined);
+});
