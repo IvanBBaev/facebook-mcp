@@ -16,6 +16,7 @@
 // a raw recording from ever being committed in the first place.
 
 import { readFile, readdir } from 'node:fs/promises';
+import { sep } from 'node:path';
 
 /** Absolute URL of the committed fixtures directory (repo-root `test/fixtures/`). */
 export const FIXTURES_DIR = new URL('../../test/fixtures/', import.meta.url);
@@ -147,16 +148,23 @@ export function assertNoSecrets(value: unknown, file?: string): void {
   }
 }
 
-/** Scan every `*.json` file in `dir` (default: {@link FIXTURES_DIR}) for secrets. */
+/**
+ * Scan every `*.json` file under `dir` (default: {@link FIXTURES_DIR}) for
+ * secrets, RECURSIVELY: the ads fixtures live in `ads/<version>/` subdirectories
+ * (see `scripts/record-fixture.mjs --ads`), and a fixture the lint never opens is
+ * a fixture it cannot protect. Findings name the file by its path relative to
+ * `dir`, always with `/` separators.
+ */
 export async function lintFixtureDir(dir: URL = FIXTURES_DIR): Promise<SecretFinding[]> {
-  const entries = await readdir(dir);
+  const entries = (await readdir(dir, { recursive: true })).sort();
   const findings: SecretFinding[] = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) {
       continue;
     }
-    const text = await readFile(new URL(entry, dir), 'utf8');
-    findings.push(...findSecrets(JSON.parse(text) as unknown, { file: entry }));
+    const name = entry.split(sep).join('/');
+    const text = await readFile(new URL(name, dir), 'utf8');
+    findings.push(...findSecrets(JSON.parse(text) as unknown, { file: name }));
   }
   return findings;
 }

@@ -47,9 +47,54 @@ fixture-lint **before** it is written, so a capture that would fail the suite is
 never put on disk. That is not a licence to skip reading the diff: always eyeball
 a new fixture before committing it.
 
+## Recording the ads set
+
+The `ads` tools ride a separate Marketing API pin (`FB_ADS_API_VERSION`), so
+their fixtures are versioned by that pin, one directory per version:
+
+```text
+test/fixtures/ads/<ads-version>/   e.g. test/fixtures/ads/v26.0/
+  ads-account.json     GET /act_<id>                 (account read)
+  ads-campaigns.json   GET /act_<id>/campaigns       (listing, limit 5)
+  ads-adsets.json      GET /act_<id>/adsets          (listing, limit 5)
+  ads-ads.json         GET /act_<id>/ads             (listing, limit 5)
+  ads-campaign.json    GET /<first listed campaign>  (object read)
+  ads-adset.json       GET /<first listed ad set>    (object read)
+  ads-ad.json          GET /<first listed ad>        (object read)
+  ads-insights.json    GET /act_<id>/insights        (sync insights, last_30d)
+```
+
+```bash
+npm run build
+FB_RECORD_FIXTURE=1 FB_AD_ACCOUNT_ID=act_<id> node scripts/record-fixture.mjs --ads
+```
+
+`--ads` records that fixed read set in one run, with the field sets the tools
+request (taken from the compiled `build/api/ads-read.js`, so a recording cannot
+drift from what we ship), every request tagged for the ads pin. It is read-only:
+the async report start (`POST /act_<id>/insights`) is deliberately not recorded.
+The same gate, credential rules, `--force` rule and lint-before-write apply; the
+directory is refused as a whole if any of its files exists without `--force`.
+
+- **No ad account, no run.** Without `FB_AD_ACCOUNT_ID` (environment or env
+  file) the run prints `skipped: …` and exits `0` before touching a credential
+  or the network. A malformed value is refused without echoing it.
+- **Anonymised, not just redacted.** Ad data is business data, so after the
+  secret redaction every ad identifier is replaced: ids (`id`, `*_id`, and any
+  6+ digit run inside other strings or keys) become consistent fake ids across
+  the whole run (`act_` prefix kept), `name` becomes `REDACTED_NAME_<n>`, paging
+  URLs and cursors become placeholders, and every numeric string — budgets,
+  bids, spend, impressions — becomes `"100"` (or `"1.5"` when it has a decimal
+  point). JSON types are preserved, so the shape-diff still sees the real shape.
+  Free text the anonymiser cannot recognise (e.g. a `body`, a creative title) is
+  still yours to read and prune before committing.
+- **An empty listing** (an account with no ad sets, say) skips that level's
+  object read, says so, and records the rest.
+
 ## The fixture-lint
 
-`src/testing/fixtures.ts` scans every `*.json` file in this directory and fails
+`src/testing/fixtures.ts` scans every `*.json` file in this directory (and its
+subdirectories, so `ads/<ads-version>/` is covered) and fails
 the test suite on five secret shapes:
 
 | Rule                    | Fires on                                           |
@@ -105,6 +150,21 @@ npm run fixtures:shape-diff -- \
   --baseline "${TMPDIR:-/tmp}/fixtures-baseline" --candidate test/fixtures
 git checkout -- test/fixtures   # unless you mean to keep (and prune) the new captures
 ```
+
+For an **ads** pin bump no snapshot is needed: the ads fixtures are already
+versioned by directory, so record the new version next to the old one and diff
+the two directories:
+
+```bash
+npm run build
+FB_RECORD_FIXTURE=1 FB_AD_ACCOUNT_ID=act_<id> FB_ADS_API_VERSION=v27.0 \
+  node scripts/record-fixture.mjs --ads
+npm run fixtures:shape-diff -- \
+  --baseline test/fixtures/ads/v26.0 --candidate test/fixtures/ads/v27.0
+```
+
+If there is no baseline directory for the current ads pin yet, record one first
+(the same command without `FB_ADS_API_VERSION`, which then defaults to the pin).
 
 Directories are matched by file name (two files are compared directly); `--json`
 gives a machine-readable report. Only **shapes** are compared — keys and JSON

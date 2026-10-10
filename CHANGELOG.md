@@ -9,6 +9,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **An ads pin bump had no recorded fixtures to shape-diff, so it was checked by
+  hand.** `node scripts/record-fixture.mjs --ads` now records the ads read set
+  on the Marketing API pin — the account read, the campaign / ad set / ad
+  listings, one object read per level and sync insights, all GETs; the async
+  report POST is never recorded — into `test/fixtures/ads/<ads-version>/`, so a
+  bump diffs `test/fixtures/ads/<old>` against `test/fixtures/ads/<new>` with
+  `npm run fixtures:shape-diff`. It uses the tools' own field sets, sits behind
+  the same `FB_RECORD_FIXTURE=1` gate, secret redaction and lint-before-write,
+  and additionally anonymises ad data (ids consistently, names, amounts, paging)
+  while keeping every JSON type. Without `FB_AD_ACCOUNT_ID` it skips cleanly
+  (exit `0`, no call, no file). The fixture-lint now also walks subdirectories
+  of `test/fixtures/`. The bump steps in `docs/runbooks/app-upkeep.md` §2 use it.
 - **The `FB_API_VERSION` bump procedure had no tool for its shape-diff step.**
   `npm run fixtures:shape-diff -- --baseline <dir|file> --candidate <dir|file>`
   (`scripts/fixture-shape-diff.mjs`) compares two Graph fixture sets by keys and

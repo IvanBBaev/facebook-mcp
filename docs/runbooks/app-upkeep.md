@@ -108,10 +108,19 @@ the ads pin; `<PIN>` is the matching constant):
    is shapes only and never prints a fixture value. Restore or prune the
    re-recorded files before committing — see
    [`../../test/fixtures/README.md`](../../test/fixtures/README.md#when-the-api-version-moves).
-   The fixture recorder speaks the Graph pin only and there are no recorded ads
-   fixtures yet, so for an ads bump compare the ads smoke output (and the
-   fields `src/api/ads-read.ts` requests) against the Marketing API changelog
-   by hand.
+   For an **ads** bump the fixtures are versioned by the ads pin under
+   `test/fixtures/ads/<ads-version>/`, so no snapshot is needed: record the new
+   version next to the old one with `FB_RECORD_FIXTURE=1
+   FB_AD_ACCOUNT_ID=act_<id> FB_ADS_API_VERSION=<new> node
+   scripts/record-fixture.mjs --ads` (read-only: the account, the campaign /
+   ad set / ad listings, one object read per level and sync insights — never
+   the async report POST), then run `npm run fixtures:shape-diff -- --baseline
+   test/fixtures/ads/<old> --candidate test/fixtures/ads/<new>`. If there is no
+   baseline directory for the current pin yet, record it first with the same
+   command minus `FB_ADS_API_VERSION`. Without `FB_AD_ACCOUNT_ID` the recorder
+   skips the ads set (exit `0`) and records nothing. Read the anonymised files
+   before committing the new directory, and remove the old one once the bump
+   ships.
 4. Only then change `<PIN>` in `src/core/settings.ts` (and its default in
    `scripts/metadata.config.mjs`), regenerate the metadata surfaces
    (`npm run metadata`), run `npm run check`, and record the bump in

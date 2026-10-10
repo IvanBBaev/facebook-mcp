@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -67,6 +67,30 @@ test('lintFixtureDir reads file CONTENT and reports which file leaked', async ()
       assert.equal(err.findings.length, findings.length);
       return true;
     });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('lintFixtureDir walks subdirectories, e.g. ads/<version>/', async () => {
+  // Ads fixtures live one directory per ads pin (test/fixtures/ads/v26.0/). A
+  // walk that stayed at the top level would report those files clean unread.
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-fixture-lint-nested-'));
+  try {
+    await mkdir(path.join(dir, 'ads', 'v26.0'), { recursive: true });
+    await writeFile(
+      path.join(dir, 'ads', 'v26.0', 'ads-account.json'),
+      JSON.stringify({ access_token: 'EAABwzLixnjYBO1234567890abcdef' }),
+    );
+    await writeFile(path.join(dir, 'top.json'), JSON.stringify({ id: '123' }));
+
+    const findings = await lintFixtureDir(pathToFileURL(`${dir}${path.sep}`));
+
+    assert.deepEqual(
+      [...new Set(findings.map((f) => f.file))],
+      ['ads/v26.0/ads-account.json'],
+      'a nested finding is named by its /-separated path relative to the root',
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
