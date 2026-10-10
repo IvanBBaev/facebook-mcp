@@ -97,6 +97,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     appSecret: APP_SECRET,
     profiles: {},
     apiVersion: 'v23.0',
+    adsApiVersion: 'v26.0',
     hosts: {
       graph: 'graph.facebook.com',
       graphVideo: 'graph-video.facebook.com',

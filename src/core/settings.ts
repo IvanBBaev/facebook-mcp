@@ -32,6 +32,18 @@ import {
 
 /** Pinned default Graph API version. Overridable verbatim via `FB_API_VERSION`. */
 export const DEFAULT_API_VERSION = 'v23.0';
+/**
+ * Pinned default Marketing API version for the `ads` package. Overridable
+ * verbatim via `FB_ADS_API_VERSION`.
+ *
+ * Separate from {@link DEFAULT_API_VERSION} because the Marketing API retires a
+ * version years before the Graph API version of the same number: Marketing
+ * v23.0 ended 2026-06-09 and v24.0 on 2026-10-06, while Graph v23.0 runs until
+ * 2027-10-08 (docs/analysis/12-graph-changelog-check-2026-10.md, H1). v26.0 is
+ * the newest Marketing API version (released 2026-07-29) and so has the longest
+ * runway; v25.0 is the fallback if v26.0 does not answer on the ads edges.
+ */
+export const DEFAULT_ADS_API_VERSION = 'v26.0';
 /** Structure-aware truncation budget default (~25k chars). */
 export const DEFAULT_MAX_RESULT_CHARS = 25_000;
 /** Per-host concurrency semaphore default (doc 05 §2). */
@@ -134,6 +146,7 @@ const SETTING_NAMES: readonly string[] = [
   'FB_PAGE_TOKEN',
   'FB_PAGE_ID',
   'FB_API_VERSION',
+  'FB_ADS_API_VERSION',
   'FB_REQUEST_TIMEOUT_MS',
   'FB_HOST_CONCURRENCY',
   'FB_WRITE_MODE',
@@ -299,7 +312,20 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
   }
 
   // --- Wire ---
-  const apiVersion = resolveApiVersion(str('FB_API_VERSION'), warn);
+  const apiVersion = resolveApiVersion(
+    'FB_API_VERSION',
+    str('FB_API_VERSION'),
+    DEFAULT_API_VERSION,
+    'api-version',
+    warn,
+  );
+  const adsApiVersion = resolveApiVersion(
+    'FB_ADS_API_VERSION',
+    str('FB_ADS_API_VERSION'),
+    DEFAULT_ADS_API_VERSION,
+    'ads-api-version',
+    warn,
+  );
   const requestTimeoutMs = intIn(
     'FB_REQUEST_TIMEOUT_MS',
     DEFAULT_REQUEST_TIMEOUT_MS,
@@ -411,6 +437,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     defaultPageId,
     profiles,
     apiVersion,
+    adsApiVersion,
     hosts: GRAPH_HOSTS,
     requestTimeoutMs,
     hostConcurrency,
@@ -714,20 +741,30 @@ function resolveOperatorPath(
   return value;
 }
 
-/** CC-CFG-5: accept any version verbatim (escape hatch); warn when it's off the tested default. */
-function resolveApiVersion(raw: string | undefined, warn: Report): string {
-  if (raw === undefined) return DEFAULT_API_VERSION;
+/**
+ * CC-CFG-5: accept any version verbatim (escape hatch); warn when it's off the
+ * tested default. Shared by `FB_API_VERSION` (code prefix `api-version`) and
+ * `FB_ADS_API_VERSION` (code prefix `ads-api-version`).
+ */
+function resolveApiVersion(
+  key: string,
+  raw: string | undefined,
+  tested: string,
+  codePrefix: string,
+  warn: Report,
+): string {
+  if (raw === undefined) return tested;
   if (!API_VERSION_RE.test(raw)) {
     warn(
-      'api-version-format',
-      `FB_API_VERSION ${JSON.stringify(raw)} is not in the expected vNN.N form; accepted verbatim as an escape hatch.`,
-      'FB_API_VERSION',
+      `${codePrefix}-format`,
+      `${key} ${JSON.stringify(raw)} is not in the expected vNN.N form; accepted verbatim as an escape hatch.`,
+      key,
     );
-  } else if (raw !== DEFAULT_API_VERSION) {
+  } else if (raw !== tested) {
     warn(
-      'api-version-nondefault',
-      `FB_API_VERSION ${raw} differs from the tested default ${DEFAULT_API_VERSION}; accepted, but behavior is only verified against the default.`,
-      'FB_API_VERSION',
+      `${codePrefix}-nondefault`,
+      `${key} ${raw} differs from the tested default ${tested}; accepted, but behavior is only verified against the default.`,
+      key,
     );
   }
   return raw;

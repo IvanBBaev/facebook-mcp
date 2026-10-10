@@ -164,7 +164,8 @@ export async function rehearse({ args = [], timeoutMs = 120_000, echo = false } 
 export function summarizeRequests(requests) {
   const counts = new Map();
   for (const request of requests) {
-    const shape = `${request.method} ${request.host} ${request.path.replace(/\d{6,}/g, '<id>')}`;
+    const version = request.version ? ` ${request.version}` : '';
+    const shape = `${request.method} ${request.host}${version} ${request.path.replace(/\d{6,}/g, '<id>')}`;
     counts.set(shape, (counts.get(shape) ?? 0) + 1);
   }
   return [...counts.entries()]

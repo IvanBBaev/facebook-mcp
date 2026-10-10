@@ -78,7 +78,14 @@ export interface Settings {
   readonly profiles: Readonly<Record<string, PageProfileConfig>>;
 
   // Wire
+  /** Graph API version prepended to every non-ads edge path (`FB_API_VERSION`). */
   readonly apiVersion: string;
+  /**
+   * Marketing API version prepended to every ads edge path (`FB_ADS_API_VERSION`).
+   * Pinned separately because Marketing API versions retire years before the
+   * Graph API version of the same number.
+   */
+  readonly adsApiVersion: string;
   readonly hosts: HostAllowlist;
   /** Default per-request timeout in ms. */
   readonly requestTimeoutMs: number;
@@ -238,6 +245,15 @@ export type GraphHost = 'graph' | 'graph-video' | 'rupload';
 
 export type HttpMethod = 'GET' | 'POST' | 'DELETE';
 
+/**
+ * Which versioned Meta API a request speaks. Both live on the same hosts, but
+ * the Marketing API (ad accounts, campaigns, ad sets, ads, ads insights and
+ * report runs) has its own, much shorter version lifecycle than the Graph API,
+ * so it carries its own pin: `graph` resolves to `Settings.apiVersion`,
+ * `marketing` to `Settings.adsApiVersion`.
+ */
+export type ApiFamily = 'graph' | 'marketing';
+
 /** Query/body param scalar accepted by JSON requests. */
 export type ParamValue = string | number | boolean | undefined;
 
@@ -247,6 +263,12 @@ export interface FbRequestBase {
   readonly host: GraphHost;
   /** Edge path, e.g. `/{page-id}/feed` or `/{version}/act_{id}/campaigns`. */
   readonly path: string;
+  /**
+   * Versioned API the edge belongs to; selects the version the client prepends
+   * to `path`. Absent ⇒ `graph`. Every ads (Marketing API) request sets
+   * `marketing`.
+   */
+  readonly api?: ApiFamily;
   /** Per-request timeout override in ms (falls back to `Settings.requestTimeoutMs`). */
   readonly timeoutMs?: number;
   /** Abort seam for shutdown / MCP cancellation. */

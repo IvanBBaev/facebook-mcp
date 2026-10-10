@@ -47,6 +47,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     profiles: {},
     apiVersion: 'v23.0',
+    adsApiVersion: 'v26.0',
     hosts: {
       graph: 'graph.facebook.com',
       graphVideo: 'graph-video.facebook.com',
@@ -186,6 +187,7 @@ test('whoami classifies a valid non-expiring system-user token (neverExpiring)',
     name: 'facebook-mcp',
     version: SERVER_VERSION, // injected, not read from package.json
     apiVersion: 'v23.0',
+    adsApiVersion: 'v26.0',
     sdkVersion: SDK_VERSION, // injected, not resolved from node_modules
   });
   assert.deepEqual(sc.token, {
@@ -289,6 +291,7 @@ test('whoami returns a schema-valid error envelope when no token is configured',
     name: 'facebook-mcp',
     version: SERVER_VERSION,
     apiVersion: 'v23.0',
+    adsApiVersion: 'v26.0',
     sdkVersion: SDK_VERSION,
   });
   assert.deepEqual(sc?.token, {

@@ -182,6 +182,19 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
 
 ### Fixed
 
+- **The `ads` package called a retired Marketing API version.** Every ads request
+  shared the Graph pin `v23.0`, but the Marketing API retires versions on its own,
+  shorter clock: Marketing v23.0 ended 2026-06-09 (Graph v23.0 runs to
+  2027-10-08), so ads calls rode Meta's best-effort auto-upgrade or failed with
+  `#2635`. Marketing API calls (ad accounts, campaigns, ad sets, ads, ads
+  insights, async report runs, status/budget writes) now use their own pin,
+  `DEFAULT_ADS_API_VERSION` = `v26.0` (doc 12, finding H1, option C; `v25.0` is
+  the fallback), overridable with the new `FB_ADS_API_VERSION` (validated like
+  `FB_API_VERSION`, with the same off-default and format warnings). Graph calls
+  stay on `v23.0`. `doctor`, `facebook_whoami` and the `server started` log line
+  report both versions, and the app-upkeep runbook §2 now covers bumping each pin
+  independently.
+
 - **`facebook_ads_insights` promised a 37-month lookback for every field.** Since
   2026-01-12 Meta keeps 37 months only for totals: unique-count fields (possibly
   `reach`) and hourly breakdowns reach back 13 months, frequency breakdowns 6.

@@ -65,6 +65,13 @@
           "default": "v23.0"
         },
         {
+          "name": "FB_ADS_API_VERSION",
+          "description": "Marketing API version the ads tools target (ad accounts, campaigns, ad sets, ads, insights, async reports). The Marketing API retires versions on its own, shorter schedule, so it is pinned separately from FB_API_VERSION. Other values are accepted verbatim as an escape hatch but are not tested.",
+          "isRequired": false,
+          "format": "string",
+          "default": "v26.0"
+        },
+        {
           "name": "FB_REQUEST_TIMEOUT_MS",
           "description": "Per-request timeout in milliseconds; integer in [1, 600000].",
           "isRequired": false,

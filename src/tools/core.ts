@@ -92,6 +92,7 @@ const whoamiOutputSchema = z.object({
     name: z.string(),
     version: z.string(),
     apiVersion: z.string(),
+    adsApiVersion: z.string(),
     sdkVersion: z.string(),
   }),
   token: z.object({
@@ -184,6 +185,7 @@ function buildWhoamiPayload(
       name: 'facebook-mcp',
       version: versions.serverVersion,
       apiVersion: settings.apiVersion,
+      adsApiVersion: settings.adsApiVersion,
       sdkVersion: versions.sdkVersion,
     },
     token: {

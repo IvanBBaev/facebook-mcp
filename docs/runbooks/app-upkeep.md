@@ -52,33 +52,49 @@ say whether anything in it affects this server.
 
 ---
 
-## 2. Graph API version deprecation
+## 2. Graph and Marketing API version deprecation
 
-The server pins one tested version — `DEFAULT_API_VERSION` in
-[`../../src/core/settings.ts`](../../src/core/settings.ts) (currently `v23.0`).
-Meta ships a new version roughly quarterly and supports each Graph API version
-for about two years, so the pin ages out on a predictable clock.
+The server pins **two** tested versions in
+[`../../src/core/settings.ts`](../../src/core/settings.ts), because the two APIs
+retire versions on different clocks:
 
-The same pin is used for the Marketing API (the `ads` package), and that API
-runs on a much shorter clock: a Marketing API version is typically retired a
-few months after the version two releases newer ships (v23.0 ended 2026-06-09,
-while Graph v23.0 runs until 2027-10-08). Once it is retired, Meta auto-upgrades
-calls to the next available version only for endpoints that did not change,
-marks them with an `X-Ad-Api-Version-Warning` header, and rejects the rest with
-error `#2635`. So check the Marketing API versions table on every §1 pass, not
-just the Graph one — the ads side forces a bump long before Graph does. See
-[`../analysis/12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md).
+| Pin | Override | Currently | Used by |
+|---|---|---|---|
+| `DEFAULT_API_VERSION` | `FB_API_VERSION` | `v23.0` | every Graph call (Pages, posts, comments, Reels, insights, messages, token checks) |
+| `DEFAULT_ADS_API_VERSION` | `FB_ADS_API_VERSION` | `v26.0` | every Marketing API call of the `ads` package (ad accounts, campaigns, ad sets, ads, ads insights, async report runs, status/budget writes) |
 
-`FB_API_VERSION` overrides the pin, and setting it to anything other than the
-tested default is accepted with a warning — behaviour is only verified against
-the default. Use that override to *test* a bump, never to *ship* one.
+Meta ships a new version roughly quarterly and supports each **Graph** API
+version for about two years, so the Graph pin ages out on a predictable, slow
+clock (Graph v23.0 runs until 2027-10-08).
 
-To move the pin:
+The **Marketing** API runs on a much shorter clock: a Marketing API version is
+typically retired a few months after the version two releases newer ships
+(Marketing v23.0 ended 2026-06-09, v24.0 on 2026-10-06). Once it is retired,
+Meta auto-upgrades calls to the next available version only for endpoints that
+did not change, marks them with an `X-Ad-Api-Version-Warning` header, and
+rejects the rest with error `#2635`. So check the **Marketing API versions
+table** on every §1 pass, not just the Graph one — the ads pin needs a bump
+long before the Graph pin does. See
+[`../analysis/12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md)
+(finding H1 is why the pins were split).
 
-1. Set `FB_API_VERSION=<new>` in a scratch env and run `doctor`.
+The two pins move **independently**: bumping one never requires bumping the
+other, and each bump is its own change. Both overrides accept any `vNN.N` value
+with a warning when it is off the tested default — behaviour is only verified
+against the defaults. Use an override to *test* a bump, never to *ship* one.
+`doctor` and `facebook_whoami` report both versions.
+
+To move a pin (`<VAR>` is `FB_API_VERSION` for Graph, `FB_ADS_API_VERSION` for
+the ads pin; `<PIN>` is the matching constant):
+
+1. Set `<VAR>=<new>` in a scratch env and run `doctor`. For the ads pin, first
+   confirm `<new>` is listed in the Marketing API versions table with no sunset
+   date in sight.
 2. Run the live smoke suite against the **test** Page — see
    [`../../scripts/smoke/README.md`](../../scripts/smoke/README.md). Read-only
-   smokes first; write smokes only once those are clean.
+   smokes first; write smokes only once those are clean. For the ads pin, set
+   `FB_AD_ACCOUNT_ID` so the ads smokes run, and check that no response
+   carries `X-Ad-Api-Version-Warning`.
 3. Shape-diff the recorded fixtures under `test/fixtures/` against the new
    version's responses. A field that changed type or disappeared is the whole
    point of this step. Snapshot the current set (`cp -R test/fixtures
@@ -92,15 +108,20 @@ To move the pin:
    is shapes only and never prints a fixture value. Restore or prune the
    re-recorded files before committing — see
    [`../../test/fixtures/README.md`](../../test/fixtures/README.md#when-the-api-version-moves).
-4. Only then change `DEFAULT_API_VERSION` in `src/core/settings.ts`, regenerate
-   the metadata surfaces (`npm run metadata`), run `npm run check`, and record
-   the bump in `CHANGELOG.md`.
+   The fixture recorder speaks the Graph pin only and there are no recorded ads
+   fixtures yet, so for an ads bump compare the ads smoke output (and the
+   fields `src/api/ads-read.ts` requests) against the Marketing API changelog
+   by hand.
+4. Only then change `<PIN>` in `src/core/settings.ts` (and its default in
+   `scripts/metadata.config.mjs`), regenerate the metadata surfaces
+   (`npm run metadata`), run `npm run check`, and record the bump in
+   `CHANGELOG.md`.
 
-**Verify by:** `facebook_whoami` reports the new version, the smoke suite is
-green against it, and every line `npm run fixtures:shape-diff` reports as
-breaking is explained.
+**Verify by:** `facebook_whoami` reports the new version on the pin you moved
+(`apiVersion` or `adsApiVersion`), the smoke suite is green against it, and
+every line `npm run fixtures:shape-diff` reports as breaking is explained.
 
-> Do not bump the pin and release in the same change. A version bump is its own
+> Do not bump a pin and release in the same change. A version bump is its own
 > release, so that a regression has exactly one suspect.
 
 ---

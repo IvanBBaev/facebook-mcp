@@ -6,6 +6,7 @@ import path from 'node:path';
 import { withEnv } from '../testing/index.js';
 import {
   assertStartupOk,
+  DEFAULT_ADS_API_VERSION,
   DEFAULT_API_VERSION,
   DEFAULT_HOST_CONCURRENCY,
   DEFAULT_MAX_RESULT_CHARS,
@@ -168,6 +169,69 @@ test('CC-CFG-5: the default API version produces no version warning', () => {
     },
   });
   assert.ok(!codes(report.warnings).some((c) => c.startsWith('api-version')));
+});
+
+// --- Doc 12 H1: the Marketing API has its own pin, FB_ADS_API_VERSION ---
+
+const BASE_ENV = { FB_ACCESS_TOKEN: 'fake', FB_APP_SECRET: 's', FB_PAGE_ID: '1' };
+
+test('H1: the ads pin defaults to v26.0 and is independent of the Graph pin', () => {
+  assert.equal(DEFAULT_ADS_API_VERSION, 'v26.0');
+  assert.equal(DEFAULT_API_VERSION, 'v23.0', 'the Graph pin is unchanged');
+  const { settings, report } = loadSettings({ ...POSIX, env: { ...BASE_ENV } });
+  assert.equal(settings.adsApiVersion, DEFAULT_ADS_API_VERSION);
+  assert.equal(settings.apiVersion, DEFAULT_API_VERSION);
+  assert.ok(!codes(report.warnings).some((c) => c.includes('api-version')));
+});
+
+test('H1: FB_ADS_API_VERSION overrides only the ads pin, with a nondefault warning', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: { ...BASE_ENV, FB_ADS_API_VERSION: 'v25.0' },
+  });
+  assert.equal(settings.adsApiVersion, 'v25.0');
+  assert.equal(settings.apiVersion, DEFAULT_API_VERSION, 'the Graph pin does not follow');
+  assert.equal(report.ok, true, 'escape hatch: not an error');
+  const warning = report.warnings.find((w) => w.code === 'ads-api-version-nondefault');
+  assert.ok(warning, 'nondefault warning');
+  assert.equal(warning.field, 'FB_ADS_API_VERSION');
+  assert.match(
+    warning.message,
+    /FB_ADS_API_VERSION v25\.0 differs from the tested default v26\.0/,
+  );
+  assert.ok(!codes(report.warnings).includes('api-version-nondefault'));
+});
+
+test('H1: a malformed FB_ADS_API_VERSION is accepted verbatim with a format warning', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: { ...BASE_ENV, FB_ADS_API_VERSION: '26' },
+  });
+  assert.equal(settings.adsApiVersion, '26');
+  assert.equal(report.ok, true);
+  const warning = report.warnings.find((w) => w.code === 'ads-api-version-format');
+  assert.ok(warning, 'format warning');
+  assert.equal(warning.field, 'FB_ADS_API_VERSION');
+  assert.ok(!codes(report.warnings).includes('ads-api-version-nondefault'));
+});
+
+test('H1: the default ads version produces no ads version warning', () => {
+  const { report } = loadSettings({
+    ...POSIX,
+    env: { ...BASE_ENV, FB_ADS_API_VERSION: DEFAULT_ADS_API_VERSION },
+  });
+  assert.ok(!codes(report.warnings).some((c) => c.startsWith('ads-api-version')));
+});
+
+test('H1: FB_API_VERSION overrides only the Graph pin', () => {
+  const { settings, report } = loadSettings({
+    ...POSIX,
+    env: { ...BASE_ENV, FB_API_VERSION: 'v24.0' },
+  });
+  assert.equal(settings.apiVersion, 'v24.0');
+  assert.equal(settings.adsApiVersion, DEFAULT_ADS_API_VERSION);
+  assert.ok(codes(report.warnings).includes('api-version-nondefault'));
+  assert.ok(!codes(report.warnings).some((c) => c.startsWith('ads-api-version')));
 });
 
 // --- CC-CFG-6: HTTP transport fails closed without a token ---

@@ -46,6 +46,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     accessToken: TOKEN,
     profiles: {},
     apiVersion: 'v21.0',
+    adsApiVersion: 'v26.0',
     hosts: HOSTS,
     requestTimeoutMs: 30_000,
     hostConcurrency: 4,

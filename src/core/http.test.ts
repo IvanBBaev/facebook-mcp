@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 
 import {
+  apiVersionFor,
   createFbRequest,
   computeAppSecretProof,
   resolveHostBase,
@@ -56,6 +57,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     accessToken: TOKEN,
     profiles: {},
     apiVersion: 'v21.0',
+    adsApiVersion: 'v26.0',
     hosts: HOSTS,
     requestTimeoutMs: 30_000,
     hostConcurrency: 4,
@@ -542,6 +544,43 @@ test('a path that already carries a version segment is not double-versioned', as
     assert.ok(req.url.startsWith('https://graph.facebook.com/v19.0/act_1/campaigns'));
     assert.ok(!req.url.includes('/v21.0/'));
   });
+});
+
+test('doc 12 H1: a marketing request uses the ads pin, a graph request keeps the Graph pin', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: {} });
+    mock.enqueue({ json: {} });
+    mock.enqueue({ json: {} });
+    const fbRequest = createFbRequest(makeDeps());
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/act_1/campaigns',
+      api: 'marketing',
+    });
+    assert.equal(
+      new URL(mock.lastRequest()?.url ?? '').pathname,
+      '/v26.0/act_1/campaigns',
+    );
+    await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' });
+    assert.equal(new URL(mock.lastRequest()?.url ?? '').pathname, '/v21.0/me');
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/123/insights',
+      api: 'graph',
+    });
+    assert.equal(new URL(mock.lastRequest()?.url ?? '').pathname, '/v21.0/123/insights');
+  });
+});
+
+test('apiVersionFor picks the ads pin only for the marketing family', () => {
+  const settings = { apiVersion: 'v23.0', adsApiVersion: 'v26.0' };
+  assert.equal(apiVersionFor(settings, 'marketing'), 'v26.0');
+  assert.equal(apiVersionFor(settings, 'graph'), 'v23.0');
+  assert.equal(apiVersionFor(settings, undefined), 'v23.0');
 });
 
 // ---------------------------------------------------------------------------

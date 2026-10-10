@@ -20,6 +20,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { DEFAULT_ADS_API_VERSION, DEFAULT_API_VERSION } from './core/settings.js';
+
 /** This file compiles to `build/smoke-rehearsal.test.js`, so the root is one level up. */
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -47,6 +49,8 @@ interface PaceModule {
 interface RecordedRequest {
   readonly method: string;
   readonly host: string;
+  /** The `vNN.N` path prefix on a graph host; null for rupload. */
+  readonly version?: string | null;
   readonly path: string;
 }
 
@@ -269,6 +273,45 @@ test(
       result.requests.some((request) => request.host === 'rupload.facebook.com'),
       'the Reel upload leg reached the fake rupload host',
     );
+    // The ads tools reach the Marketing API pin; everything else stays on the
+    // Graph pin (doc 12 H1: Marketing v23.0 is retired, Graph v23.0 is not).
+    const graphRequests = result.requests.filter(
+      (request) => request.host === 'graph.facebook.com',
+    );
+    const adAccountRequests = graphRequests.filter((request) =>
+      request.path.startsWith('/act_'),
+    );
+    assert.ok(adAccountRequests.length > 0, 'the ads smokes reached an ad account edge');
+    for (const request of adAccountRequests) {
+      assert.equal(
+        request.version,
+        DEFAULT_ADS_API_VERSION,
+        `${request.method} ${request.path}`,
+      );
+    }
+    const graphOnly = graphRequests.filter(
+      (request) =>
+        request.path === '/debug_token' ||
+        request.path.startsWith('/me') ||
+        /\/(feed|published_posts|scheduled_posts|comments|video_reels)$/.test(
+          request.path,
+        ),
+    );
+    assert.ok(graphOnly.length > 0, 'the Page smokes reached Graph edges');
+    for (const request of graphOnly) {
+      assert.equal(
+        request.version,
+        DEFAULT_API_VERSION,
+        `${request.method} ${request.path}`,
+      );
+    }
+    for (const request of graphRequests) {
+      assert.ok(
+        request.version === DEFAULT_API_VERSION ||
+          request.version === DEFAULT_ADS_API_VERSION,
+        `${request.method} ${request.path} used ${String(request.version)}`,
+      );
+    }
     // Budget for `npm test`: generous for a slow CI leg, but a regression that
     // brings a live-sized wait back (tens of seconds) trips it.
     assert.ok(elapsed < 60_000, `the rehearsal took ${String(elapsed)} ms`);

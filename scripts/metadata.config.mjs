@@ -217,6 +217,19 @@ export const env = Object.freeze([
     example: 'v23.0',
   },
   {
+    name: 'FB_ADS_API_VERSION',
+    group: 'Graph API wire',
+    required: 'no',
+    secret: false,
+    default: 'v26.0',
+    format: 'string',
+    summary:
+      'Marketing API version for the ads tools (own lifecycle, separate from FB_API_VERSION). Off-default values are accepted, but only the default is tested.',
+    description:
+      'Marketing API version the ads tools target (ad accounts, campaigns, ad sets, ads, insights, async reports). The Marketing API retires versions on its own, shorter schedule, so it is pinned separately from FB_API_VERSION. Other values are accepted verbatim as an escape hatch but are not tested.',
+    example: 'v26.0',
+  },
+  {
     name: 'FB_REQUEST_TIMEOUT_MS',
     group: 'Graph API wire',
     required: 'no',

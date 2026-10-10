@@ -38,6 +38,11 @@ registerSmoke({
       `unexpected pinned Graph API version: ${who.server?.apiVersion}`,
     );
     ctx.assert(
+      typeof who.server?.adsApiVersion === 'string' &&
+        who.server.adsApiVersion.startsWith('v'),
+      `unexpected pinned Marketing API version: ${who.server?.adsApiVersion}`,
+    );
+    ctx.assert(
       who.token?.valid === true,
       `the configured token is not valid: ${who.error ?? JSON.stringify(who.token)}`,
     );
@@ -47,7 +52,7 @@ registerSmoke({
     // way to diagnose "why did this Page call 403". The token itself never
     // appears in the payload at all (C3).
     ctx.log.step(
-      `token type "${who.token.type}" on ${who.server.apiVersion}; scopes: ${
+      `token type "${who.token.type}" on ${who.server.apiVersion} (ads ${who.server.adsApiVersion}); scopes: ${
         who.token.scopes.length === 0 ? '(none)' : who.token.scopes.join(', ')
       }`,
     );

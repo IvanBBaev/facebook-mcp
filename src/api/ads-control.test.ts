@@ -625,6 +625,11 @@ test('updateAdObjectRequest POSTs the planned params to the object id', () => {
   assert.equal(req.token, undefined);
 });
 
+test('doc 12 H1: the ads write request is tagged for the Marketing API pin', () => {
+  const req = updateAdObjectRequest(OBJECT_ID, { status: 'PAUSED' });
+  assert.equal(req.api, 'marketing');
+});
+
 test('updateAdObjectRequest names facebook_get_ad_object as the verify tool for a lost response', () => {
   // `POST /<object-id>` says nothing about what the id is; without the api
   // layer naming the read, an ambiguous status/budget write surfaces with no

@@ -56,6 +56,7 @@ import {
 } from './errors.js';
 import { GraphApiError, USAGE_HEADERS } from './types.js';
 import type {
+  ApiFamily,
   Clock,
   ErrorAction,
   ErrorCategory,
@@ -194,6 +195,20 @@ export function containPathname(pathname: string, who: string): string {
       return encodeURIComponent(segment);
     });
   return `/${safeSegments.join('/')}`;
+}
+
+/**
+ * The API version a request's edge path is prefixed with: the Marketing API pin
+ * for `api: 'marketing'` (the ads package), the Graph pin otherwise. The two are
+ * pinned separately because a Marketing API version retires years before the
+ * Graph API version of the same number. Exported so the upload protocols pick
+ * the version identically.
+ */
+export function apiVersionFor(
+  settings: Pick<Settings, 'apiVersion' | 'adsApiVersion'>,
+  api: ApiFamily | undefined,
+): string {
+  return api === 'marketing' ? settings.adsApiVersion : settings.apiVersion;
 }
 
 /**
@@ -1281,7 +1296,7 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
       }
     }
 
-    const url = buildUrl(hostname, req.path, settings.apiVersion, query);
+    const url = buildUrl(hostname, req.path, apiVersionFor(settings, req.api), query);
     const headers: Record<string, string> = {
       // Token via Bearer header ONLY — never the query string (C3).
       authorization: `Bearer ${token}`,

@@ -40,13 +40,21 @@
 // adds guidance about dev-tier limits (CC-ADS-1) rather than re-parsing headers.
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
-import type { Cursor, FbRequestFn, ParamValue } from '../core/index.js';
+import type { ApiFamily, Cursor, FbRequestFn, ParamValue } from '../core/index.js';
 import { DEFAULT_PAGE_LIMIT, fetchPage } from './shared.js';
 import type { EdgeRequest } from './shared.js';
 
 // ---------------------------------------------------------------------------
 // 1. Levels, edges and field sets
 // ---------------------------------------------------------------------------
+
+/**
+ * Every request this package (and `./ads-control.ts`) sends is a Marketing API
+ * call, so it is versioned by `Settings.adsApiVersion` (`FB_ADS_API_VERSION`),
+ * not by the Graph pin: a Marketing API version retires years before the Graph
+ * API version of the same number.
+ */
+export const MARKETING_API: ApiFamily = 'marketing';
 
 /** The three object levels this package reads and controls. */
 export const AD_LEVELS = ['campaign', 'adset', 'ad'] as const;
@@ -552,6 +560,7 @@ function adsEdge(
 ): EdgeRequest {
   return {
     host: 'graph',
+    api: MARKETING_API,
     path,
     params,
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
@@ -645,6 +654,7 @@ export async function getAdObject(
     protocol: 'json',
     method: 'GET',
     host: 'graph',
+    api: MARKETING_API,
     path: `/${opts.objectId}`,
     params: { fields },
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
@@ -756,6 +766,7 @@ export async function readAdAccount(
     protocol: 'json',
     method: 'GET',
     host: 'graph',
+    api: MARKETING_API,
     path: `/${opts.accountId}`,
     params: { fields: AD_ACCOUNT_FIELDS },
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
@@ -1086,6 +1097,7 @@ export async function startAdsReport(
     protocol: 'json',
     method: 'POST',
     host: 'graph',
+    api: MARKETING_API,
     path: `/${opts.objectId}/insights`,
     body: insightsParams(opts),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
@@ -1311,6 +1323,7 @@ export async function getReportRunStatus(
     protocol: 'json',
     method: 'GET',
     host: 'graph',
+    api: MARKETING_API,
     path: `/${opts.reportRunId}`,
     params: {
       fields:

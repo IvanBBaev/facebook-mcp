@@ -41,6 +41,7 @@ import type {
   ParamValue,
   WriteTier,
 } from '../core/index.js';
+import { MARKETING_API } from './ads-read.js';
 import type { AdLevel, AdRecord } from './ads-read.js';
 
 // ---------------------------------------------------------------------------
@@ -696,6 +697,7 @@ export function updateAdObjectRequest(
     protocol: 'json',
     method: 'POST',
     host: 'graph',
+    api: MARKETING_API,
     path: `/${objectId}`,
     body: params,
     // `/<object-id>` does not say what the id is, so the transport cannot infer

@@ -31,6 +31,7 @@
 // exported pure helpers the later video state machine (V05) drives rupload with.
 
 import {
+  apiVersionFor,
   bodyIsGraphErrorEnvelope,
   businessUseCaseEtaMs,
   computeAppSecretProof,
@@ -580,7 +581,7 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       }
     }
 
-    const url = buildMultipartUrl(hostname, req.path, settings.apiVersion);
+    const url = buildMultipartUrl(hostname, req.path, apiVersionFor(settings, req.api));
     // Content-Type is intentionally omitted: `fetch` derives the multipart
     // boundary from the FormData body itself.
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };

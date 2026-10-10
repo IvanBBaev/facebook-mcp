@@ -352,6 +352,7 @@ const LITERAL_DEFAULTS: readonly {
   readonly probe?: NodeJS.ProcessEnv;
 }[] = [
   { name: 'FB_API_VERSION', read: (s) => s.apiVersion },
+  { name: 'FB_ADS_API_VERSION', read: (s) => s.adsApiVersion },
   { name: 'FB_REQUEST_TIMEOUT_MS', read: (s) => s.requestTimeoutMs },
   { name: 'FB_HOST_CONCURRENCY', read: (s) => s.hostConcurrency },
   { name: 'FB_MAX_RESULT_CHARS', read: (s) => s.maxResultChars },

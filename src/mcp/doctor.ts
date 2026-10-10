@@ -555,6 +555,8 @@ export interface DoctorSummary {
 export interface DoctorReport {
   readonly serverVersion: string;
   readonly apiVersion: string;
+  /** Marketing API version the `ads` package calls (`FB_ADS_API_VERSION`). */
+  readonly adsApiVersion: string;
   readonly generatedAt: number;
   /**
    * Set when the configured package selection does not resolve. The matrix below
@@ -1866,6 +1868,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const report: Omit<DoctorReport, 'summary'> = {
     serverVersion: deps.serverVersion,
     apiVersion: deps.settings.apiVersion,
+    adsApiVersion: deps.settings.adsApiVersion,
     generatedAt: now,
     ...(deps.packageSelectionError !== undefined
       ? { packageSelectionError: deps.packageSelectionError }
@@ -2160,6 +2163,7 @@ export function renderDoctorReport(report: DoctorReport): string {
     'Server',
     `  version:      ${report.serverVersion}`,
     `  API version:  ${report.apiVersion}`,
+    `  Ads API:      ${report.adsApiVersion} (Marketing API, ads package)`,
     `  generated at: ${iso(report.generatedAt)}`,
   ];
   // The same set the findings use, so the block and the verdict name the same

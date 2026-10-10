@@ -101,6 +101,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     profiles: {},
     apiVersion: 'v23.0',
+    adsApiVersion: 'v26.0',
     hosts: {
       graph: 'graph.facebook.com',
       graphVideo: 'graph-video.facebook.com',
@@ -189,6 +190,10 @@ test('classifies a valid non-expiring system-user token (neverExpiring)', async 
   const report = await runDoctor(deps);
   assert.equal(report.serverVersion, '9.9.9');
   assert.equal(report.apiVersion, 'v23.0');
+  assert.equal(report.adsApiVersion, 'v26.0');
+  const text = renderDoctorReport(report);
+  assert.match(text, /API version:\s+v23\.0/);
+  assert.match(text, /Ads API:\s+v26\.0 \(Marketing API, ads package\)/);
   assert.equal(report.token.configured, true);
   assert.equal(report.token.type, 'SYSTEM_USER');
   assert.equal(report.token.valid, true);

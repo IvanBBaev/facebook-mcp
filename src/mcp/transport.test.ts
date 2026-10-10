@@ -35,6 +35,7 @@ import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 
 import {
   GRAPH_HOSTS,
+  DEFAULT_ADS_API_VERSION,
   DEFAULT_API_VERSION,
   DEFAULT_HOST_CONCURRENCY,
   DEFAULT_MAX_RESULT_CHARS,
@@ -75,6 +76,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     profiles: {},
     apiVersion: DEFAULT_API_VERSION,
+    adsApiVersion: DEFAULT_ADS_API_VERSION,
     hosts: GRAPH_HOSTS,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     hostConcurrency: DEFAULT_HOST_CONCURRENCY,

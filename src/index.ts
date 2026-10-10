@@ -1339,6 +1339,8 @@ export function serverStartedFields(
   return {
     transport,
     version: serverVersion,
+    apiVersion: settings.apiVersion,
+    adsApiVersion: settings.adsApiVersion,
     packages: loadedPackages(packages, settings).map((pkg) => pkg.name),
   };
 }

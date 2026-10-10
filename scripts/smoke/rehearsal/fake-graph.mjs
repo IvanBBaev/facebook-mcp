@@ -9,7 +9,8 @@
 //
 // Requests arrive through the redirect in fetch-redirect.mjs as
 // `/__host/<graph-host>/<version>/<path>?<query>`. Every one is recorded (method,
-// host, path, query and body keys — never the token, which is only checked).
+// host, API version, path, query and body keys — never the token, which is only
+// checked).
 //
 // State is kept per run so a create → read → delete lifecycle behaves like the
 // real thing: a deleted object answers Graph's "does not exist" error, a hidden
@@ -914,13 +915,19 @@ export async function startFakeGraph({ now = () => Date.now() } = {}) {
     // Graph paths start with the API version; a rupload path is whatever the
     // start phase's `upload_url` named (`/video-upload/<version>/<video-id>`), so
     // it is kept whole and only a graph host must carry a leading version.
-    const match =
-      /^\/__host\/(rupload\.facebook\.com)(\/.*)$/.exec(url.pathname) ??
-      /^\/__host\/(graph(?:-video)?\.facebook\.com)\/v\d+\.\d+(\/.*)?$/.exec(
-        url.pathname,
-      );
+    // The version is recorded too, so a rehearsal can prove the ads tools reach
+    // the Marketing API pin and everything else stays on the Graph pin.
+    const rupload = /^\/__host\/(rupload\.facebook\.com)(\/.*)$/.exec(url.pathname);
+    const graph =
+      rupload === null
+        ? /^\/__host\/(graph(?:-video)?\.facebook\.com)\/(v\d+\.\d+)(\/.*)?$/.exec(
+            url.pathname,
+          )
+        : null;
+    const match = rupload ?? graph;
     const host = match?.[1];
-    const pathAfterVersion = match?.[2] ?? '/';
+    const version = graph?.[2] ?? null;
+    const pathAfterVersion = (rupload !== null ? rupload[2] : graph?.[3]) ?? '/';
     const segments = pathAfterVersion.split('/').filter(Boolean).map(decodeURIComponent);
     const auth = String(req.headers.authorization ?? '');
     // Graph takes `Bearer <token>`; rupload is documented as `OAuth <token>`.
@@ -930,6 +937,7 @@ export async function startFakeGraph({ now = () => Date.now() } = {}) {
     const record = {
       method: req.method,
       host: host ?? '(none)',
+      version,
       path: `/${segments.join('/')}`,
       query: [...url.searchParams.keys()].filter((key) => key !== 'access_token').sort(),
       form: [...form.keys()].sort(),

@@ -271,7 +271,8 @@ cleanup must still work after a run timeout has closed the MCP session. It is co
 - it can `GET` and `DELETE` bare video ids **this run created** and nothing else, and it
   refuses a `DELETE` when Graph reports the video's owner as another Page;
 - the token travels in the `Authorization` header, never in a URL or a log line
-  (`appsecret_proof` is added when `FB_APP_SECRET` is set); `FB_API_VERSION` is honoured.
+  (`appsecret_proof` is added when `FB_APP_SECRET` is set); `FB_API_VERSION` is honoured
+  (the hatch only touches Graph video ids, so `FB_ADS_API_VERSION` never applies).
 
 No other smoke may import it.
 

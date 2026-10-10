@@ -28,6 +28,7 @@
 
 import { GraphApiError } from '../core/index.js';
 import type {
+  ApiFamily,
   Cursor,
   FbRequestFn,
   FetchAllBudget,
@@ -94,6 +95,8 @@ export const LOOP_GUARD_NOTE =
 export interface EdgeRequest {
   readonly host: GraphHost;
   readonly path: string;
+  /** Versioned API the edge belongs to (`marketing` for ads edges); absent ⇒ Graph. */
+  readonly api?: ApiFamily;
   /** Base query params merged under the helper-managed `limit`/`after`. */
   readonly params?: Readonly<Record<string, ParamValue>>;
   /** Page whose token the client should resolve (per-page token resolver — C1). */
@@ -234,6 +237,7 @@ async function requestPage<T>(
     method: 'GET',
     host: edge.host,
     path: edge.path,
+    api: edge.api,
     params,
     pageId: edge.pageId,
     token: edge.token,

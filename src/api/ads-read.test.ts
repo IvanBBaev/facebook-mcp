@@ -15,6 +15,7 @@ import {
   ADS_INSIGHTS_MAX_ROWS,
   AD_LEVEL_LIST_FIELDS,
   EFFECTIVE_STATUS_NOTE,
+  MARKETING_API,
   OVERSIZED_SYNC_SUBCODE,
   REPORT_STALL_MS,
   adAccountBlockedError,
@@ -35,6 +36,7 @@ import {
   normalizeAdNode,
   normalizeInsightsRow,
   parseMinorUnits,
+  readAdAccount,
   resolveAdAccountId,
   startAdsReport,
   withPinnedAdFields,
@@ -1396,5 +1398,49 @@ test('a field list with no money in it, or with the currency already, is left al
     fake.on(() => true, fbOk({ data: [] }));
     await fetchAdsInsights(fake.fn, { objectId: ACCOUNT, fields });
     assert.equal(paramsOf(fake.lastRequest()).fields, fields);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Doc 12 H1: every ads request is a Marketing API request
+// ---------------------------------------------------------------------------
+
+test('doc 12 H1: every ads read request is tagged for the Marketing API pin', async () => {
+  assert.equal(MARKETING_API, 'marketing');
+  const fake = createFakeFbRequest();
+  fake.on((req) => req.method === 'POST', fbOk({ report_run_id: RUN_ID }), Infinity);
+  fake.on(
+    (req) => req.path === `/${RUN_ID}`,
+    fbOk({
+      async_status: 'Job Running',
+      async_percent_completion: 10,
+      time_ref: NOW / 1000,
+    }),
+    Infinity,
+  );
+  fake.on(
+    (req) => req.path === `/${ACCOUNT}`,
+    fbOk({ id: ACCOUNT, account_status: 1, currency: 'USD' }),
+    Infinity,
+  );
+  fake.on((req) => req.path.endsWith('/campaigns'), fbOk(listBody(campaign())), Infinity);
+  fake.on((req) => req.path.endsWith('/insights'), fbOk({ data: [] }), Infinity);
+  fake.on(() => true, fbOk(campaign()), Infinity);
+
+  await listAdObjects(fake.fn, { accountId: ACCOUNT, level: 'campaign' });
+  await getAdObject(fake.fn, { objectId: '23851234567890123', level: 'campaign' });
+  await readAdAccount(fake.fn, { accountId: ACCOUNT });
+  await fetchAdsInsights(fake.fn, { objectId: ACCOUNT, level: 'campaign' });
+  await startAdsReport(fake.fn, { objectId: ACCOUNT, level: 'ad' });
+  await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+  await fetchReportResults(fake.fn, { reportRunId: RUN_ID });
+
+  assert.equal(fake.calls.length, 7);
+  for (const call of fake.calls) {
+    assert.equal(
+      call.api,
+      'marketing',
+      `${call.method} ${call.path} is not tagged marketing`,
+    );
   }
 });
