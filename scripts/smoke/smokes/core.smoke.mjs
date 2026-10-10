@@ -16,6 +16,7 @@ registerSmoke({
   title: 'tools/list responds and facebook_whoami reports a valid live token',
   page: 'none',
   writes: false,
+  effects: 'none',
   packages: [],
   run: async (ctx) => {
     const listed = await ctx.listTools();
@@ -91,6 +92,7 @@ registerSmoke({
   // other two are account-scoped and touch no Page at all.
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: [],
   run: async (ctx) => {
     /** Contracts this run could not put any evidence behind. */

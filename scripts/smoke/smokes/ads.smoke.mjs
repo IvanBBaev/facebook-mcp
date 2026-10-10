@@ -303,6 +303,7 @@ registerSmoke({
   // and have no `profile` argument at all. No Page is touched either way.
   page: 'none',
   writes: false,
+  effects: 'none',
   budget: 'ads',
   packages: ['ads'],
   requires: ['FB_AD_ACCOUNT_ID'],
@@ -466,6 +467,7 @@ registerSmoke({
   title: 'List ad sets and ads, then follow each parent id back to the object it names',
   page: 'none',
   writes: false,
+  effects: 'none',
   budget: 'ads',
   packages: ['ads'],
   requires: ['FB_AD_ACCOUNT_ID'],
@@ -670,6 +672,7 @@ registerSmoke({
   title: 'Ads-Manager URLs and non-numeric run ids are refused before any Graph call',
   page: 'none',
   writes: false,
+  effects: 'none',
   packages: ['ads'],
   run: async (ctx) => {
     // 1. An Ads Manager link instead of an id. This is the most common way a
@@ -781,6 +784,7 @@ registerSmoke({
   title: 'NOT COVERED LIVE: facebook_update_ad_object would target a real advertiser',
   page: 'none',
   writes: false,
+  effects: 'none',
   run: async (ctx) => {
     ctx.log.step(
       'facebook_update_ad_object is not smoked: this server cannot create an ads object ' +

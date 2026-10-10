@@ -23,6 +23,7 @@ registerSmoke({
   title: 'List published posts, then read one back by its composite id',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader'],
   run: async (ctx) => {
     const listed = await ctx.callTool('facebook_list_posts', {
@@ -117,6 +118,7 @@ registerSmoke({
   title: 'Read reactions on a published post: totals, taint envelope, and the count trap',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader'],
   run: async (ctx) => {
     const listed = await ctx.callTool('facebook_list_posts', {

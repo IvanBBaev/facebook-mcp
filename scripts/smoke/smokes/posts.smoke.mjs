@@ -209,6 +209,11 @@ registerSmoke({
   writes: true,
   packages: ['reader', 'posts'],
   requires: ['FB_CONFIRM_TOKEN'],
+  effects: {
+    creates: ['1 published text post carrying the run marker (then edited in place)'],
+    cleansUp: ['deletes the post with facebook_delete_post and waits until it is gone'],
+    leaves: [],
+  },
   run: async (ctx) => {
     const original = ctx.mark('smoke: publish-and-delete');
     const { preview, applied } = await ctx.applyWrite('facebook_create_post', {
@@ -297,6 +302,11 @@ registerSmoke({
   writes: true,
   packages: ['reader', 'posts'],
   requires: ['FB_CONFIRM_TOKEN'],
+  effects: {
+    creates: ['1 marked post scheduled about 2 hours ahead (never published)'],
+    cleansUp: ['cancels it by deleting it, then verifies it left the scheduled queue'],
+    leaves: [],
+  },
   run: async (ctx) => {
     const message = ctx.mark('smoke: schedule-and-cancel');
     const when = new Date(Date.now() + SCHEDULE_LEAD_MS).toISOString();
@@ -374,6 +384,11 @@ registerSmoke({
   // would make this smoke fail for reasons that have nothing to do with the
   // server. The operator names the image; the harness refuses clearly without it.
   requires: ['FB_CONFIRM_TOKEN', 'FB_SMOKE_PHOTO_URL'],
+  effects: {
+    creates: ['1 published photo post (FB_SMOKE_PHOTO_URL) with a marked caption'],
+    cleansUp: ['deletes the post best-effort; the end sweep is the backstop'],
+    leaves: [],
+  },
   run: async (ctx) => {
     const caption = ctx.mark('smoke: photo post');
     const { applied } = await ctx.applyWrite('facebook_create_photo_post', {
@@ -464,6 +479,7 @@ registerSmoke({
     'NOT COVERED LIVE: facebook_create_video_post needs a video fixture and minutes of encoding',
   page: 'none',
   writes: false,
+  effects: 'none',
   run: async (ctx) => {
     ctx.log.step(
       'facebook_create_video_post is not smoked: it needs a video this repository cannot ' +

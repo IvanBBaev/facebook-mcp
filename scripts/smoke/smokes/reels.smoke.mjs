@@ -94,6 +94,7 @@ registerSmoke({
   title: 'List Reels, page the cursor, and prove they are absent from the timeline',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader'],
   run: async (ctx) => {
     const first = await ctx.callTool('facebook_list_reels', {
@@ -210,6 +211,7 @@ registerSmoke({
   // binary — the unit tests exercise the source, not `build/index.js` over stdio.
   page: 'none',
   writes: false,
+  effects: 'none',
   packages: ['posts'],
   run: async (ctx) => {
     const rejected = await ctx.callToolRaw('facebook_get_video_status', {
@@ -263,6 +265,15 @@ registerSmoke({
   budget: 'reels',
   requires: ['FB_SMOKE_REEL_PATH', 'FB_MEDIA_DIR'],
   packages: ['posts'],
+  effects: {
+    creates: [
+      '1 DRAFT Reel uploaded from FB_SMOKE_REEL_PATH (1 of the 30 API-published Reels per 24h)',
+    ],
+    cleansUp: [],
+    leaves: [
+      'the DRAFT Reel: there is no Reel delete tool and no sweeper collects Reels; delete it by hand in Meta Business Suite',
+    ],
+  },
   run: async (ctx) => {
     const video = process.env.FB_SMOKE_REEL_PATH;
 

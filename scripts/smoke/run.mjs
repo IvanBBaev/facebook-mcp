@@ -10,6 +10,9 @@
 //
 // What it does, in order:
 //
+//   0. with `--plan`, stops before the gate: validates the environment, prints
+//      what each smoke would create, clean up and leave behind (plan.mjs), and
+//      exits 0 (runnable) or 2 (not) — offline, no server spawned;
 //   1. refuses unless `FB_SMOKE=1` (exit 2, nothing executed, no network call);
 //   2. refuses unless the environment is complete AND safe for the selected
 //      smokes — reporting every problem at once (exit 2, still no network call);
@@ -59,6 +62,7 @@ import {
 import { clip, createLogger, runBanner, scrub } from './log.mjs';
 import { formatCoverageLine, toolCoverage } from './coverage.mjs';
 import { createNonce, mark, markerFor } from './nonce.mjs';
+import { buildPlan, envNameProblems, formatPlan } from './plan.mjs';
 import {
   SmokeRegistrationError,
   listSmokes,
@@ -87,6 +91,11 @@ const USAGE = `facebook-mcp live smoke harness
 
 Options
   --list                 Show every registered smoke and exit (no gate, no network).
+  --plan                 Validate the environment and print what the run would
+                         do — per smoke: runs or skipped and why, what it
+                         creates, cleans up and leaves behind — then exit
+                         0 (runnable) or 2 (not). No gate, no network, no
+                         server. Combine with the selection flags below.
   --only <id[,id...]>    Run exactly these smoke ids. Repeatable. Naming a
                          budget-consuming smoke here is itself the opt-in.
   --phase <n>            Run only smokes of this roadmap phase. Repeatable.
@@ -120,6 +129,7 @@ export function parseCliArgs(argv) {
     args: argv,
     options: {
       list: { type: 'boolean', default: false },
+      plan: { type: 'boolean', default: false },
       only: { type: 'string', multiple: true, default: [] },
       phase: { type: 'string', multiple: true, default: [] },
       'include-budget': { type: 'boolean', default: false },
@@ -166,6 +176,7 @@ export function parseCliArgs(argv) {
 
   return {
     list: values.list,
+    plan: values.plan,
     only,
     phases,
     includeBudget: values['include-budget'],
@@ -195,6 +206,38 @@ function formatSmokeRow(smoke) {
     ...(smoke.requires.length === 0 ? [] : [`requires:${smoke.requires.join('+')}`]),
   ];
   return `  ${smoke.id.padEnd(34)} ${smoke.title}\n${' '.repeat(36)} ${flags.join(' · ')}`;
+}
+
+/**
+ * `--plan`: validate everything and describe the run, offline. Exit 0 when the
+ * live run would start, 2 (the refusal status) when it would not.
+ */
+async function printPlan(args) {
+  try {
+    await loadRegistrations();
+  } catch (err) {
+    // The one load failure an environment can cause: the rehearsal preload,
+    // switched on by a stray FB_SMOKE_REHEARSAL_PRELOAD=1, throws at import.
+    // Report it with the name problems that explain it instead of a stack.
+    const { problems } = envNameProblems(process.env);
+    problems.push(
+      `the smoke modules failed to load: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.stderr.write(
+      scrub(
+        `Problems (${problems.length}) — the live run would refuse:\n  - ${problems.join('\n  - ')}\n`,
+      ),
+    );
+    return EXIT.refused;
+  }
+  const plan = buildPlan({
+    env: process.env,
+    args,
+    smokes: listSmokes(),
+    sweepers: listSweepers(),
+  });
+  process.stdout.write(formatPlan(plan, process.env));
+  return plan.runnable ? EXIT.ok : EXIT.refused;
 }
 
 /**
@@ -512,6 +555,10 @@ async function main() {
   }
 
   const log = createLogger({ verbose: args.verbose });
+
+  if (args.plan) {
+    return printPlan(args);
+  }
 
   await loadRegistrations();
 

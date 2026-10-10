@@ -45,6 +45,16 @@ const PAGES = ['none', 'read', 'test'];
 /** Valid `budget` values: which finite live quota the smoke consumes. */
 const BUDGETS = ['reels', 'ads'];
 
+/** The keys of an `effects` declaration, in display order. */
+export const EFFECT_KEYS = Object.freeze(['creates', 'cleansUp', 'leaves']);
+
+/** The normalised `effects` of a smoke that changes no remote state. */
+const NO_EFFECTS = Object.freeze({
+  creates: Object.freeze([]),
+  cleansUp: Object.freeze([]),
+  leaves: Object.freeze([]),
+});
+
 const smokes = new Map();
 const sweepers = new Map();
 
@@ -78,6 +88,77 @@ function optionalStringArray(spec, field, where) {
 }
 
 /**
+ * Validate and normalise a smoke's `effects` declaration — the one place that
+ * says, in words an operator can act on, what the smoke does to the REAL Page or
+ * ad account. `--plan` prints it verbatim, so it is declared next to the code
+ * that does the writing instead of in a parallel table that drifts.
+ *
+ *  - `'none'` — the smoke creates and changes nothing (required for, and only
+ *    allowed on, `writes: false`);
+ *  - `{ creates, cleansUp, leaves }` — three arrays of one-line strings, every
+ *    key present (an empty array is a statement, a missing key is a typo).
+ *    `creates` must name at least one artifact, and every run that creates
+ *    something must say how it ends: cleaned up, left behind, or both.
+ */
+function normaliseEffects(spec, writes, where) {
+  const value = spec.effects;
+  const shape =
+    `"effects" must be 'none' (creates nothing) or ` +
+    `{ ${EFFECT_KEYS.join(', ')} } — arrays of one-line strings`;
+  if (value === undefined) {
+    throw new SmokeRegistrationError(`${where}: ${shape}; it is required`);
+  }
+  if (value === 'none') {
+    if (writes) {
+      throw new SmokeRegistrationError(
+        `${where}: a smoke with writes:true cannot declare effects:'none' — say what it creates`,
+      );
+    }
+    return NO_EFFECTS;
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SmokeRegistrationError(`${where}: ${shape}`);
+  }
+  const extra = Object.keys(value).filter((key) => !EFFECT_KEYS.includes(key));
+  if (extra.length > 0) {
+    throw new SmokeRegistrationError(
+      `${where}: unknown "effects" key(s) ${extra.join(', ')} — expected ${EFFECT_KEYS.join(', ')}`,
+    );
+  }
+  const effects = {};
+  for (const key of EFFECT_KEYS) {
+    const list = value[key];
+    if (
+      !Array.isArray(list) ||
+      list.some((item) => typeof item !== 'string' || item.trim() === '')
+    ) {
+      throw new SmokeRegistrationError(
+        `${where}: "effects.${key}" must be an array of non-empty strings (use [] for none)`,
+      );
+    }
+    effects[key] = Object.freeze(list.map((item) => item.trim()));
+  }
+  if (!writes) {
+    throw new SmokeRegistrationError(
+      `${where}: a smoke with writes:false must declare effects:'none' — if it creates ` +
+        'something, it writes',
+    );
+  }
+  if (effects.creates.length === 0) {
+    throw new SmokeRegistrationError(
+      `${where}: "effects.creates" is empty, but the smoke declares writes:true`,
+    );
+  }
+  if (effects.cleansUp.length === 0 && effects.leaves.length === 0) {
+    throw new SmokeRegistrationError(
+      `${where}: "effects" names what the smoke creates but neither how it is cleaned up ` +
+        'nor what is left behind',
+    );
+  }
+  return Object.freeze(effects);
+}
+
+/**
  * Register one live smoke.
  *
  * ```js
@@ -96,6 +177,8 @@ function optionalStringArray(spec, field, where) {
  *
  * Invariants enforced here:
  *  - `writes: true` ⇒ `page: 'test'`. A smoke can never write to the read Page.
+ *  - `effects` is declared by every smoke, and agrees with `writes` (see
+ *    {@link normaliseEffects}) — it is what `--plan` tells the operator.
  *  - `budget` ⇒ the smoke is excluded from the default run (opt-in only) and
  *    labelled as quota-consuming everywhere it is printed.
  *  - ids are unique across all smoke files.
@@ -163,6 +246,7 @@ export function registerSmoke(spec) {
       `${where}: phase ${spec.phase} precedes package "${owner}", which ships in phase ${floor}`,
     );
   }
+  const effects = normaliseEffects(spec, writes, where);
   const entry = Object.freeze({
     id,
     phase: spec.phase,
@@ -172,6 +256,7 @@ export function registerSmoke(spec) {
     budget,
     packages,
     requires: optionalStringArray(spec, 'requires', where),
+    effects,
     run: spec.run,
   });
   smokes.set(id, entry);
@@ -278,7 +363,15 @@ export async function loadModules(dir, suffix) {
  *    EXCEPT when named explicitly by `--only` (naming it is the opt-in).
  */
 export function selectSmokes({ only = [], phases = [], includeBudget = false } = {}) {
-  const all = listSmokes();
+  return selectFrom(listSmokes(), { only, phases, includeBudget });
+}
+
+/**
+ * {@link selectSmokes} over an explicit list instead of the registry — the pure
+ * core, shared with `--plan` so the plan and the run can never disagree about
+ * what is selected.
+ */
+export function selectFrom(all, { only = [], phases = [], includeBudget = false } = {}) {
   const known = new Set(all.map((smoke) => smoke.id));
   const unknown = only.filter((id) => !known.has(id));
   if (unknown.length > 0) {

@@ -172,6 +172,13 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   whether the server retries it itself, cool-down, next tool and remedy; plus the
   errors classified before the matrix, unknown-code fallbacks and failures that
   carry no Graph error. `npm run metadata:check` now drift-gates 8 artifacts.
+- **`npm run smoke:plan` (`run.mjs --plan`) — an offline pre-flight for the live
+  smoke run.** It reports every environment problem at once (misspelt
+  `FB_SMOKE_*` names with suggestions, Page id, token and `act_` shapes, a
+  confirm token under 16 characters, a Reel outside `FB_MEDIA_DIR`) and shows,
+  per smoke, whether it will run and what it creates, cleans up and leaves on the
+  real Page. It exits non-zero when the live run would refuse. Every smoke now
+  declares its `effects`, checked against `writes` at registration.
 
 ### Fixed
 

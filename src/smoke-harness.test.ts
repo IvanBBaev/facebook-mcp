@@ -42,6 +42,13 @@ interface SmokeSpecInput {
   readonly budget?: string | null;
   readonly packages?: readonly string[];
   readonly requires?: readonly string[];
+  readonly effects?:
+    | 'none'
+    | {
+        readonly creates: readonly string[];
+        readonly cleansUp: readonly string[];
+        readonly leaves: readonly string[];
+      };
 }
 
 interface RegisteredSmoke {
@@ -107,6 +114,7 @@ interface RunnerModule {
   ): Promise<T>;
   parseCliArgs(argv: readonly string[]): {
     list: boolean;
+    plan: boolean;
     only: readonly string[];
     phases: readonly number[];
     includeBudget: boolean;
@@ -165,6 +173,10 @@ function fakeSmoke(spec: Partial<SmokeSpecInput> & { id: string }): void {
     phase: 1,
     title: `fake smoke ${spec.id}`,
     run: () => Promise.resolve(),
+    // `effects` is required and must agree with `writes`; default it to the
+    // smallest declaration that passes, so these tests stay about selection.
+    effects:
+      spec.writes === true ? { creates: ['x'], cleansUp: ['x'], leaves: [] } : 'none',
     ...spec,
   });
 }
@@ -504,6 +516,7 @@ test('the runner defaults to the built server and every switch off', () => {
   assert.equal(args.keep, false, 'the end sweep runs unless asked not to');
   assert.equal(args.sweepOnly, false);
   assert.equal(args.list, false);
+  assert.equal(args.plan, false);
   assert.deepEqual(args.only, []);
   assert.deepEqual(args.phases, []);
   assert.match(args.serverPath, /build[/\\]index\.js$/);

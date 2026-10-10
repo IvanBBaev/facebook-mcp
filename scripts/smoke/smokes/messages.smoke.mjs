@@ -73,6 +73,7 @@ registerSmoke({
   title: 'List Messenger conversations, then read one thread back by its id',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['messages'],
   run: async (ctx) => {
     const listed = await ctx.callTool('facebook_list_conversations', {
@@ -241,6 +242,7 @@ registerSmoke({
   title: 'NOT COVERED LIVE: facebook_send_message needs a real inbound human message',
   page: 'none',
   writes: false,
+  effects: 'none',
   run: async (ctx) => {
     ctx.log.step(
       'facebook_send_message is not smoked: the 24-hour messaging window only opens ' +

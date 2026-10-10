@@ -207,6 +207,16 @@ registerSmoke({
   budget: 'reels',
   requires: ['FB_SMOKE_REEL_PATH', 'FB_MEDIA_DIR', 'FB_CONFIRM_TOKEN'],
   packages: ['posts', 'reader'],
+  effects: {
+    creates: [
+      '1 DRAFT Reel and 1 SCHEDULED Reel (about 28 days ahead) from FB_SMOKE_REEL_PATH, 2 of the 30 API-published Reels per 24h',
+    ],
+    cleansUp: [
+      'deletes both Reels (facebook_delete_post first, then DELETE /{video-id}) and re-reads each to verify',
+      'a Reel it cannot delete fails the smoke and is printed with its id for deletion by hand',
+    ],
+    leaves: [],
+  },
   run: async (ctx) => {
     const video = process.env.FB_SMOKE_REEL_PATH;
     const testPageId = ctx.pages.testPageId;

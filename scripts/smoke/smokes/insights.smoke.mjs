@@ -213,6 +213,7 @@ registerSmoke({
   title: 'Read Page insights, then re-read the same window as totals-only',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'insights'],
   run: async (ctx) => {
     // A short window that ENDS BEFORE TODAY: both reads below must see the same
@@ -367,6 +368,7 @@ registerSmoke({
   title: 'A wide window against a small max_rows truncates loudly, never silently',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'insights'],
   run: async (ctx) => {
     const capped = await ctx.callTool('facebook_page_insights', {
@@ -460,6 +462,7 @@ registerSmoke({
   title: 'A bogus metric name is reported, never silently dropped',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'insights'],
   run: async (ctx) => {
     // `callToolRaw`, because one of the two legitimate live outcomes IS a tool
@@ -544,6 +547,7 @@ registerSmoke({
   title: 'Read insights for the newest published post, id round-trip included',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'insights'],
   run: async (ctx) => {
     const listed = await ctx.callTool('facebook_list_posts', {
@@ -634,6 +638,7 @@ registerSmoke({
   title: 'facebook_reel_insights refuses a post composite before any Graph call',
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'insights'],
   run: async (ctx) => {
     // 1. The negative half. Costs nothing: the composite never leaves the

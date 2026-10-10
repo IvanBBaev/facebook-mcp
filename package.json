@@ -42,6 +42,7 @@
     "coverage": "npm run build && c8 node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
     "smoke": "node scripts/smoke/run.mjs",
     "smoke:rehearse": "node scripts/smoke/rehearse.mjs",
+    "smoke:plan": "node scripts/smoke/run.mjs --plan",
     "cold-start": "node scripts/cold-start.mjs",
     "fixtures:shape-diff": "node scripts/fixture-shape-diff.mjs",
     "metadata": "npm run build && node scripts/gen-metadata.mjs --write",

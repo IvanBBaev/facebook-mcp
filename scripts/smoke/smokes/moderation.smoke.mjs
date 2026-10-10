@@ -205,6 +205,16 @@ registerSmoke({
   // the CONFIRMATION note in the header. Without the token the smoke could only
   // create artifacts and never remove them.
   requires: ['FB_CONFIRM_TOKEN'],
+  effects: {
+    creates: [
+      '1 marked seed post',
+      '1 marked Page comment on it and 1 marked nested reply (the comment is hidden, then unhidden)',
+    ],
+    cleansUp: [
+      'deletes both comments with facebook_delete_comment, then deletes the seed post',
+    ],
+    leaves: [],
+  },
   run: async (ctx) => {
     const profile = ctx.profile;
 
@@ -393,6 +403,7 @@ registerSmoke({
   // leave more behind.
   page: 'read',
   writes: false,
+  effects: 'none',
   packages: ['reader', 'moderation'],
   run: async (ctx) => {
     const profile = ctx.profile;

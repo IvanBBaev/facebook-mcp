@@ -17,19 +17,88 @@ It therefore lives outside everything automatic:
 npm run build            # the harness drives build/index.js, not src/
 ```
 
+## First live run
+
+Three steps, in this order. The first two touch nothing real; only the third does.
+
+```sh
+npm run build                         # the harness drives build/index.js
+npm run smoke:plan                    # 1. offline: validate the env, see what the run will do
+npm run smoke:rehearse                # 2. offline: the real run.mjs against a fake Graph
+FB_SMOKE=1 npm run smoke              # 3. live: the real Graph API, the real test Page
+```
+
+1. **`smoke:plan`** checks your environment and prints the run before it happens —
+   see [Planning a run](#planning-a-run-offline). Fix every problem it lists; it exits
+   `0` only when the live run would start. Pass the same selection flags you intend
+   to use live (`npm run smoke:plan -- --include-budget`), since what is required
+   depends on what is selected.
+2. **`smoke:rehearse`** proves the harness plumbing end to end against a loopback
+   fake — see [Offline rehearsal](#offline-rehearsal).
+3. **The live run.** Read the plan's "Left on the real Page" section first: anything
+   listed there is still on the test Page when the run ends.
+
 ## Running
 
 ```sh
 FB_SMOKE=1 npm run smoke                      # every non-budget smoke
 FB_SMOKE=1 npm run smoke -- --list            # what exists (no gate needed)
+npm run smoke:plan                            # validate + describe the run (no gate needed)
 FB_SMOKE=1 npm run smoke -- --phase 1         # one roadmap phase
 FB_SMOKE=1 npm run smoke -- --only reader/timeline
 FB_SMOKE=1 npm run smoke -- --sweep-only      # just clean the test Page
 FB_SMOKE=1 npm run smoke -- --include-budget  # also run quota-consuming smokes
 ```
 
-`--help` lists every flag. `--list` and `--help` work without the gate because they
-make no network call and spawn nothing.
+`--help` lists every flag. `--list`, `--plan` and `--help` work without the gate
+because they make no network call and spawn nothing.
+
+### Planning a run (offline)
+
+```sh
+npm run smoke:plan                                    # the default selection
+npm run smoke:plan -- --include-budget                # with the quota-consuming smokes
+npm run smoke:plan -- --only reels/create-and-status  # exactly one smoke
+```
+
+`smoke:plan` is `run.mjs --plan` (`plan.mjs`). It loads the registry, then — with no
+network call and no server — prints:
+
+- **Configuration**: which credential, read Page and test Page the run would use.
+  Tokens are only ever shown as `set (hidden)`.
+- **Every smoke**, as `RUN`, `SKIP` (not named by `--only`, phase not selected, budget
+  opt-in not given, `--sweep-only`) or `BLOCKED` (selected, but a variable in its
+  `requires` is missing), and for every writing smoke what it **creates** on the real
+  test Page, how it **cleans up**, and what it deliberately **leaves** behind. These
+  lines come from the `effects` each smoke declares at registration, not from a
+  separate table.
+- **Sweep**: whether the start and end sweeps run (`--keep`, `--sweep-only`), and the
+  registered sweepers.
+- **Left on the real Page after this run**: the sum of every selected smoke's `leaves`
+  (plus everything it creates, under `--keep`). For example `reels/create-and-status`
+  leaves its DRAFT Reel: there is no Reel delete tool and no sweeper collects Reels.
+- **Problems**: every reason the live run would refuse, all at once. Besides what the
+  run itself checks (credential, test/read Page, token paths, `requires`), the plan
+  also checks shapes the run would only discover later:
+  - numeric `FB_SMOKE_PAGE_ID` / `FB_SMOKE_TEST_PAGE_ID` / `FB_PAGE_ID`;
+  - tokens without a `Bearer ` prefix, quotes, whitespace or a `<placeholder>`, and no
+    token reused across the test Page and another Page;
+  - `FB_CONFIRM_TOKEN` of at least 16 characters (the server ignores a shorter one, so
+    every cleanup delete would be denied);
+  - `FB_AD_ACCOUNT_ID` as `act_<digits>` or bare digits;
+  - `FB_SMOKE_PHOTO_URL` as an `https://` URL;
+  - `FB_MEDIA_DIR` as an existing directory, and `FB_SMOKE_REEL_PATH` as a non-empty
+    `.mp4`/`.mov` that resolves inside it;
+  - any `FB_SMOKE*` name the harness does not read, with the closest one it does
+    (`FB_SMOKE_TEST_PAGEID` → `FB_SMOKE_TEST_PAGE_ID`);
+  - the rehearsal switches (`FB_SMOKE_REHEARSAL_*`) left set in a live shell, a gate
+    set to anything but `1`, and operator-set `FB_PROFILE_SMOKETEST_*` /
+    `FB_PROFILE_SMOKEREAD_*` (the harness owns those profiles);
+  - a missing `build/index.js`.
+
+  A malformed value that only an unselected smoke reads is a warning, not a problem.
+
+Exit status: `0` when the plan is runnable, `2` (the refusal status) when it is not.
 
 ### Exit status
 
@@ -38,6 +107,8 @@ make no network call and spawn nothing.
 | `0`  | every selected smoke passed and the test Page was left clean                                                                 |
 | `1`  | a smoke failed, **or** the sweep could not delete a marked artifact                                                          |
 | `2`  | refused to run: gate off, incomplete/unsafe environment, unknown smoke id, or the server is not built. Nothing was executed. |
+
+Under `--plan` the same codes mean: `0` the plan is runnable, `2` it is not.
 
 A refusal is deliberately non-zero: a misconfigured job must never report a green run
 for a gate that never opened.
@@ -254,6 +325,12 @@ registerSmoke({
   budget: null, // null | 'reels' | 'ads' — non-null ⇒ opt-in only
   packages: ['posts', 'reader'], // FB_TOOL_PACKAGES the server must load
   requires: [], // extra env var names that must be set
+  effects: {
+    // required — 'none' for a smoke that creates nothing; printed by --plan
+    creates: ['1 published text post carrying the run marker'],
+    cleansUp: ['deletes the post with facebook_delete_post'],
+    leaves: [], // what the operator must remove by hand
+  },
   run: async (ctx) => {
     const { applied } = await ctx.applyWrite('facebook_create_post', {
       message: ctx.mark('smoke: hello'),
@@ -264,6 +341,12 @@ registerSmoke({
 ```
 
 `writes: true` with any `page` other than `'test'` is a hard registration error.
+
+`effects` is required and must agree with `writes`: `'none'` exactly when
+`writes: false`; otherwise all three arrays, a non-empty `creates`, and at least one
+entry in `cleansUp` or `leaves`. One line per entry, phrased for the operator reading
+`npm run smoke:plan` — it is the only place the plan learns what your smoke does to the
+real Page.
 
 Never early-return on missing material. If the live Page holds nothing to assert
 against, say so with `ctx.notExercised('<the contract that did not run>')` first —
