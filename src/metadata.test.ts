@@ -16,7 +16,10 @@
 //      documented default cannot quietly become a lie (G2.3);
 //   3. tools — the README table must list exactly the tools the package
 //      factories register, with the tier the registry really enforces;
-//   4. Node floor — the supported runtime version, restated in the launcher
+//   4. error catalog — `docs/error-catalog.md` must list exactly the rows of
+//      the error -> action matrix with the category and retry verdict each one
+//      really emits, and must not hard-code a launch form;
+//   5. Node floor — the supported runtime version, restated in the launcher
 //      guard, `.nvmrc`, the MCPB manifest and both workflows, must not fork.
 //
 // Deliberately no network, no token and no shelling out to git: the package
@@ -35,6 +38,7 @@ import {
   type Settings,
   type ToolSpec,
 } from './core/index.js';
+import { ERROR_MATRIX } from './core/error-matrix.js';
 import * as toolsIndex from './tools/index.js';
 
 /** This file compiles to `build/metadata.test.js`, so the root is one level up. */
@@ -542,7 +546,83 @@ test('the MCPB manifest exposes the same tool names as the registry', async () =
 });
 
 // ---------------------------------------------------------------------------
-// 4. Node floor
+// 4. Error catalog
+// ---------------------------------------------------------------------------
+//
+// `docs/error-catalog.md` is projected from the error -> action matrix. These
+// checks hold it against the matrix rows directly, so a row added, removed or
+// reclassified without regenerating the catalog fails here as well as in
+// `metadata:check`.
+
+interface CatalogRow {
+  readonly code: string;
+  readonly subcode: string;
+  readonly category: string;
+  readonly retryable: string;
+}
+
+/** The rows of the catalog's "Graph error codes" table, cells un-fenced. */
+function catalogMatrixRows(catalog: string): readonly CatalogRow[] {
+  const section = /## Graph error codes\n([\s\S]*?)\n## /.exec(catalog);
+  assert.ok(section, 'docs/error-catalog.md has no "Graph error codes" section');
+  const rows: CatalogRow[] = [];
+  for (const line of (section[1] ?? '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) continue;
+    const cells = trimmed
+      .slice(1, -1)
+      .split('|')
+      .map((c) => c.trim().replace(/`/g, ''));
+    // Skip the header and the alignment separator.
+    if (!/^\d/.test(cells[0] ?? '')) continue;
+    rows.push({
+      code: cells[0] ?? '',
+      subcode: cells[1] ?? '',
+      category: cells[2] ?? '',
+      retryable: cells[3] ?? '',
+    });
+  }
+  assert.ok(rows.length > 0, 'the catalog "Graph error codes" table has no rows');
+  return rows;
+}
+
+test('the error catalog lists exactly the error-matrix rows, as classified', async () => {
+  const documented = catalogMatrixRows(await readText('docs', 'error-catalog.md'));
+  const expected = ERROR_MATRIX.map((row) => ({
+    code: row.codeMax === undefined ? String(row.code) : `${row.code}-${row.codeMax}`,
+    subcode: row.subcode === undefined ? 'any' : String(row.subcode),
+    category: row.category,
+    retryable: row.retryable ? 'yes' : 'no',
+  }));
+  assert.deepEqual(
+    documented,
+    expected,
+    'docs/error-catalog.md drifted from the error matrix — run `npm run metadata`',
+  );
+});
+
+test('the error catalog names no launch form of its own', async () => {
+  // Operator text renders commands in the form the server was started with; a
+  // static document cannot know that form, so it must use the placeholder.
+  const catalog = await readText('docs', 'error-catalog.md');
+  assert.doesNotMatch(
+    catalog,
+    /(?:facebook-mcp|build\/index\.js)\s+(?:doctor|setup-token)\b/,
+    'docs/error-catalog.md hard-codes a launch form for a subcommand',
+  );
+  assert.match(catalog, /`<launch> doctor`/);
+});
+
+test('the error catalog is linked from the README and the runbooks index', async () => {
+  assert.match(await readText('README.md'), /\]\(docs\/error-catalog\.md\)/);
+  assert.match(
+    await readText('docs', 'runbooks', 'README.md'),
+    /\]\(\.\.\/error-catalog\.md\)/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 5. Node floor
 // ---------------------------------------------------------------------------
 //
 // The supported Node version is declared once in `scripts/metadata.config.mjs`

@@ -2,7 +2,7 @@
 // Project the metadata SSOT (`scripts/metadata.config.mjs`) onto every artifact
 // that repeats it (task R01).
 //
-// Seven files describe the same server to seven different consumers. Left to hand
+// Eight files describe the same server to eight different consumers. Left to hand
 // editing they drift, and the drift is only discovered by whoever installs the
 // stale one. So exactly one of them is written by a human — the SSOT — and this
 // script derives the rest:
@@ -14,10 +14,13 @@
 //   .claude-plugin/marketplace.json
 //   .env.example           operator-facing env template
 //   README.md              the `<!-- BEGIN GENERATED: … -->` blocks
+//   docs/error-catalog.md  operator error catalog, from the error → action matrix
 //
 // The tool inventory is not written down anywhere in the SSOT: it is read from
 // the COMPILED server (`build/tools/index.js`) by instantiating every package
 // factory, so the documented surface is by construction the registered surface.
+// The error catalog is read the same way, from the compiled classifier
+// (`build/core/errors.js` and `build/core/error-matrix.js`).
 // That is why a build is required — the script says so instead of guessing.
 //
 // Usage:
@@ -578,6 +581,265 @@ function renderEnvBlock() {
   ].join('\n');
 }
 
+// ---------------------------------------------------------------------------
+// Generators — docs/error-catalog.md
+// ---------------------------------------------------------------------------
+
+/**
+ * The placeholder the catalog prints wherever the server would print its launch
+ * form. Operator text renders commands in the form the process was started with
+ * (`npx -y <package>`, the bare binary, `node build/index.js`), and a static
+ * document cannot know which one its reader uses — so it names none of them.
+ */
+const CATALOG_LAUNCH = '<launch>';
+
+/** An unmatched code, used to render the fallbacks' text with a `<code>` placeholder. */
+const CATALOG_SENTINEL_CODE = 987654;
+
+/**
+ * Load the compiled classifier. Like the tool inventory, the catalog is read
+ * from what the server actually ships: the matrix rows AND the classifications
+ * that are not keyed by a Graph code are rendered by calling the real functions,
+ * so the catalog cannot describe a remedy the server no longer gives.
+ */
+async function loadErrorCatalog() {
+  const load = async (...parts) =>
+    import(pathToFileURL(repoPath('build', ...parts)).href);
+  const errors = await load('core', 'errors.js');
+  const matrix = await load('core', 'error-matrix.js');
+  const http = await load('core', 'http.js');
+  if (errors.matchErrorRow(CATALOG_SENTINEL_CODE) !== undefined) {
+    throw new GenError(
+      `the error matrix now matches code ${CATALOG_SENTINEL_CODE}; pick another ` +
+        'CATALOG_SENTINEL_CODE in scripts/gen-metadata.mjs.',
+    );
+  }
+  return { errors, matrix, http };
+}
+
+const yesNo = (flag) => (flag ? 'yes' : 'no');
+const mono = (value) => `\`${value}\``;
+const toolCell = (name) => (name === undefined ? '—' : mono(name));
+const seconds = (ms) => `${Math.round(ms / 1000)} s`;
+
+/** The surfaced cool-down a matrix row can carry, in words. */
+function coolDownOf(row) {
+  if (row.retryAfterMs !== undefined && row.honorEta) {
+    return `Graph's ETA, else ${seconds(row.retryAfterMs)}`;
+  }
+  if (row.retryAfterMs !== undefined) return seconds(row.retryAfterMs);
+  if (row.honorEta) return "Graph's ETA only";
+  return '—';
+}
+
+/** One action rendered as a catalog row (shared by every non-matrix table). */
+function actionRow(situation, action) {
+  return [
+    situation,
+    mono(action.category),
+    yesNo(action.retryable),
+    toolCell(action.nextTool),
+    cell(action.operatorText),
+  ];
+}
+
+function renderErrorCatalog({ errors, matrix, http }) {
+  const throttleRetries = http.retryVerdict('throttle', true) === 'retry';
+
+  const matrixRows = matrix.ERROR_MATRIX.map((row) => [
+    row.codeMax === undefined ? mono(row.code) : mono(`${row.code}-${row.codeMax}`),
+    row.subcode === undefined ? 'any' : mono(row.subcode),
+    mono(row.category),
+    yesNo(row.retryable),
+    http.isThrottleCode(row.code) && throttleRetries ? 'yes' : 'no',
+    coolDownOf(row),
+    toolCell(row.nextTool),
+    cell(row.operatorText),
+  ]);
+
+  // The appsecret_proof text names the doctor in the launch form the process
+  // was started with; render it with the placeholder, then restore the default
+  // so nothing else this process does sees the substitution.
+  errors.setHintLaunchCommand(CATALOG_LAUNCH);
+  let preMatrix;
+  try {
+    preMatrix = [
+      actionRow(
+        'Code `100` whose message names `appsecret_proof`',
+        errors.classifyGraphError({
+          code: 100,
+          message: 'Invalid appsecret_proof provided in the API argument',
+        }),
+      ),
+      actionRow(
+        'Code `1` or `100` whose message names the pagination cursor',
+        errors.classifyGraphError({ code: 100, message: 'Invalid cursor' }),
+      ),
+    ];
+  } finally {
+    errors.setHintLaunchCommand('');
+  }
+
+  const placeholder = (text) =>
+    text.replaceAll(`code ${CATALOG_SENTINEL_CODE}`, 'code `<n>`');
+  const withPlaceholder = (action) => ({
+    ...action,
+    operatorText: placeholder(action.operatorText),
+  });
+  const unmatched = [
+    actionRow(
+      'Any other code, flagged `is_transient: true` by Graph',
+      withPlaceholder(
+        errors.classifyGraphError({ code: CATALOG_SENTINEL_CODE, is_transient: true }),
+      ),
+    ),
+    actionRow(
+      'Any other code',
+      withPlaceholder(errors.classifyGraphError({ code: CATALOG_SENTINEL_CODE })),
+    ),
+  ];
+
+  const statusClass = (action, status, label) => ({
+    ...action,
+    operatorText: action.operatorText.replaceAll(`HTTP ${status}`, label),
+  });
+  const noEnvelope = [
+    actionRow(
+      'HTTP 5xx, no Graph error envelope',
+      statusClass(errors.nonJsonBodyAction(503), 503, 'HTTP 5xx'),
+    ),
+    actionRow('HTTP 429, no Graph error envelope', errors.nonJsonBodyAction(429)),
+    actionRow(
+      'Any other HTTP 4xx, no Graph error envelope',
+      statusClass(errors.nonJsonBodyAction(400), 400, 'HTTP 4xx'),
+    ),
+    actionRow(
+      'Network fault before the request was sent (DNS, connect), read or write',
+      errors.classifyNetworkError({ phase: 'connect', isWrite: true }),
+    ),
+    actionRow(
+      'Network fault after the request was sent, on a read',
+      errors.classifyNetworkError({ phase: 'response', isWrite: false }),
+    ),
+    actionRow(
+      'Network fault after the request was sent, HTTP 5xx, or code `1` / `2`, on a write',
+      errors.ambiguousWriteAction(),
+    ),
+  ];
+
+  const situationHeaders = [
+    'Situation',
+    'Category',
+    'Retryable',
+    'Next tool',
+    'What the server tells you',
+  ];
+  const situationAligns = ['left', 'center', 'center', 'center', 'left'];
+
+  return [
+    '# Error catalog',
+    '',
+    '<!-- GENERATED FILE — do not edit by hand. Source: src/core/error-matrix.ts and',
+    'src/core/errors.ts; regenerate with `npm run metadata`. CI fails if it drifts. -->',
+    '',
+    'What `facebook-mcp` reports when a Graph call fails, whether it retries, and',
+    'what to do about it. Every row below is rendered from the classifier the',
+    'server ships, so the text is exactly what a failing tool call returns.',
+    '',
+    '## Reading a failed tool call',
+    '',
+    'A tool call that fails on a Graph error returns an error result with these',
+    'fields:',
+    '',
+    table(
+      ['Field', 'Meaning'],
+      ['left', 'left'],
+      [
+        ['`error`', 'The error message (redacted, prefixed with the HTTP status).'],
+        ['`code` / `subcode`', "Graph's error code and `error_subcode`."],
+        ['`httpStatus`', 'The HTTP status of the refusing response.'],
+        ['`fbtraceId`', "Graph's trace id — what Meta support asks for."],
+        [
+          '`userTitle` / `userMessage`',
+          "Meta's own human-readable reason, when it sent one. On a publishing or ads refusal this is often the only concrete reason.",
+        ],
+        ['`category`', 'The class of failure (the **Category** column below).'],
+        [
+          '`retryable`',
+          'Whether repeating the same call can succeed. `false` means it will fail identically until something changes.',
+        ],
+        ['`nextTool`', 'The tool to run next to diagnose or verify, when one helps.'],
+        [
+          '`retryAfterMs`',
+          'A surfaced cool-down estimate. Never a promise: wait at least this long before repeating.',
+        ],
+        ['`action`', 'The operator guidance (the **What to do** column below).'],
+      ],
+    ),
+    '',
+    'For an `auth` or `permission` failure, run the doctor (`<launch> doctor`)',
+    'first: it shows which token is live, its granted scopes and a per-package',
+    'usable / partial / blocked matrix. `<launch>` is the form you start the',
+    'server with — `npx -y @ivanbaev/facebook-mcp`, `facebook-mcp` after a global',
+    'install, or `node build/index.js` from a source checkout.',
+    '',
+    '## Retries',
+    '',
+    '- **Throttles** (the `rate_limit` codes marked _Retried in-process_, and a',
+    '  bare HTTP 429) are retried inside the server for reads and writes alike —',
+    '  the request was refused without being processed. Each wait is capped at',
+    '  60 s; a longer wait Graph names is not slept on but surfaced as',
+    '  `retryAfterMs`. Once the in-process retries are spent the throttle is',
+    '  returned with `retryable: false` and the wait Graph named, if any, as',
+    '  `retryAfterMs`.',
+    '- **HTTP 5xx and network faults** are retried inside the server on reads only.',
+    '  On a write the outcome is unknown — the change may have landed — so it is',
+    '  returned as `ambiguous` and never retried: verify, then decide.',
+    '- **Everything else** is returned on the first failure. `retryable` says',
+    '  whether the caller may repeat it.',
+    '',
+    '## Graph error codes',
+    '',
+    'The error → action matrix (`src/core/error-matrix.ts`). The most specific row',
+    'wins: code + subcode, then the code with any subcode, then a code range.',
+    '',
+    table(
+      [
+        'Code',
+        'Subcode',
+        'Category',
+        'Retryable',
+        'Retried in-process',
+        'Cool-down',
+        'Next tool',
+        'What to do',
+      ],
+      ['left', 'left', 'center', 'center', 'center', 'center', 'center', 'left'],
+      matrixRows,
+    ),
+    '',
+    '## Classified ahead of the matrix',
+    '',
+    'Two refusals arrive under codes the matrix already claims, but mean something',
+    'else; Graph names them only in its message, so the server checks for them',
+    'first.',
+    '',
+    table(situationHeaders, situationAligns, preMatrix),
+    '',
+    '## Codes the matrix does not know',
+    '',
+    table(situationHeaders, situationAligns, unmatched),
+    '',
+    '## Failures without a Graph error',
+    '',
+    'A response with no Graph error envelope (an HTML page from an edge or a',
+    'proxy, an empty 5xx) or no response at all.',
+    '',
+    table(situationHeaders, situationAligns, noEnvelope),
+    '',
+  ].join('\n');
+}
+
 /** Replace the body of every `<!-- BEGIN GENERATED: id -->` block. */
 function spliceReadme(currentText, blocks) {
   if (currentText === undefined) throw new GenError('README.md is missing.');
@@ -682,6 +944,11 @@ async function buildTargets() {
         scopes: renderScopesBlock(inventory),
         env: renderEnvBlock(),
       }),
+      format: true,
+    },
+    {
+      path: repoPath('docs', 'error-catalog.md'),
+      text: renderErrorCatalog(await loadErrorCatalog()),
       format: true,
     },
   ];

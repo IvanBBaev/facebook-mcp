@@ -26,6 +26,8 @@ numbered steps and **verify by…** checks. They are grounded in the design in
 
 ## Related
 
+- [Error catalog](../error-catalog.md) — what each Graph error means, whether the
+  server retries it, and what to do (generated from the error → action matrix).
 - [SECURITY.md](../../SECURITY.md) — security posture and vulnerability reporting.
 - [04-auth-and-security.md](../analysis/04-auth-and-security.md) — token strategy,
   redaction choke-point, threat model, and write-gating tiers.

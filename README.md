@@ -660,10 +660,13 @@ See [SECURITY.md](SECURITY.md) for the full model and vulnerability reporting.
   roadmap, corner cases, the v1.0 release definition, and the parallel
   task-breakdown that drives development.
 - **Runbooks** — operational procedures in [`docs/runbooks/`](docs/runbooks/).
+- **Error catalog** — every Graph error the server classifies, whether it is
+  retried, and what to do: [`docs/error-catalog.md`](docs/error-catalog.md).
 - **Documentation site** — [ivanbbaev.github.io/facebook-mcp](https://ivanbbaev.github.io/facebook-mcp/).
 
-The environment table, the package/tool tables and the permission tables above
-are generated from the code by `npm run metadata`; CI fails if they drift.
+The environment table, the package/tool tables and the permission tables above,
+and the error catalog, are generated from the code by `npm run metadata`; CI
+fails if they drift.
 
 ## Support
 

@@ -167,6 +167,12 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   model fails the rehearsal. It also runs in `npm test`, so harness bugs surface
   before the first costly live run.
 
+- **`docs/error-catalog.md` — an operator error catalog generated from the
+  error → action matrix.** Per code/subcode: category, whether it is retryable,
+  whether the server retries it itself, cool-down, next tool and remedy; plus the
+  errors classified before the matrix, unknown-code fallbacks and failures that
+  carry no Graph error. `npm run metadata:check` now drift-gates 8 artifacts.
+
 ### Fixed
 
 - **A same-size rewrite of a local media file still uploaded unapproved bytes.**

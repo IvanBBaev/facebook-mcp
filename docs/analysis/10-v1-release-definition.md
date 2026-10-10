@@ -172,6 +172,16 @@ gate, `1.1.0` turns the ads package on as a supported capability.
   careful spend gating; design after Phase 5 ships.
 - Generated error-catalog README section (from the error→action matrix) —
   nice-to-have; the matrix itself ships in Phase 0.
+
+  ✎ **Shipped 2026-10-01.** It landed as a dedicated generated document,
+  `docs/error-catalog.md`, rather than a README section: the per-code guidance
+  is too wide for the README, which now links to it (as does the runbooks
+  index). `gen-metadata` renders it from the compiled error → action matrix and
+  classifier — every matrix row with its category, retry verdict, in-process
+  retry, cool-down, next tool and operator text, plus the cases classified ahead
+  of the matrix, the unknown-code fallbacks and the failures without a Graph
+  error — so it is the 8th artifact `npm run metadata:check` drift-gates. It
+  names the doctor as `<launch> doctor` rather than one fixed launch form.
 - Doctor machine-readable output (`--json`, exit codes) for scripting.
 
   ✎ **Half unparked 2026-08-30.** The exit-code half shipped early:
