@@ -45,6 +45,7 @@ Three findings shape the design:
 | [09-corner-cases.md](09-corner-cases.md) | Corner-case catalog with binding handling decisions |
 | [10-v1-release-definition.md](10-v1-release-definition.md) | v1.0 definition, version map, gap additions (G-items) |
 | [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) | Multi-agent work plan: waves, task IDs, file ownership, dependency DAG |
+| [12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md) | Post-launch Meta changelog check (2026-10-02): versions, v23.0 sunset, impact matrix, bump recommendation |
 
 ## Status
 
@@ -61,6 +62,10 @@ Three findings shape the design:
   [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) (waves +
   exclusive file ownership); [08-roadmap.md](08-roadmap.md) keeps governing
   verification/release gates.
+- **Upkeep:** the first post-launch changelog check
+  ([12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md))
+  found the Marketing API side of the `v23.0` pin already retired and recommends
+  bumping the pin before the live verification.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
   runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
   the release rail in [../runbooks/release.md](../runbooks/release.md) has already

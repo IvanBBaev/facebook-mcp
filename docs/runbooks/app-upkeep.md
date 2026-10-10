@@ -56,8 +56,18 @@ say whether anything in it affects this server.
 
 The server pins one tested version — `DEFAULT_API_VERSION` in
 [`../../src/core/settings.ts`](../../src/core/settings.ts) (currently `v23.0`).
-Meta ships a new version roughly quarterly and supports each one for about two
-years, so the pin ages out on a predictable clock.
+Meta ships a new version roughly quarterly and supports each Graph API version
+for about two years, so the pin ages out on a predictable clock.
+
+The same pin is used for the Marketing API (the `ads` package), and that API
+runs on a much shorter clock: a Marketing API version is typically retired a
+few months after the version two releases newer ships (v23.0 ended 2026-06-09,
+while Graph v23.0 runs until 2027-10-08). Once it is retired, Meta auto-upgrades
+calls to the next available version only for endpoints that did not change,
+marks them with an `X-Ad-Api-Version-Warning` header, and rejects the rest with
+error `#2635`. So check the Marketing API versions table on every §1 pass, not
+just the Graph one — the ads side forces a bump long before Graph does. See
+[`../analysis/12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md).
 
 `FB_API_VERSION` overrides the pin, and setting it to anything other than the
 tested default is accepted with a warning — behaviour is only verified against
@@ -183,6 +193,14 @@ outstanding, the credential expiry, and anything you changed as a result. A pass
 that found nothing is still worth recording — it is the evidence that the gap
 since the last check is small.
 
+### Check log
+
+Newest first. Link a dated analysis doc when the pass produced findings.
+
+| Date | Newest Graph / Marketing API | Data Use Checkup | Credential expiry | Outcome |
+| ---- | ---------------------------- | ---------------- | ----------------- | ------- |
+| 2026-10-02 | v26.0 / v25.0 (v26.0 announced, not yet in the Marketing table) | not checked (console step, desk check only) | not checked | Pin `v23.0`: Graph fine to 2027-10-08, but Marketing API v23.0 retired 2026-06-09 (HIGH). Recommend bumping to v26.0 as its own release before the 1.0 live pass. Insights rename-table gaps (MEDIUM). No source changed. See [`12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md). |
+
 ## Related
 
 - [credential-rotation.md](credential-rotation.md) — when the expiry check in §4
@@ -192,3 +210,6 @@ since the last check is small.
 - [release.md](release.md) — the release cut, which assumes this pass is current.
 - [`../analysis/09-corner-cases.md`](../analysis/09-corner-cases.md) — CC-LIFE-5
   and the insights corner cases this pass is designed to catch.
+- [`../analysis/12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md)
+  — the first post-launch pass (2026-10-02): versions, impact matrix, bump
+  recommendation.
