@@ -182,6 +182,13 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
 
 ### Fixed
 
+- **A SIGINT/SIGTERM sent right after the `facebook-mcp server started` line
+  could kill the server uncleanly.** The readiness line was logged before the
+  shutdown handlers were registered, so a supervisor reacting to it at once hit
+  Node's default signal handler (no graceful shutdown, exit by signal). The
+  handlers are now registered first; the intermittent failure of the http
+  SIGTERM/SIGINT shutdown test is gone.
+
 - **A same-size rewrite of a local media file still uploaded unapproved bytes.**
   Local video, Reel and photo posts (carousels included) now bind a SHA-256 of
   the file content into the plan. A rewrite between preview and apply fails with

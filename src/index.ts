@@ -1505,20 +1505,24 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     logger,
     signal: controller.signal,
   });
-  logger.info(
-    'facebook-mcp server started',
-    serverStartedFields(handle.kind, serverVersion, packages, settings),
-  );
-  onStarted();
 
   // Graceful shutdown: aborting the controller drives the transport's own
-  // shutdown path (close listener + unwind in-flight work — CC-MCP-5).
+  // shutdown path (close listener + unwind in-flight work — CC-MCP-5). The
+  // handlers go in BEFORE the "server started" line: that line is the readiness
+  // signal a supervisor acts on, and a signal landing between it and the
+  // registration would hit Node's default handler and kill the process uncleanly.
   const requestShutdown = (signal: NodeJS.Signals): void => {
     logger.info('shutdown signal received', { signal });
     controller.abort();
   };
   process.once('SIGINT', requestShutdown);
   process.once('SIGTERM', requestShutdown);
+
+  logger.info(
+    'facebook-mcp server started',
+    serverStartedFields(handle.kind, serverVersion, packages, settings),
+  );
+  onStarted();
 
   await handle.closed;
 }
