@@ -261,36 +261,49 @@ export interface DeprecatedMetric {
 
 /**
  * The rename/deprecation table. Three waves matter (doc 03 "Insights (heavily
- * changed 2024–2026)"):
+ * changed 2024–2026)", doc 12 "Graph API changelog check, 2026-10"):
  *
- *   * 2024-09 — the FANS family became the FOLLOWS family.
- *   * 2025-11 — the IMPRESSIONS family became the MEDIA-VIEW family and the
- *     organic/paid/viral splits went away with it.
- *   * 2026-06-15 — the remaining UNIQUE variants were removed, and the wave hit
- *     the video-views family too, some names with no replacement at all.
+ *   * 2024-09 — the engaged-users and consumptions names went away.
+ *   * 2025-11 — the FANS family became the FOLLOWS family, and the IMPRESSIONS
+ *     family became the MEDIA-VIEW family with the organic/paid/viral splits
+ *     removed along with it (Pages API changelog, 2025-11-15).
+ *   * 2026-06-15 — the remaining UNIQUE variants were removed, together with the
+ *     `page_posts_impressions*` and `total_video_impressions*` families and the
+ *     unique video-views names (Graph v25.0 changelog), some with no replacement.
  *
  * Training data is full of the pre-wave names, which is exactly why an explicit
  * table beats "pass it through and let Graph 400".
  */
+const SPLIT_GONE_PAGE = 'The organic/paid/viral split is gone; use "page_media_view".';
+const SPLIT_GONE_POST = 'The organic/paid/viral split is gone; use "post_media_view".';
+const PAGE_UNIQUE_GONE =
+  'No unique or split variant survived; "page_total_media_view_unique" counts unique media viewers of the whole Page.';
+const POST_UNIQUE_GONE =
+  'No unique or split variant survived; "post_total_media_view_unique" counts unique media viewers of the post.';
+const PAGE_POSTS_GONE =
+  'The Page-wide post impressions family is gone; use "page_media_view" (or "page_total_media_view_unique" for unique viewers).';
+
+/** Meta names no replacement for the video impressions / unique video views family. */
+const TOTAL_VIDEO_REMOVED = [
+  'total_video_impressions',
+  'total_video_impressions_unique',
+  'total_video_impressions_paid',
+  'total_video_impressions_paid_unique',
+  'total_video_impressions_organic',
+  'total_video_impressions_organic_unique',
+  'total_video_impressions_viral',
+  'total_video_impressions_viral_unique',
+  'total_video_impressions_fan',
+  'total_video_impressions_fan_unique',
+  'total_video_impressions_fan_paid',
+  'total_video_impressions_fan_paid_unique',
+  'total_video_views_unique',
+  'total_video_views_organic_unique',
+  'total_video_views_paid_unique',
+] as const;
+
 const DEPRECATIONS: readonly DeprecatedMetric[] = [
-  // --- 2024-09: fans -> follows -------------------------------------------
-  { metric: 'page_fans', replacement: 'page_follows', removedOn: '2024-09' },
-  { metric: 'page_fan_adds', replacement: 'page_daily_follows', removedOn: '2024-09' },
-  {
-    metric: 'page_fan_adds_unique',
-    replacement: 'page_daily_follows_unique',
-    removedOn: '2024-09',
-  },
-  {
-    metric: 'page_fan_removes',
-    replacement: 'page_daily_unfollows',
-    removedOn: '2024-09',
-  },
-  {
-    metric: 'page_fan_removes_unique',
-    replacement: 'page_daily_unfollows_unique',
-    removedOn: '2024-09',
-  },
+  // --- 2024-09: engaged users / consumptions ------------------------------
   {
     metric: 'page_engaged_users',
     replacement: 'page_post_engagements',
@@ -307,6 +320,29 @@ const DEPRECATIONS: readonly DeprecatedMetric[] = [
     hint: 'Closest surviving signal: "page_post_engagements"; there is no deduplicated variant.',
   },
 
+  // --- 2025-11: fans -> follows -------------------------------------------
+  { metric: 'page_fans', replacement: 'page_follows', removedOn: '2025-11' },
+  { metric: 'page_fan_adds', replacement: 'page_daily_follows', removedOn: '2025-11' },
+  {
+    metric: 'page_fan_adds_unique',
+    replacement: 'page_daily_follows_unique',
+    removedOn: '2025-11',
+  },
+  {
+    metric: 'page_fan_removes',
+    replacement: 'page_daily_unfollows',
+    removedOn: '2025-11',
+    hint: 'Meta\'s current metric reference lists only "page_daily_unfollows_unique"; if Graph rejects "page_daily_unfollows", use that instead.',
+  },
+  {
+    metric: 'page_fan_removes_unique',
+    replacement: 'page_daily_unfollows_unique',
+    removedOn: '2025-11',
+  },
+  { metric: 'page_fans_locale', removedOn: '2025-11' },
+  { metric: 'page_fans_city', removedOn: '2025-11' },
+  { metric: 'page_fans_country', removedOn: '2025-11' },
+
   // --- 2025-11: impressions -> media view (splits removed with it) --------
   { metric: 'page_impressions', replacement: 'page_media_view', removedOn: '2025-11' },
   {
@@ -319,35 +355,110 @@ const DEPRECATIONS: readonly DeprecatedMetric[] = [
     removedOn: '2025-11',
     hint: 'The organic/paid split is gone; paid delivery now lives in the ads insights surface.',
   },
+  { metric: 'page_impressions_viral', removedOn: '2025-11', hint: SPLIT_GONE_PAGE },
+  { metric: 'page_impressions_nonviral', removedOn: '2025-11', hint: SPLIT_GONE_PAGE },
   { metric: 'post_impressions', replacement: 'post_media_view', removedOn: '2025-11' },
-  {
-    metric: 'post_impressions_organic',
-    removedOn: '2025-11',
-    hint: 'The organic/paid/viral split is gone; use "post_media_view".',
-  },
-  {
-    metric: 'post_impressions_paid',
-    removedOn: '2025-11',
-    hint: 'The organic/paid/viral split is gone; use "post_media_view".',
-  },
-  {
-    metric: 'post_impressions_viral',
-    removedOn: '2025-11',
-    hint: 'The organic/paid/viral split is gone; use "post_media_view".',
-  },
+  { metric: 'post_impressions_organic', removedOn: '2025-11', hint: SPLIT_GONE_POST },
+  { metric: 'post_impressions_paid', removedOn: '2025-11', hint: SPLIT_GONE_POST },
+  { metric: 'post_impressions_viral', removedOn: '2025-11', hint: SPLIT_GONE_POST },
+  { metric: 'post_impressions_nonviral', removedOn: '2025-11', hint: SPLIT_GONE_POST },
+  { metric: 'post_impressions_fan', removedOn: '2025-11', hint: SPLIT_GONE_POST },
 
-  // --- 2026-06-15: unique variants + the video-views family ---------------
+  // --- 2026-06-15: unique variants, Page-posts and video impressions ------
   {
     metric: 'page_impressions_unique',
+    replacement: 'page_total_media_view_unique',
     removedOn: '2026-06-15',
     deprecatedAbove: 'v25.0',
-    hint: 'No deduplicated replacement shipped; "page_media_view" is the closest figure (not unique).',
+    hint: '"page_media_view" is the non-deduplicated alternative.',
+  },
+  {
+    metric: 'page_impressions_paid_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_UNIQUE_GONE,
+  },
+  {
+    metric: 'page_impressions_viral_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_UNIQUE_GONE,
+  },
+  {
+    metric: 'page_impressions_nonviral_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_UNIQUE_GONE,
+  },
+  { metric: 'page_posts_impressions', removedOn: '2026-06-15', hint: PAGE_POSTS_GONE },
+  {
+    metric: 'page_posts_impressions_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_paid',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_paid_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_organic_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_viral',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_viral_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_nonviral',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
+  },
+  {
+    metric: 'page_posts_impressions_nonviral_unique',
+    removedOn: '2026-06-15',
+    hint: PAGE_POSTS_GONE,
   },
   {
     metric: 'post_impressions_unique',
+    replacement: 'post_total_media_view_unique',
     removedOn: '2026-06-15',
     deprecatedAbove: 'v25.0',
-    hint: 'No deduplicated replacement shipped; "post_media_view" is the closest figure (not unique).',
+    hint: '"post_media_view" is the non-deduplicated alternative.',
+  },
+  {
+    metric: 'post_impressions_paid_unique',
+    removedOn: '2026-06-15',
+    hint: POST_UNIQUE_GONE,
+  },
+  {
+    metric: 'post_impressions_fan_unique',
+    removedOn: '2026-06-15',
+    hint: POST_UNIQUE_GONE,
+  },
+  {
+    metric: 'post_impressions_organic_unique',
+    removedOn: '2026-06-15',
+    hint: POST_UNIQUE_GONE,
+  },
+  {
+    metric: 'post_impressions_viral_unique',
+    removedOn: '2026-06-15',
+    hint: POST_UNIQUE_GONE,
+  },
+  {
+    metric: 'post_impressions_nonviral_unique',
+    removedOn: '2026-06-15',
+    hint: POST_UNIQUE_GONE,
   },
   {
     metric: 'page_video_views_unique',
@@ -369,6 +480,10 @@ const DEPRECATIONS: readonly DeprecatedMetric[] = [
     removedOn: '2026-06-15',
     hint: 'Neither the unique variant nor the organic/paid split survived; use "post_video_views".',
   },
+  ...TOTAL_VIDEO_REMOVED.map((metric): DeprecatedMetric => ({
+    metric,
+    removedOn: '2026-06-15',
+  })),
 ];
 
 const DEPRECATION_INDEX: ReadonlyMap<string, DeprecatedMetric> = new Map(

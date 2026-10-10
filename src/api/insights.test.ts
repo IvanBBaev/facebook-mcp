@@ -500,16 +500,115 @@ test('classifyMetric suggests the replacement for a renamed metric', () => {
 
   const fans = classifyMetric('page_fans');
   assert.equal(fans.replacement, 'page_follows');
-  assert.match(fans.suggestion ?? '', /2024-09/);
+  // The fans family went in the 2025-11-15 wave (Pages API changelog), not 2024-09.
+  assert.match(fans.suggestion ?? '', /2025-11/);
+  for (const name of [
+    'page_fan_adds',
+    'page_fan_adds_unique',
+    'page_fan_removes',
+    'page_fan_removes_unique',
+  ]) {
+    assert.match(classifyMetric(name).suggestion ?? '', /2025-11/, name);
+  }
 });
 
 test('classifyMetric explains a removed metric that has no replacement', () => {
-  const verdict = classifyMetric('page_impressions_unique');
+  const verdict = classifyMetric('page_impressions_paid_unique');
   assert.equal(verdict.status, 'removed');
   assert.equal(verdict.replacement, undefined);
   assert.match(verdict.suggestion ?? '', /no drop-in replacement/);
-  assert.match(verdict.suggestion ?? '', /v25\.0/);
-  assert.match(verdict.suggestion ?? '', /page_media_view/, 'names the closest figure');
+  assert.match(verdict.suggestion ?? '', /2026-06-15/);
+  assert.match(
+    verdict.suggestion ?? '',
+    /page_total_media_view_unique/,
+    'names the closest figure',
+  );
+});
+
+test('the unique impressions names point at the media-viewers metrics shipped in v25.0', () => {
+  for (const [dead, live, closest] of [
+    ['page_impressions_unique', 'page_total_media_view_unique', 'page_media_view'],
+    ['post_impressions_unique', 'post_total_media_view_unique', 'post_media_view'],
+  ] as const) {
+    const verdict = classifyMetric(dead);
+    assert.equal(verdict.status, 'renamed', dead);
+    assert.equal(verdict.replacement, live);
+    assert.match(verdict.suggestion ?? '', /v25\.0/);
+    assert.match(verdict.suggestion ?? '', new RegExp(`"${closest}"`));
+    assert.doesNotMatch(verdict.suggestion ?? '', /No deduplicated replacement/);
+  }
+});
+
+test('page_fan_removes warns that only the unique unfollows metric is documented', () => {
+  const verdict = classifyMetric('page_fan_removes');
+  assert.equal(verdict.replacement, 'page_daily_unfollows');
+  assert.match(verdict.suggestion ?? '', /page_daily_unfollows_unique/);
+});
+
+test('the 2025-11 and 2026-06-15 removals are all known to the table', () => {
+  const waves: readonly (readonly [string, readonly string[]])[] = [
+    [
+      '2025-11',
+      [
+        'page_fans_locale',
+        'page_fans_city',
+        'page_fans_country',
+        'page_impressions_viral',
+        'page_impressions_nonviral',
+        'post_impressions_fan',
+        'post_impressions_nonviral',
+      ],
+    ],
+    [
+      '2026-06-15',
+      [
+        'page_impressions_paid_unique',
+        'page_impressions_viral_unique',
+        'page_impressions_nonviral_unique',
+        'page_posts_impressions',
+        'page_posts_impressions_unique',
+        'page_posts_impressions_paid',
+        'page_posts_impressions_paid_unique',
+        'page_posts_impressions_organic_unique',
+        'page_posts_impressions_viral',
+        'page_posts_impressions_viral_unique',
+        'page_posts_impressions_nonviral',
+        'page_posts_impressions_nonviral_unique',
+        'post_impressions_paid_unique',
+        'post_impressions_fan_unique',
+        'post_impressions_organic_unique',
+        'post_impressions_viral_unique',
+        'post_impressions_nonviral_unique',
+        'total_video_impressions',
+        'total_video_impressions_unique',
+        'total_video_impressions_paid',
+        'total_video_impressions_paid_unique',
+        'total_video_impressions_organic',
+        'total_video_impressions_organic_unique',
+        'total_video_impressions_viral',
+        'total_video_impressions_viral_unique',
+        'total_video_impressions_fan',
+        'total_video_impressions_fan_unique',
+        'total_video_impressions_fan_paid',
+        'total_video_impressions_fan_paid_unique',
+        'total_video_views_unique',
+        'total_video_views_organic_unique',
+        'total_video_views_paid_unique',
+      ],
+    ],
+  ];
+  for (const [wave, names] of waves) {
+    for (const name of names) {
+      const verdict = classifyMetric(name);
+      assert.equal(verdict.status, 'removed', name);
+      assert.equal(verdict.replacement, undefined, name);
+      assert.match(
+        verdict.suggestion ?? '',
+        new RegExp(`${wave} Meta deprecation wave`),
+        name,
+      );
+    }
+  }
 });
 
 test('classifyMetric passes unknown names through — the table is not a whitelist', () => {

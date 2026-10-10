@@ -1479,9 +1479,14 @@ test('PROBED_PAGE_METRICS agrees with the api layer it may not import', () => {
       'page_daily_follows_unique',
       'page_daily_unfollows',
       'page_daily_unfollows_unique',
+      'page_total_media_view_unique',
       'page_video_views',
     ],
   );
+  // Meta's current reference lists only the unique unfollows metric; the probe
+  // entry has to carry that caveat until a live pass settles it.
+  const unfollows = PROBED_PAGE_METRICS.find((e) => e.metric === 'page_daily_unfollows');
+  assert.match(unfollows?.note ?? '', /page_daily_unfollows_unique/);
 
   // The loop below walks list → api. This walks api → list: every Page-scope name
   // the api layer silently RENAMES a caller into has to be a name the doctor
@@ -1498,6 +1503,7 @@ test('PROBED_PAGE_METRICS agrees with the api layer it may not import', () => {
     'page_fan_removes_unique',
     'page_engaged_users',
     'page_impressions',
+    'page_impressions_unique',
   ]) {
     const verdict = classifyMetric(dead);
     assert.equal(verdict.status, 'renamed', `${dead} should still be a known rename`);

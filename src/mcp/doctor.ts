@@ -193,8 +193,13 @@ export const PROBED_PAGE_METRICS: readonly ProbedMetric[] = [
   { metric: 'page_follows', replaces: ['page_fans'] },
   { metric: 'page_daily_follows', replaces: ['page_fan_adds'] },
   { metric: 'page_daily_follows_unique', replaces: ['page_fan_adds_unique'] },
-  { metric: 'page_daily_unfollows', replaces: ['page_fan_removes'] },
+  {
+    metric: 'page_daily_unfollows',
+    replaces: ['page_fan_removes'],
+    note: "not listed in Meta's current metric reference (only page_daily_unfollows_unique is); if Graph rejects it, point page_fan_removes at page_daily_unfollows_unique",
+  },
   { metric: 'page_daily_unfollows_unique', replaces: ['page_fan_removes_unique'] },
+  { metric: 'page_total_media_view_unique', replaces: ['page_impressions_unique'] },
   {
     metric: 'page_video_views',
     note: 'the *_unique variant was retired with no deduplicated replacement',

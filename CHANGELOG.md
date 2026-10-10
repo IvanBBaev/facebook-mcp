@@ -187,6 +187,18 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   `reach`) and hourly breakdowns reach back 13 months, frequency breakdowns 6.
   The `since` description now says so.
 
+- **The insights metric table lagged Meta's 2025-11 and 2026-06-15 removals.**
+  39 more retired names (`page_fans_{locale,city,country}`, the remaining
+  impressions splits and unique variants, the `page_posts_impressions*` and
+  `total_video_impressions*` families, `total_video_views_*_unique`) now get a
+  "removed" verdict instead of a Graph error round-trip. `page_impressions_unique`
+  and `post_impressions_unique` now point at the v25.0 media-viewers metrics
+  `page_total_media_view_unique` / `post_total_media_view_unique` (the doctor
+  probes the Page one) instead of claiming no deduplicated replacement exists.
+  The fans family is dated to the 2025-11 wave, not 2024-09, and
+  `page_fan_removes` / the doctor's `page_daily_unfollows` probe warn that Meta's
+  reference now lists only `page_daily_unfollows_unique` (doc 12, M1–M3, L1).
+
 - **A SIGINT/SIGTERM sent right after the `facebook-mcp server started` line
   could kill the server uncleanly.** The readiness line was logged before the
   shutdown handlers were registered, so a supervisor reacting to it at once hit
