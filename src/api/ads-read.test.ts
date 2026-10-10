@@ -882,7 +882,7 @@ test('fetchAdsInsights accepts a one-day window and a span wider than 90 days', 
     '{"since":"2026-07-07","until":"2026-07-07"}',
   );
 
-  // Ads insights reach back up to 37 months; the Page-side 90-day cap must not leak in.
+  // Ads insights totals reach back up to 37 months; the Page-side 90-day cap must not leak in.
   await fetchAdsInsights(fake.fn, {
     objectId: ACCOUNT,
     since: '2025-01-01',

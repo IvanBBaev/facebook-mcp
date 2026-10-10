@@ -198,7 +198,7 @@ const sinceArg = z
   .min(1)
   .optional()
   .describe(
-    'Window start as "YYYY-MM-DD" (inclusive, ad-account timezone). Must be paired with `until` and may not be after it — a lone end, a reversed window or a date in any other form is rejected before the request. No per-call span cap: ads insights reach back up to 37 months.',
+    'Window start as "YYYY-MM-DD" (inclusive, ad-account timezone). Must be paired with `until` and may not be after it — a lone end, a reversed window or a date in any other form is rejected before the request. No per-call span cap: totals reach back up to 37 months, but unique-count fields (possibly `reach`) and hourly breakdowns only 13 months and frequency breakdowns only 6.',
   );
 
 const untilArg = z

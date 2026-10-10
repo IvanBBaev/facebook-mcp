@@ -999,7 +999,9 @@ const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
  * malformed or reversed `time_range` with a bare 400 "Invalid parameter" that
  * names neither end, so the shape is checked here, before the request. Mirrors
  * the Page-insights guard (`api/insights.ts`) minus its 90-day ceiling: ads
- * insights reach back up to 37 months and are not capped per call.
+ * insights are not capped per call. Totals reach back up to 37 months; since
+ * 2026-01-12 unique-count fields and hourly breakdowns reach 13 months and
+ * frequency breakdowns 6, which Graph enforces itself.
  */
 function parseWindowDate(label: 'since' | 'until', value: string): number {
   if (!DATE_ONLY.test(value)) {

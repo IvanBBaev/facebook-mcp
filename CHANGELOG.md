@@ -182,6 +182,11 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
 
 ### Fixed
 
+- **`facebook_ads_insights` promised a 37-month lookback for every field.** Since
+  2026-01-12 Meta keeps 37 months only for totals: unique-count fields (possibly
+  `reach`) and hourly breakdowns reach back 13 months, frequency breakdowns 6.
+  The `since` description now says so.
+
 - **A SIGINT/SIGTERM sent right after the `facebook-mcp server started` line
   could kill the server uncleanly.** The readiness line was logged before the
   shutdown handlers were registered, so a supervisor reacting to it at once hit
