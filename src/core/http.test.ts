@@ -24,6 +24,7 @@ import {
 import { NON_JSON_BODY_MAX, PROXY_ENV_HINT } from './errors.js';
 import { DEFAULT_THROTTLE_RETRY_AFTER_MS } from './error-matrix.js';
 import { createRedactor } from './redact.js';
+import { createVersionDriftMonitor, VERSION_DRIFT_LOG_MSG } from './version-drift.js';
 import { GraphApiError } from './index.js';
 import type {
   FbRequest,
@@ -3241,4 +3242,176 @@ test('usageOfGraphError stops following re-wrapped errors after a bounded depth'
     });
   }
   assert.equal(usageOfGraphError(err), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// API-version drift headers (doc 12 H1, runbook app-upkeep §2)
+// ---------------------------------------------------------------------------
+
+const AUTO_UPGRADE_NOTICE =
+  'The call has been auto-upgraded to v26.0 as v25.0 has been deprecated';
+
+function driftEntries(logger: TestLogger): readonly RecordedLog[] {
+  return logger.entries.filter((entry) => entry.msg === VERSION_DRIFT_LOG_MSG);
+}
+
+test('X-Ad-Api-Version-Warning is logged once as a warn and never fails the call', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    for (let i = 0; i < 3; i += 1) {
+      mock.enqueue({
+        json: { id: 'act_1' },
+        headers: { 'X-Ad-Api-Version-Warning': AUTO_UPGRADE_NOTICE },
+      });
+    }
+    const logger = createTestLogger();
+    const fbRequest = createFbRequest(
+      makeDeps({ logger, settings: makeSettings({ adsApiVersion: 'v25.0' }) }),
+    );
+    for (let i = 0; i < 3; i += 1) {
+      const res = await fbRequest<{ id: string }>({
+        protocol: 'json',
+        host: 'graph',
+        method: 'GET',
+        path: '/act_1',
+        api: 'marketing',
+      });
+      assert.deepEqual(res.data, { id: 'act_1' });
+      // The raw header still rides the envelope.
+      assert.equal(res.headers['x-ad-api-version-warning'], AUTO_UPGRADE_NOTICE);
+    }
+    const entries = driftEntries(logger);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.level, 'warn');
+    assert.equal(entries[0]?.fields?.['kind'], 'ad-api-version-warning');
+    assert.equal(entries[0]?.fields?.['requestedVersion'], 'v25.0');
+    assert.equal(entries[0]?.fields?.['api'], 'marketing');
+  });
+});
+
+test('a served facebook-api-version that differs from the pin is logged as a mismatch', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: {}, headers: { 'facebook-api-version': 'v21.0' } });
+    mock.enqueue({ json: {}, headers: { 'facebook-api-version': 'v22.0' } });
+    const logger = createTestLogger();
+    const fbRequest = createFbRequest(makeDeps({ logger }));
+    // Served == requested (Graph pin v21.0): no signal.
+    await fbRequest({ protocol: 'json', host: 'graph', method: 'GET', path: '/me' });
+    assert.equal(driftEntries(logger).length, 0);
+    // Graph substituted another version: one signal, call still answered.
+    const res = await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/me',
+    });
+    assert.equal(res.status, 200);
+    const entries = driftEntries(logger);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.fields?.['kind'], 'served-version-mismatch');
+    assert.equal(entries[0]?.fields?.['value'], 'v22.0');
+    assert.equal(entries[0]?.fields?.['requestedVersion'], 'v21.0');
+  });
+});
+
+test('a path-forced version is what the served version is compared against', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({ json: {}, headers: { 'facebook-api-version': 'v19.0' } });
+    const logger = createTestLogger();
+    const fbRequest = createFbRequest(makeDeps({ logger }));
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/v19.0/act_1/campaigns',
+    });
+    assert.equal(driftEntries(logger).length, 0);
+  });
+});
+
+test('a drift header on an error response is still observed, and the error is the Graph one', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      status: 400,
+      headers: { 'x-ad-api-version-warning': AUTO_UPGRADE_NOTICE },
+      json: {
+        error: { message: 'Invalid parameter', type: 'OAuthException', code: 100 },
+      },
+    });
+    const logger = createTestLogger();
+    const versionDrift = createVersionDriftMonitor({
+      logger,
+      redactor: createFakeRedactor(),
+    });
+    const fbRequest = createFbRequest(
+      makeDeps({ logger, versionDrift, retry: { maxRetries: 0 } }),
+    );
+    await assert.rejects(
+      fbRequest({
+        protocol: 'json',
+        host: 'graph',
+        method: 'GET',
+        path: '/act_1',
+        api: 'marketing',
+      }),
+      (err: unknown) => err instanceof GraphApiError && err.code === 100,
+    );
+    assert.equal(versionDrift.signals().length, 1);
+    assert.equal(driftEntries(logger).length, 1);
+  });
+});
+
+test('the drift warn is redacted: a credential echoed in the header never reaches the log (C3)', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      json: {},
+      headers: { 'x-ad-api-version-warning': `auto-upgraded (token ${TOKEN})` },
+    });
+    const logger = createTestLogger();
+    const fbRequest = createFbRequest(makeDeps({ logger }));
+    await fbRequest({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/act_1',
+      api: 'marketing',
+    });
+    const entries = driftEntries(logger);
+    assert.equal(entries.length, 1);
+    assert.ok(!JSON.stringify(entries).includes(TOKEN));
+  });
+});
+
+test('one injected monitor dedupes across two clients (the shared per-process instance)', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      json: {},
+      headers: { 'x-ad-api-version-warning': AUTO_UPGRADE_NOTICE },
+    });
+    mock.enqueue({
+      json: {},
+      headers: { 'x-ad-api-version-warning': AUTO_UPGRADE_NOTICE },
+    });
+    const logger = createTestLogger();
+    const versionDrift = createVersionDriftMonitor({
+      logger,
+      redactor: createFakeRedactor(),
+    });
+    const a = createFbRequest(makeDeps({ logger, versionDrift }));
+    const b = createFbRequest(makeDeps({ logger, versionDrift }));
+    await a({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/act_1',
+      api: 'marketing',
+    });
+    await b({
+      protocol: 'json',
+      host: 'graph',
+      method: 'GET',
+      path: '/act_2',
+      api: 'marketing',
+    });
+    assert.equal(driftEntries(logger).length, 1);
+  });
 });

@@ -95,10 +95,19 @@ export function rehearsalEnv({ origin, fake, dirs }) {
  * Run one rehearsal. Resolves with the harness's exit code, its output and the
  * fake's request log; never throws for a failing smoke (that is data).
  *
- * @param {{ args?: string[], timeoutMs?: number, echo?: boolean }} [opts]
+ * `adVersionWarning` makes the fake send `X-Ad-Api-Version-Warning` on every
+ * ad-account answer (see `startFakeGraph`), so a test can prove the ads smokes
+ * flag a deprecated Marketing API pin.
+ *
+ * @param {{ args?: string[], timeoutMs?: number, echo?: boolean, adVersionWarning?: string }} [opts]
  */
-export async function rehearse({ args = [], timeoutMs = 120_000, echo = false } = {}) {
-  const fake = await startFakeGraph();
+export async function rehearse({
+  args = [],
+  timeoutMs = 120_000,
+  echo = false,
+  adVersionWarning,
+} = {}) {
+  const fake = await startFakeGraph({ adVersionWarning });
   const root = mkdtempSync(join(tmpdir(), 'fb-smoke-rehearsal-'));
   const dirs = {
     home: join(root, 'home'),

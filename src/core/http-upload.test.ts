@@ -8,6 +8,7 @@ import {
   type UploadHandlerDeps,
 } from './http-upload.js';
 import { createFbRequest, computeAppSecretProof, createHostSemaphores } from './http.js';
+import { createVersionDriftMonitor } from './version-drift.js';
 import { GraphApiError } from './index.js';
 import type {
   FbResponse,
@@ -2212,4 +2213,39 @@ test('uploads surface the regain-access ETA a business-use-case throttle names i
       assert.equal(mock.requests.length, 1, label);
     });
   }
+});
+
+test('multipart: a version-drift header is observed and the upload still succeeds', async () => {
+  await withFetch(async (mock: FetchMock) => {
+    mock.enqueue({
+      json: { id: 'photo_1' },
+      headers: { 'facebook-api-version': 'v22.0' },
+    });
+    const logger = createTestLogger();
+    const versionDrift = createVersionDriftMonitor({
+      logger,
+      redactor: createFakeRedactor(),
+    });
+    const handler = createUploadHandler(makeDeps({ logger, versionDrift }));
+    const res = await handler({
+      protocol: 'multipart',
+      host: 'graph',
+      method: 'POST',
+      path: '/me/photos',
+      fields: {},
+      files: [
+        {
+          name: 'source',
+          data: PHOTO_BYTES,
+          filename: 'pic.jpg',
+          contentType: 'image/jpeg',
+        },
+      ],
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(
+      versionDrift.signals().map((s) => [s.kind, s.value, s.requestedVersion]),
+      [['served-version-mismatch', 'v22.0', 'v21.0']],
+    );
+  });
 });

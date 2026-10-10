@@ -215,9 +215,16 @@ function parseBody(buffer, contentType = '') {
 /**
  * Start the fake. Resolves once it listens on 127.0.0.1 with an ephemeral port.
  *
- * @param {{ now?: () => number }} [opts]
+ * Every Graph-host answer carries `facebook-api-version` equal to the version
+ * the request named, as the real Graph does for a version it still serves — so
+ * a rehearsal exercises the server's version-drift check and expects silence
+ * from it. `adVersionWarning`, when set, is sent as `X-Ad-Api-Version-Warning`
+ * on every ad-account (`/act_…`) answer: the test switch for the signal Meta
+ * sends when it auto-upgrades a call on a deprecated Marketing API version.
+ *
+ * @param {{ now?: () => number, adVersionWarning?: string }} [opts]
  */
-export async function startFakeGraph({ now = () => Date.now() } = {}) {
+export async function startFakeGraph({ now = () => Date.now(), adVersionWarning } = {}) {
   const ids = REHEARSAL_IDS;
   const requests = [];
   const unhandled = [];
@@ -994,8 +1001,18 @@ export async function startFakeGraph({ now = () => Date.now() } = {}) {
     }
 
     record.status = answer.status;
+    const versionHeaders = {};
+    if (version !== null) versionHeaders['facebook-api-version'] = version;
+    if (
+      adVersionWarning !== undefined &&
+      version !== null &&
+      segments[0]?.startsWith('act_') === true
+    ) {
+      versionHeaders['x-ad-api-version-warning'] = adVersionWarning;
+    }
     res.writeHead(answer.status, {
       'content-type': 'application/json; charset=UTF-8',
+      ...versionHeaders,
       ...(answer.headers ?? {}),
     });
     res.end(JSON.stringify(answer.body));

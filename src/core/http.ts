@@ -55,6 +55,11 @@ import {
   type GraphErrorEnvelope,
 } from './errors.js';
 import { GraphApiError, USAGE_HEADERS } from './types.js';
+import {
+  createVersionDriftMonitor,
+  pathApiVersion,
+  type VersionDriftMonitor,
+} from './version-drift.js';
 import type {
   ApiFamily,
   Clock,
@@ -106,6 +111,14 @@ export interface FbRequestDeps {
   readonly uploadHandler?: FbRequestFn;
   /** Sink fed the parsed usage snapshot on every response (proactive backoff). */
   readonly onUsage?: (snapshot: UsageSnapshot) => void;
+  /**
+   * Reads the API-version headers (`X-Ad-Api-Version-Warning`, a served
+   * `facebook-api-version` that differs from the requested one) on every
+   * response and logs each distinct signal once. Pass the same instance to the
+   * upload handler and to `doctor` so one process dedupes, and reports, one
+   * set. Defaults to a fresh monitor over `logger` / `redactor`.
+   */
+  readonly versionDrift?: VersionDriftMonitor;
   /** Deterministic RNG seam for backoff jitter (default `Math.random`). */
   readonly rng?: () => number;
   /** Retry-loop overrides. */
@@ -1196,6 +1209,8 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
   const { settings, clock, redactor, logger } = deps;
   const rng = deps.rng ?? Math.random;
   const semaphores = deps.semaphores ?? createHostSemaphores(settings.hostConcurrency);
+  const versionDrift =
+    deps.versionDrift ?? createVersionDriftMonitor({ logger, redactor });
   const retry: RetryConfig = {
     maxRetries: deps.retry?.maxRetries ?? DEFAULT_MAX_RETRIES,
     baseDelayMs: deps.retry?.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
@@ -1296,7 +1311,10 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
       }
     }
 
-    const url = buildUrl(hostname, req.path, apiVersionFor(settings, req.api), query);
+    const pinnedVersion = apiVersionFor(settings, req.api);
+    const url = buildUrl(hostname, req.path, pinnedVersion, query);
+    // A path that names its own version is sent as written (see `buildUrl`).
+    const requestedVersion = pathApiVersion(req.path) ?? pinnedVersion;
     const headers: Record<string, string> = {
       // Token via Bearer header ONLY — never the query string (C3).
       authorization: `Bearer ${token}`,
@@ -1356,6 +1374,7 @@ export function createFbRequest(deps: FbRequestDeps): FbRequestFn {
 
         const responseHeaders = extractResponseHeaders(response);
         feedUsage(responseHeaders);
+        versionDrift.observe(responseHeaders, requestedVersion, req.api);
 
         if (isRedirect(response)) {
           await discardBody(response);

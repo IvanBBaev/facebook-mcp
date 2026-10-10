@@ -121,6 +121,78 @@ export function createStderrTail(limit = STDERR_TAIL_BYTES) {
   };
 }
 
+/** The structured log message the server writes a version-drift warn under. */
+export const VERSION_DRIFT_LOG_MSG = 'fbRequest.versionDrift';
+
+/**
+ * Collects the server's API-version drift warns (`fbRequest.versionDrift`, see
+ * src/core/version-drift.ts) from its stderr. The server already dedupes them
+ * per process and redacts the value; this re-scrubs anyway, because nothing
+ * read off a child's stderr is printed by this harness unscrubbed.
+ *
+ * Line-buffered like {@link createStderrTail}, for the same reason: the server
+ * writes one JSON document per line, and a pipe chunk can end mid-line. A line
+ * that is not JSON, or not this message, is ignored. Pure (no I/O), exported
+ * for tests.
+ */
+export function createVersionDriftCollector() {
+  const signals = [];
+  const seen = new Set();
+  let pending = '';
+
+  const consider = (line) => {
+    if (!line.includes(VERSION_DRIFT_LOG_MSG)) return;
+    let doc;
+    try {
+      doc = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (doc === null || typeof doc !== 'object' || doc.msg !== VERSION_DRIFT_LOG_MSG)
+      return;
+    const text = (value) => (typeof value === 'string' ? clip(scrub(value), 300) : '');
+    const signal = {
+      kind: text(doc.kind),
+      header: text(doc.header),
+      value: text(doc.value),
+      requestedVersion: text(doc.requestedVersion),
+      api: text(doc.api),
+    };
+    const key = `${signal.header}\u0000${signal.value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    signals.push(signal);
+  };
+
+  return {
+    append(chunk) {
+      pending += chunk;
+      let nl = pending.indexOf('\n');
+      while (nl !== -1) {
+        consider(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+        nl = pending.indexOf('\n');
+      }
+      // A drift line is a few hundred bytes; anything this long is not one.
+      if (pending.length > STDERR_TAIL_BYTES) pending = '';
+    },
+    /** Every distinct signal seen so far, first-seen order. */
+    signals: () => [...signals],
+  };
+}
+
+/**
+ * One operator line for a collected drift signal. The fallback named for the
+ * Marketing API is the documented one (docs/runbooks/app-upkeep.md §2).
+ */
+export function describeVersionDriftSignal(signal) {
+  const fix =
+    signal.api === 'marketing'
+      ? 'move the ads pin, or set FB_ADS_API_VERSION=v25.0 as the fallback'
+      : 'move the Graph pin (FB_API_VERSION)';
+  return `${signal.header}: "${signal.value}" (requested ${signal.requestedVersion}, ${signal.api}) — ${fix}; see docs/runbooks/app-upkeep.md §2`;
+}
+
 /**
  * Unwrap the canonical taint envelope (`{__tainted, source, content, warning}`)
  * that visitor-authorable payloads travel in (B1 / CC-MOD-8). A smoke asserting
@@ -226,6 +298,7 @@ export async function startSmokeClient(opts) {
 
   const tail = createStderrTail();
   const stderrTail = () => tail.read();
+  const drift = createVersionDriftCollector();
 
   // Attached BEFORE `connect`, on purpose. `StdioClientTransport` hands out its
   // stderr `PassThrough` immediately — before the child is even spawned —
@@ -237,6 +310,7 @@ export async function startSmokeClient(opts) {
     transport.stderr.setEncoding('utf8');
     transport.stderr.on('data', (chunk) => {
       tail.append(String(chunk));
+      drift.append(String(chunk));
       log.debug(`server: ${String(chunk).trimEnd()}`);
     });
   }
@@ -392,6 +466,8 @@ export async function startSmokeClient(opts) {
     /** A position in the answer log; pass it to `answeredTools` later. */
     callMark: () => answered.mark(),
     stderrTail,
+    /** The server's API-version drift warns seen so far (see the collector). */
+    versionDrift: () => drift.signals(),
     close: async () => {
       try {
         await client.close();

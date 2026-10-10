@@ -45,6 +45,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  describeVersionDriftSignal,
   startSmokeClient,
   unwrapTainted,
   SmokeSetupError,
@@ -353,6 +354,10 @@ async function runOneSmoke(smoke, { session, cfg, nonce, log, timeoutMs, control
     callToolRaw: session.callToolRaw,
     applyWrite: session.applyWrite,
     listTools: session.listTools,
+    // The server's API-version drift warns so far (X-Ad-Api-Version-Warning, a
+    // served facebook-api-version that differs from the pin). A session double
+    // without the seam reports none.
+    versionDrift: () => session.versionDrift?.() ?? [],
     unwrap: unwrapTainted,
     signal: controller.signal,
     log,
@@ -415,6 +420,7 @@ function printSummary({
   keep,
   coverage,
   coverageIsFullSurface,
+  versionDrift = [],
 }) {
   const passed = results.filter((r) => r.status === 'passed').length;
   const failed = results.filter((r) => r.status === 'failed');
@@ -466,6 +472,12 @@ function printSummary({
     }
   }
   log.info(`marker   ${markerFor(nonce)}`);
+  // Advisory, not an exit-code input on its own: the calls were answered. It is
+  // the last notice before Meta stops answering on the pinned version, so it is
+  // printed for every run that saw it — the ads smokes fail on it themselves.
+  for (const signal of versionDrift) {
+    log.warn(`api      VERSION DRIFT ${clip(describeVersionDriftSignal(signal), 400)}`);
+  }
   for (const result of failed) {
     log.fail(`${result.smoke.id}: ${clip(result.error ?? 'failed', 300)}`);
   }
@@ -765,6 +777,7 @@ async function main() {
     coverage,
     coverageIsFullSurface:
       !args.sweepOnly && args.only.length === 0 && args.phases.length === 0,
+    versionDrift: session.versionDrift?.() ?? [],
   });
 
   const tail = session.stderrTail();

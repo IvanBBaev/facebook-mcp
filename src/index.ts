@@ -50,6 +50,7 @@ import {
   createFbRequest,
   createHostSemaphores,
   createUploadHandler,
+  createVersionDriftMonitor,
   usageOfGraphError,
   createLogger,
   createPagesRegistry,
@@ -77,6 +78,7 @@ import {
   type ToolResult,
   type ToolSpec,
   type UsageSnapshot,
+  type VersionDriftMonitor,
   type WriteMode,
 } from './core/index.js';
 import {
@@ -1350,7 +1352,9 @@ export function serverStartedFields(
  * handler wired in, both sharing ONE per-host semaphore set so upload traffic
  * and JSON calls honor a single concurrency budget. Without the upload handler
  * every local-file photo, video chunk and reel upload rejects before it is sent.
- * `onUsage` receives the usage headers of every response on both paths.
+ * `onUsage` receives the usage headers of every response on both paths, and
+ * ONE `versionDrift` monitor reads the version headers on both, so a drift
+ * signal is logged once per process however many calls carry it.
  */
 export function createTransport(deps: {
   readonly settings: Settings;
@@ -1358,10 +1362,14 @@ export function createTransport(deps: {
   readonly redactor: Redactor;
   readonly logger: Logger;
   readonly onUsage?: (snapshot: UsageSnapshot) => void;
+  readonly versionDrift?: VersionDriftMonitor;
 }): FbRequestFn {
+  const versionDrift =
+    deps.versionDrift ??
+    createVersionDriftMonitor({ logger: deps.logger, redactor: deps.redactor });
   const semaphores = createHostSemaphores(deps.settings.hostConcurrency);
-  const uploadHandler = createUploadHandler({ ...deps, semaphores });
-  return createFbRequest({ ...deps, semaphores, uploadHandler });
+  const uploadHandler = createUploadHandler({ ...deps, semaphores, versionDrift });
+  return createFbRequest({ ...deps, semaphores, uploadHandler, versionDrift });
 }
 
 /**
@@ -1409,12 +1417,16 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
   // Every Graph response feeds facebook_usage, not only its own `/me` probe:
   // the probe never carries the Page and ads buckets that throttle real work.
   const usageTracker = createUsageTracker();
+  // One version-drift monitor per process: the transport logs each distinct
+  // signal once, and `doctor` reports what its own probes saw.
+  const versionDrift = createVersionDriftMonitor({ logger, redactor });
   const fbRequest = createTransport({
     settings,
     clock,
     redactor,
     logger,
     onUsage: usageTracker.record,
+    versionDrift,
   });
   const journal = createJournal({ clock, redactor, journalPath: settings.journalPath });
   const pages = createPagesRegistry({ settings, fbRequest, clock, redactor, logger });
@@ -1456,6 +1468,7 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
         serverVersion,
         metricProbe: metricProbe(pages),
         adAccountProbe: adAccountProbe(),
+        versionDrift,
         launchCommand,
       },
       process.argv.slice(3),

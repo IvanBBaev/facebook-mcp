@@ -21,6 +21,21 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
   while keeping every JSON type. Without `FB_AD_ACCOUNT_ID` it skips cleanly
   (exit `0`, no call, no file). The fixture-lint now also walks subdirectories
   of `test/fixtures/`. The bump steps in `docs/runbooks/app-upkeep.md` §2 use it.
+
+- **A deprecated API version was only visible after Meta started rejecting
+  calls.** The HTTP client (JSON and multipart) now watches every response for
+  two signals. The first is `X-Ad-Api-Version-Warning`, which Meta sends when it
+  auto-upgrades a call made on a deprecated Marketing API version. The second is
+  a served `facebook-api-version` that differs from the requested version (that
+  header is undocumented by Meta). The client logs one redacted structured warn
+  (`fbRequest.versionDrift`) per (header, value) per process and never fails the
+  request. `doctor` turns each signal into an `api version` warn finding plus a
+  `VERSION DRIFT` line in its Server block. The live smoke summary lists the
+  signals, and `ads/read-surface` and `ads/hierarchy` fail on a Marketing API
+  signal. The rehearsal fake can emit the warning (`adVersionWarning`) so that
+  path is tested offline. Documented in `docs/runbooks/app-upkeep.md` §2,
+  including the `FB_ADS_API_VERSION=v25.0` stopgap.
+
 - **The `FB_API_VERSION` bump procedure had no tool for its shape-diff step.**
   `npm run fixtures:shape-diff -- --baseline <dir|file> --candidate <dir|file>`
   (`scripts/fixture-shape-diff.mjs`) compares two Graph fixture sets by keys and

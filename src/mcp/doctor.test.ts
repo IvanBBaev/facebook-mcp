@@ -19,7 +19,12 @@ import {
   fbOk,
   type FakeFbRequest,
 } from '../core/fakes/index.js';
-import { GraphApiError, PROXY_ENV_HINT, classifyNetworkError } from '../core/index.js';
+import {
+  GraphApiError,
+  PROXY_ENV_HINT,
+  classifyNetworkError,
+  createVersionDriftMonitor,
+} from '../core/index.js';
 import type {
   JsonRequest,
   Logger,
@@ -3146,4 +3151,86 @@ test('metric-set probe: an FB_PAGE_TOKEN install reads with that token and deriv
     false,
     'with no base token there is nothing to derive from',
   );
+});
+
+// ---------------------------------------------------------------------------
+// API-version drift (doc 12 H1, runbook app-upkeep §2)
+// ---------------------------------------------------------------------------
+
+const AUTO_UPGRADE =
+  'The call has been auto-upgraded to v26.0 as v25.0 has been deprecated';
+
+const HEALTHY_DEBUG_TOKEN = {
+  type: 'SYSTEM_USER',
+  is_valid: true,
+  scopes: ['pages_show_list', 'pages_read_engagement'],
+  expires_at: 0,
+};
+
+test('a version header seen by the ad-account probe is a warn finding and a Server line', async () => {
+  const versionDrift = createVersionDriftMonitor({
+    logger: makeLogger(),
+    redactor: createFakeRedactor(),
+  });
+  // Stands in for the transport: the real probe's Graph call is what observes.
+  const probe: AdAccountProbe = () => {
+    versionDrift.observe(
+      { 'x-ad-api-version-warning': AUTO_UPGRADE },
+      'v25.0',
+      'marketing',
+    );
+    return Promise.resolve({ available: true, summary: 'ad account act_1: ACTIVE' });
+  };
+  const { fb, deps } = makeDeps({ adAccountProbe: probe });
+  withDebugToken(fb, HEALTHY_DEBUG_TOKEN);
+
+  const report = await runDoctor({ ...deps, versionDrift });
+  assert.equal(report.versionDrift?.length, 1, 'read AFTER the probes ran');
+  assert.equal(report.summary.verdict, 'warn');
+  const finding = report.summary.findings.find((f) => f.area === 'api version');
+  assert.ok(finding, 'expected an api version finding');
+  assert.equal(finding.severity, 'warn');
+  assert.match(finding.detail, /x-ad-api-version-warning/);
+  assert.match(finding.detail, /FB_ADS_API_VERSION/);
+  assert.equal(doctorExitCode(report.summary.verdict, true), 1);
+
+  const text = renderDoctorReport(report);
+  const server = text.slice(0, text.indexOf('\nToken\n'));
+  assert.match(
+    server,
+    / {2}VERSION DRIFT: x-ad-api-version-warning: "The call has been auto-upgraded/,
+  );
+});
+
+test('a wired monitor that saw nothing adds no finding and no Server line', async () => {
+  const { fb, deps } = makeDeps();
+  withDebugToken(fb, HEALTHY_DEBUG_TOKEN);
+  const wired = await runDoctor({ ...deps, versionDrift: { signals: () => [] } });
+  assert.deepEqual(wired.versionDrift, []);
+  assert.equal(wired.summary.verdict, 'ok');
+  assert.ok(!renderDoctorReport(wired).includes('VERSION DRIFT'));
+  // Unwired: the field is absent and the verdict unchanged.
+  const unwired = await healthyReport();
+  assert.equal(unwired.versionDrift, undefined);
+  assert.equal(unwired.summary.verdict, 'ok');
+});
+
+test('a served-version mismatch names the Graph knob in the finding', async () => {
+  const base = await healthyReport();
+  const summary = summarizeDoctor({
+    ...base,
+    versionDrift: [
+      {
+        kind: 'served-version-mismatch',
+        header: 'facebook-api-version',
+        value: 'v24.0',
+        requestedVersion: 'v23.0',
+        api: 'graph',
+      },
+    ],
+  });
+  assert.equal(summary.verdict, 'warn');
+  const finding = summary.findings.find((f) => f.area === 'api version');
+  assert.match(finding?.detail ?? '', /FB_API_VERSION/);
+  assert.match(finding?.detail ?? '', /requested v23\.0, Graph API/);
 });

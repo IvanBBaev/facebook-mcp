@@ -34,6 +34,7 @@ import {
   GraphApiError,
   createPagesRegistry,
   debugToken,
+  describeVersionDrift,
   envFilePath,
   errorMessageOf,
   statFileProtection,
@@ -48,6 +49,7 @@ import {
   type Settings,
   type StartupProblem,
   type TokenType,
+  type VersionDriftSignal,
 } from '../core/index.js';
 import { DEFAULT_LAUNCH_COMMAND, subcommandHint } from './launch-command.js';
 
@@ -582,6 +584,13 @@ export interface DoctorReport {
   readonly adAccount: MetricProbeReport;
   /** Observed permissions of the credential file on disk (CC-CFG-4). */
   readonly credentialFile: CredentialFileReport;
+  /**
+   * API-version drift the doctor's own Graph calls saw (redacted): an
+   * `X-Ad-Api-Version-Warning` from the Marketing API, or a served
+   * `facebook-api-version` that differs from the pin. Absent when no monitor
+   * was wired; empty when the probes saw none.
+   */
+  readonly versionDrift?: readonly VersionDriftSignal[];
   /** The one-line verdict over everything above, derived by {@link summarizeDoctor}. */
   readonly summary: DoctorSummary;
 }
@@ -617,6 +626,13 @@ export interface DoctorDeps {
   readonly metricProbe?: MetricProbe;
   /** Optional ad-account health probe (V09). Absent ⇒ "not checked". */
   readonly adAccountProbe?: AdAccountProbe;
+  /**
+   * The process's version-drift monitor — the SAME instance the `fbRequest`
+   * transport observes into. Read after every probe has run, so the report
+   * names any version header the doctor's own calls carried. Absent ⇒ the
+   * report has no `versionDrift` field.
+   */
+  readonly versionDrift?: { signals(): readonly VersionDriftSignal[] };
   /**
    * How the operator launched this binary (`npx -y <package>`, `facebook-mcp`,
    * `node build/index.js` — see `resolveLaunchCommand`), so a finding that
@@ -1805,6 +1821,22 @@ function configurationFindings(
 }
 
 /**
+ * A version header is a `warn`, never a `fail`: the call it rode on was
+ * answered. But it is the last notice before Meta stops answering on that
+ * version — the Marketing API rejects a changed endpoint with `#2635` once it
+ * has auto-upgraded the call — so `--strict` must not wave it through as `ok`.
+ */
+function versionDriftFindings(
+  signals: readonly VersionDriftSignal[] | undefined,
+): DoctorFinding[] {
+  return (signals ?? []).map((signal) => ({
+    severity: 'warn',
+    area: 'api version',
+    detail: describeVersionDrift(signal),
+  }));
+}
+
+/**
  * Reduce a finished report to one verdict.
  *
  * Exported (and taking the report minus its own summary) so the rule set is
@@ -1823,6 +1855,7 @@ export function summarizeDoctor(
     ...metricSetFindings(report.metricSet),
     ...probeFindings(report.metricProbe, 'metric probe'),
     ...probeFindings(report.adAccount, 'ad account'),
+    ...versionDriftFindings(report.versionDrift),
   ].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
 
   const verdict = findings.reduce<DoctorVerdict>(
@@ -1941,6 +1974,11 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             'ad account: not checked (the ads package is off — enable it and set FB_AD_ACCOUNT_ID to diagnose ad-account health).',
           ),
     credentialFile: await inspectCredentialFile(deps),
+    // Last on purpose: every Graph call above has been made, so the monitor
+    // holds whatever version headers they carried.
+    ...(deps.versionDrift !== undefined
+      ? { versionDrift: deps.versionDrift.signals() }
+      : {}),
   };
   return { ...report, summary: summarizeDoctor(report, deps.launchCommand) };
 }
@@ -2166,6 +2204,13 @@ export function renderDoctorReport(report: DoctorReport): string {
     `  Ads API:      ${report.adsApiVersion} (Marketing API, ads package)`,
     `  generated at: ${iso(report.generatedAt)}`,
   ];
+  for (const signal of report.versionDrift ?? []) {
+    // Under the pins they contradict: the operator reads "Ads API: v26.0" and,
+    // directly beneath it, that Meta answered on something else.
+    lines.push(
+      `  VERSION DRIFT: ${signal.header}: "${signal.value}" (requested ${signal.requestedVersion})`,
+    );
+  }
   // The same set the findings use, so the block and the verdict name the same
   // blockers (a missing credential is the token block's line, not this one's).
   const startupErrors = (report.startupProblems ?? []).filter(

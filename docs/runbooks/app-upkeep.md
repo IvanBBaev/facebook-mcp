@@ -78,6 +78,50 @@ long before the Graph pin does. See
 [`../analysis/12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md)
 (finding H1 is why the pins were split).
 
+### When the server reports API-version drift
+
+The HTTP client inspects every Graph and Marketing API response (successes and
+errors alike) for two signals that a pin is aging out. It never fails a request
+because of them. The client logs each distinct (header, value) pair once per
+process as a structured `warn` with `msg: "fbRequest.versionDrift"`. The log
+entry carries `kind`, `header`, `value` (redacted, clipped to 300 characters),
+`requestedVersion`, `api` (`graph` or `marketing`) and `advice`.
+
+| Signal | What it means |
+|---|---|
+| `X-Ad-Api-Version-Warning` (any value, e.g. `The call has been auto-upgraded to v26.0 as v25.0 has been deprecated`) | Meta documents this header. The call was made on a deprecated Marketing API version, and Meta answered it on a newer one. That call worked, but it ran on a version this server was never tested against. Any endpoint that changed between the two versions already fails with `#2635`. **Act now.** |
+| `facebook-api-version` that differs from the requested version | The response says it was served by a version other than the one in the URL. Usually this means the requested version is no longer served and Meta fell back. **Unverified:** Meta's Graph docs do not document this response header. The check is a cheap tripwire, not a documented contract. Treat the signal as a prompt to check the versions table. |
+
+Where the signals surface:
+
+- **Server log:** `fbRequest.versionDrift` on stderr, once per (header, value).
+- **`doctor`:** each signal is a `warn` finding in the `api version` area, so
+  `doctor --strict` exits `1`. The Server block also gets a
+  `VERSION DRIFT: <header>: "<value>" (requested <version>)` line. Doctor only
+  sees what its own probes called. The ad-account probe is the one that reaches
+  the Marketing API.
+- **Live smoke run:** the summary prints `api VERSION DRIFT …` for every signal.
+  `ads/read-surface` and `ads/hierarchy` **fail** on any Marketing API signal,
+  because that is the gate meant to catch it before an operator does.
+- **Offline rehearsal:** the fake Graph echoes the requested version in
+  `facebook-api-version`, so a clean rehearsal must report no drift.
+  `rehearse({ adVersionWarning })` makes the fake send the warning on every
+  ad-account answer. `src/smoke-rehearsal.test.ts` uses this to prove the ads
+  smoke fails on it.
+
+What to do:
+
+1. Move the pin the signal names (`api: marketing` → the ads pin, `api: graph`
+   → the Graph pin) using the procedure below.
+2. If the ads pin cannot move yet (the newer version breaks something), set
+   `FB_ADS_API_VERSION=v25.0` as the **stopgap fallback**. Do this only while
+   Marketing v25.0 is still listed as supported in the versions table, and
+   check the table again first. The server warns that the override is off the
+   tested default. Run the ads smokes against it, and plan the real bump: a
+   fallback buys time, it does not fix anything. Graph has no equivalent
+   stopgap. Its pin ages slowly enough that a drift signal there means a bump
+   is overdue.
+
 The two pins move **independently**: bumping one never requires bumping the
 other, and each bump is its own change. Both overrides accept any `vNN.N` value
 with a warning when it is off the tested default — behaviour is only verified

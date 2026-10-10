@@ -50,7 +50,38 @@
 //      someone pauses "the parent" and stops something they did not mean to.
 //      `ads/hierarchy` follows every id it is handed back to the object it names.
 
+import { describeVersionDriftSignal } from '../client.mjs';
 import { registerSmoke } from '../registry.mjs';
+
+/**
+ * How long to let the server's stderr catch up before reading the drift
+ * signals. The warn is written before the tool answers, but on a different pipe
+ * than the answer, so the two can arrive in either order.
+ */
+const DRIFT_SETTLE_MS = 50;
+
+/**
+ * Run an ads smoke, then fail it if the Marketing API said the pinned version
+ * is deprecated (`X-Ad-Api-Version-Warning`) or served a different version
+ * than the one asked for. Every call still succeeded — Meta auto-upgrades — but
+ * an auto-upgraded call runs on a version nobody tested, and an endpoint that
+ * changed between the two fails with `#2635` instead. The live ads smoke is
+ * the gate that is supposed to catch that before an operator does, so it fails
+ * here and names the documented fallback (FB_ADS_API_VERSION=v25.0, runbook
+ * app-upkeep §2). Checked after the smoke's own body, including its early
+ * returns, so a smoke that found no campaigns still checks what it did call.
+ */
+function checkingAdsVersion(run) {
+  return async (ctx) => {
+    await run(ctx);
+    await new Promise((resolve) => setTimeout(resolve, DRIFT_SETTLE_MS));
+    const drift = ctx.versionDrift().filter((signal) => signal.api === 'marketing');
+    ctx.assert(
+      drift.length === 0,
+      `the Marketing API flagged the ads pin: ${drift.map(describeVersionDriftSignal).join(' | ')}`,
+    );
+  };
+}
 
 /** `normalizeAdAccountId` output — the only form the tools should ever echo. */
 const ACCOUNT_ID_SHAPE = /^act_\d+$/;
@@ -307,7 +338,7 @@ registerSmoke({
   budget: 'ads',
   packages: ['ads'],
   requires: ['FB_AD_ACCOUNT_ID'],
-  run: async (ctx) => {
+  run: checkingAdsVersion(async (ctx) => {
     // ---- 1. the listing -------------------------------------------------
     const listed = await ctx.callTool('facebook_list_campaigns', {
       limit: LISTING_LIMIT,
@@ -447,7 +478,7 @@ registerSmoke({
       'the probe returned no advice — the caller would not know when to stop polling',
     );
     ctx.log.step(`report run is ${status.phase} (terminal=${String(status.terminal)})`);
-  },
+  }),
 });
 
 // ---------------------------------------------------------------------------
@@ -471,7 +502,7 @@ registerSmoke({
   budget: 'ads',
   packages: ['ads'],
   requires: ['FB_AD_ACCOUNT_ID'],
-  run: async (ctx) => {
+  run: checkingAdsVersion(async (ctx) => {
     // ---- 1. ad sets: the level that owns budget and schedule -------------
     const adsetPage = await ctx.callTool('facebook_list_adsets', {
       limit: LISTING_LIMIT,
@@ -651,7 +682,7 @@ registerSmoke({
           'unchecked',
       );
     }
-  },
+  }),
 });
 
 // ---------------------------------------------------------------------------

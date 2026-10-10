@@ -28,6 +28,9 @@ export * from './http.js';
 // F08 — fbRequest upload protocols (multipart FormData + rupload offset-resume).
 export * from './http-upload.js';
 
+// API-version drift signals (X-Ad-Api-Version-Warning, served-version mismatch).
+export * from './version-drift.js';
+
 // F09 — auth (debug_token, per-page token resolver) + pages registry (C1/C14).
 export * from './auth.js';
 export * from './pages-registry.js';

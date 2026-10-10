@@ -67,6 +67,7 @@ interface RehearseModule {
     args?: readonly string[];
     timeoutMs?: number;
     echo?: boolean;
+    adVersionWarning?: string;
   }): Promise<RehearsalResult>;
   rehearsalEnv(input: {
     origin: string;
@@ -252,6 +253,9 @@ test(
     );
     assert.equal(result.code, 0, `run.mjs exited ${String(result.code)}${context}`);
     assert.match(result.stdout, /0 failed, 0 not exercised/, context);
+    // The fake echoes the requested version in `facebook-api-version`, so a clean
+    // run proves the drift check stays silent on a version Meta still serves.
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /VERSION DRIFT/, context);
     assert.match(result.stdout, /✔ start sweep/);
     assert.match(result.stdout, /✔ end sweep: nothing marked on the test Page/);
     // The G-TOOL-3 probe ran to its verdict, inside its own section, not after it.
@@ -315,5 +319,31 @@ test(
     // Budget for `npm test`: generous for a slow CI leg, but a regression that
     // brings a live-sized wait back (tens of seconds) trips it.
     assert.ok(elapsed < 60_000, `the rehearsal took ${String(elapsed)} ms`);
+  },
+);
+
+test(
+  'an X-Ad-Api-Version-Warning from the Marketing API fails the ads smoke and is summarised',
+  { timeout: 60_000 },
+  async () => {
+    const warning = `The call has been auto-upgraded to v99.0 as ${DEFAULT_ADS_API_VERSION} has been deprecated`;
+    const result = await rehearsal.rehearse({
+      args: ['--only', 'ads/read-surface'],
+      timeoutMs: 50_000,
+      adVersionWarning: warning,
+    });
+    const context = `\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`;
+
+    assert.notEqual(result.code, 0, `the run passed despite the warning${context}`);
+    assert.match(result.stdout, /the Marketing API flagged the ads pin/, context);
+    assert.match(result.stdout, /FB_ADS_API_VERSION=v25\.0/, context);
+    // The summary notice is a warn, so it goes to the harness's stderr.
+    assert.match(result.stderr, /VERSION DRIFT x-ad-api-version-warning/, context);
+    // The server logged it once, however many ad-account calls carried it; the
+    // failed run prints the server's stderr tail, which holds that one line.
+    const logged = result.stdout
+      .split('\n')
+      .filter((line) => line.includes('"msg":"fbRequest.versionDrift"'));
+    assert.equal(logged.length, 1, context);
   },
 );

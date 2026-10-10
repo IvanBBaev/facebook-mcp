@@ -48,6 +48,11 @@ import {
 } from './http.js';
 import { classifyNetworkError } from './errors.js';
 import { GraphApiError } from './types.js';
+import {
+  createVersionDriftMonitor,
+  pathApiVersion,
+  type VersionDriftMonitor,
+} from './version-drift.js';
 import type {
   Clock,
   ErrorAction,
@@ -81,6 +86,12 @@ export interface UploadHandlerDeps {
   readonly semaphores?: HostSemaphores;
   /** Sink fed the parsed usage snapshot on every response (proactive backoff). */
   readonly onUsage?: (snapshot: UsageSnapshot) => void;
+  /**
+   * API-version drift monitor for the multipart (Graph-host) responses — pass
+   * the SAME instance F07 uses so a signal is logged once per process. The
+   * rupload host is not a versioned Graph API surface and is not inspected.
+   */
+  readonly versionDrift?: VersionDriftMonitor;
   /**
    * Max in-call rupload resume attempts (offset re-reads + tail resends) before a
    * chunk failure surfaces (default 5). Chunk POSTs bypass the generic retry
@@ -509,6 +520,8 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
   const { settings, clock, redactor, logger } = deps;
   const semaphores = deps.semaphores ?? createHostSemaphores(settings.hostConcurrency);
   const maxResumeAttempts = deps.maxResumeAttempts ?? DEFAULT_MAX_RESUME_ATTEMPTS;
+  const versionDrift =
+    deps.versionDrift ?? createVersionDriftMonitor({ logger, redactor });
 
   const feedUsage = (headers: FbResponseHeaders): void => {
     if (deps.onUsage === undefined) return;
@@ -581,7 +594,9 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
       }
     }
 
-    const url = buildMultipartUrl(hostname, req.path, apiVersionFor(settings, req.api));
+    const pinnedVersion = apiVersionFor(settings, req.api);
+    const url = buildMultipartUrl(hostname, req.path, pinnedVersion);
+    const requestedVersion = pathApiVersion(req.path) ?? pinnedVersion;
     // Content-Type is intentionally omitted: `fetch` derives the multipart
     // boundary from the FormData body itself.
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
@@ -616,6 +631,7 @@ export function createUploadHandler(deps: UploadHandlerDeps): FbRequestFn {
 
       const responseHeaders = extractResponseHeaders(response);
       feedUsage(responseHeaders);
+      versionDrift.observe(responseHeaders, requestedVersion, req.api);
 
       if (isRedirect(response)) {
         await discardBody(response);
