@@ -194,6 +194,12 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   handlers are now registered first; the intermittent failure of the http
   SIGTERM/SIGINT shutdown test is gone.
 
+- **`npm run smoke -- --list` printed a raw stack trace under a stray
+  `FB_SMOKE_REHEARSAL_PRELOAD=1`.** The rehearsal preload still fails closed at
+  import without a valid `FB_SMOKE_REHEARSAL_GRAPH`; `--list` and the live run
+  now report it as one operator line and exit `2` (refused), as `--plan` already
+  did.
+
 - **A same-size rewrite of a local media file still uploaded unapproved bytes.**
   Local video, Reel and photo posts (carousels included) now bind a SHA-256 of
   the file content into the plan. A rewrite between preview and apply fails with

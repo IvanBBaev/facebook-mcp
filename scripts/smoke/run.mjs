@@ -560,7 +560,20 @@ async function main() {
     return printPlan(args);
   }
 
-  await loadRegistrations();
+  try {
+    await loadRegistrations();
+  } catch (err) {
+    // Same environment-caused failure `--plan` explains (a stray
+    // FB_SMOKE_REHEARSAL_PRELOAD=1 makes the fail-closed preload throw at
+    // import): one operator line and the refusal status, never a stack.
+    const reason = err instanceof Error ? err.message : String(err);
+    const hint =
+      process.env.FB_SMOKE_REHEARSAL_PRELOAD === undefined
+        ? ''
+        : ' — FB_SMOKE_REHEARSAL_PRELOAD belongs to the offline rehearsal only; unset it';
+    process.stderr.write(scrub(`the smoke modules failed to load: ${reason}${hint}\n`));
+    return EXIT.refused;
+  }
 
   if (args.list) {
     const smokes = listSmokes();

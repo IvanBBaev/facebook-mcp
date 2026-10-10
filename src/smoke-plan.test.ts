@@ -11,8 +11,10 @@
 //
 // Like `src/smoke-harness.test.ts`, nothing here opens a socket or spawns the
 // server: the plan is offline by design, and the only I/O is local `fs` checks
-// against throwaway temp directories.
+// against throwaway temp directories, plus `run.mjs` children that refuse before
+// loading any smoke.
 
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -464,4 +466,29 @@ test('--plan is a runner flag, off by default', () => {
   assert.equal(runner.parseCliArgs(['--plan']).plan, true);
   assert.equal(runner.parseCliArgs([]).plan, false);
   assert.notEqual(runner.EXIT.refused, runner.EXIT.ok);
+});
+
+test('a stray rehearsal preload is refused cleanly in every mode, never with a stack', () => {
+  // The preload fails closed at import when FB_SMOKE_REHEARSAL_GRAPH is missing;
+  // `--plan` already explained that, `--list` and a live run printed a stack.
+  // Offline: the module load fails before the gate, the registry or any server.
+  for (const argv of [['--list'], ['--plan'], []]) {
+    const result = spawnSync(
+      process.execPath,
+      [join(REPO_ROOT, 'scripts', 'smoke', 'run.mjs'), ...argv],
+      {
+        env: { PATH: process.env.PATH, FB_SMOKE_REHEARSAL_PRELOAD: '1' },
+        encoding: 'utf8',
+        timeout: 30_000,
+      },
+    );
+    const label = argv.join(' ') || '(live)';
+    assert.equal(result.status, runner.EXIT.refused, `${label}: ${result.stderr}`);
+    assert.match(result.stderr, /FB_SMOKE_REHEARSAL_GRAPH is not set/, label);
+    assert.doesNotMatch(result.stderr, /^\s+at /m, `${label} printed a stack`);
+    assert.equal(result.stdout, '', label);
+    if (argv[0] !== '--plan') {
+      assert.equal(result.stderr.trimEnd().split('\n').length, 1, label);
+    }
+  }
 });
