@@ -64,8 +64,11 @@ Three findings shape the design:
   verification/release gates.
 - **Upkeep:** the first post-launch changelog check
   ([12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md))
-  found the Marketing API side of the `v23.0` pin already retired and recommends
-  bumping the pin before the live verification.
+  found the Marketing API side of the `v23.0` pin already retired. ✎ 2026-10-11:
+  the `ads` package now has its own pin (`FB_ADS_API_VERSION`, default v26.0)
+  with version-drift detection, and the insights table fixes landed; the Graph
+  pin stays `v23.0`, and whether to bump it before the live verification is an
+  open owner decision.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
   runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
   the release rail in [../runbooks/release.md](../runbooks/release.md) has already

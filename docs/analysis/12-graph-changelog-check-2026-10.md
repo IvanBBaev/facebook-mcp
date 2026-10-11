@@ -11,6 +11,15 @@ Every claim below cites an official Meta source. Anything that could not be
 confirmed from an official page is marked **UNVERIFIED**. Nothing here has been
 checked against the live API; this is a desk check of the published changelogs.
 
+✎ **Updated 2026-10-11.** This document stays the point-in-time record of the
+2026-10-02 check; the findings below are not rewritten. Follow-up work landed
+in `1d830da..dee64aa` (CHANGELOG `[Unreleased]`): the Marketing API now has its
+own pin, so the "one version for every call" statement above no longer holds.
+Graph calls stay on `v23.0`; ads calls use `DEFAULT_ADS_API_VERSION = 'v26.0'`
+(`FB_ADS_API_VERSION` override). Per-finding status is in
+[Dispositions](#dispositions-2026-10-11). Nothing has been verified against the
+live API yet.
+
 ## Summary
 
 - **Newest Graph API version: v26.0** (released 2026-07-29). The pinned **Graph**
@@ -29,6 +38,11 @@ checked against the live API; this is a desk check of the published changelogs.
 - **Recommendation:** bump `DEFAULT_API_VERSION` to **v26.0** as its own release
   **before** the 1.0 live verification, so the live pass verifies the version
   that ships (see [Recommendation](#recommendation)).
+
+✎ **2026-10-11:** the HIGH finding was addressed by splitting the pin rather than
+bumping the Graph one: the `ads` package is pinned separately at Marketing API
+v26.0 (`038d07c`), and the Graph pin stays `v23.0`. The M/L text and table fixes
+landed (`aac03ff`, `961dd51`). See [Dispositions](#dispositions-2026-10-11).
 
 ## Versions
 
@@ -121,6 +135,25 @@ reply 7-day rule, the 24-hour standard messaging window, `/{page-id}/blocked`, o
 the Page permission names in the checked changelogs [1][4][7][13][15]. The doctor's
 permission × package matrix is unaffected.
 
+### Dispositions (2026-10-11)
+
+✎ **Added 2026-10-11.** Status of each finding after the follow-up commits
+(`1d830da..dee64aa`, CHANGELOG `[Unreleased]`). The original rows above are
+unchanged. "Live pass" means the 1.0 live verification, which has not run yet.
+
+| # | Status | Evidence |
+| - | ------ | -------- |
+| H1 | **Addressed in code; live verification pending.** | Marketing API pinned separately: `DEFAULT_ADS_API_VERSION = 'v26.0'` with the `FB_ADS_API_VERSION` override and `v25.0` as the documented fallback (`038d07c`). Version-drift signals (`X-Ad-Api-Version-Warning`, a mismatched `facebook-api-version`) are logged, surfaced by `doctor` and fail the ads live smokes (`dee64aa`). An ads fixture recorder (`node scripts/record-fixture.mjs --ads`) exists for the shape-diff of future ads bumps (`b24add4`); no ads fixtures have been recorded yet. Whether Marketing API v26.0 is callable on the ads edges stays **UNVERIFIED** until a live `doctor` / ads smoke runs. |
+| M1 | **UNVERIFIED — pending the live pass.** | `aac03ff` makes `page_fan_removes` and the doctor's `page_daily_unfollows` probe warn that Meta's reference lists only `page_daily_unfollows_unique`. The probe and the rename target are unchanged, because whether the non-unique name still answers is unknown. |
+| M2 | **Fixed** (`aac03ff`). | `page_impressions_unique` / `post_impressions_unique` now point at `page_total_media_view_unique` / `post_total_media_view_unique`; the doctor probes the Page one. |
+| M3 | **Fixed** (`aac03ff`). | 39 more retired names get a "removed" verdict from the rename table. |
+| L1 | **Fixed** (`aac03ff`). | The fans family is dated to the 2025-11 wave. |
+| L2 | **Fixed** (`961dd51`). | The `facebook_ads_insights` `since` description qualifies the 37-month lookback (13 months for unique-count fields and hourly breakdowns, 6 for frequency breakdowns). Whether `reach` counts as a unique-count field stays **UNVERIFIED**. |
+| L3 | **UNVERIFIED — pending the live pass.** | No change. |
+| L4 | **UNVERIFIED — pending the live pass.** | No change (G-TOOL-3 / video smokes). |
+| N7 | **Addressed in code** (3e63741). | `facebook_ads_report_status` now requests `error_code`, `error_message`, `error_subcode`, `error_user_title` and `error_user_msg` and returns a redacted, capped `failure` (reason, code, subcode) on a failed or skipped run. Field names on the v26.0 pin are **UNVERIFIED** live. |
+| N1–N6, N8, N9 | No action needed. | As assessed above. |
+
 ## Recommendation
 
 The 1.0 live verification has not happened yet, so the version it runs against is
@@ -144,6 +177,17 @@ Longer term, the Marketing API's shorter lifecycle means a single pin forces a
 Graph bump every ~8 months just to keep ads alive. A separate ads version pin
 (for example `FB_ADS_API_VERSION`) is worth evaluating; that is a design change,
 not part of this check.
+
+✎ **Updated 2026-10-11.** The longer-term option was taken instead of a joint
+bump: the `ads` package now has its own pin, `FB_ADS_API_VERSION`, defaulting to
+Marketing API v26.0 (option C for ads, `v25.0` fallback; `038d07c`), with drift
+detection (`dee64aa`) and an ads fixture recorder (`b24add4`). The two pins move
+independently
+([`../runbooks/app-upkeep.md` §2](../runbooks/app-upkeep.md#2-graph-and-marketing-api-version-deprecation)).
+Whether to bump the **Graph** pin (`v23.0`, supported until 2027-10-08) before
+the 1.0 live verification remains the **owner's open decision**; this update
+does not make it. M1–M3 and L1–L2 were handled as separate changes (see
+[Dispositions](#dispositions-2026-10-11)).
 
 ## Sources
 
