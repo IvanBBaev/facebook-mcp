@@ -9,6 +9,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **A failed async report run said only "FAILED", never why.** Since Marketing
+  API v25.0 a report run carries `error_code`, `error_subcode`,
+  `error_message`, `error_user_title` and `error_user_msg`. The status probe
+  now requests them, and `facebook_ads_report_status` adds a `failure` object
+  to a `failed` or `skipped` run that carried any of them: `reason` (the
+  user-facing title and message when Meta sent them, otherwise
+  `error_message`; whitespace-collapsed, redacted before it is capped at 300
+  characters so a secret on the boundary is scrubbed whole), `code` and
+  `subcode`. A run without the fields (an older pin, or no reason given) looks
+  exactly as before; no existing field changed.
+
 - **An ads pin bump had no recorded fixtures to shape-diff, so it was checked by
   hand.** `node scripts/record-fixture.mjs --ads` now records the ads read set
   on the Marketing API pin — the account read, the campaign / ad set / ad

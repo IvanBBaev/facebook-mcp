@@ -17,6 +17,8 @@ import {
   EFFECTIVE_STATUS_NOTE,
   MARKETING_API,
   OVERSIZED_SYNC_SUBCODE,
+  REPORT_RUN_FIELDS,
+  REPORT_RUN_REASON_MAX_CHARS,
   REPORT_STALL_MS,
   adAccountBlockedError,
   assertAdAccountUsable,
@@ -37,6 +39,7 @@ import {
   normalizeInsightsRow,
   parseMinorUnits,
   readAdAccount,
+  readReportRunFailure,
   resolveAdAccountId,
   startAdsReport,
   withPinnedAdFields,
@@ -1160,6 +1163,174 @@ test('CC-ADS-5: a SKIPPED run is reported as terminal with nothing produced', as
   assert.equal(status.phase, 'skipped');
   assert.equal(status.terminal, true);
   assert.match(status.advice, /SKIPPED/);
+});
+
+// ---------------------------------------------------------------------------
+// N7 (doc 12): Meta's own reason on a failed / skipped run (v25.0+ fields)
+// ---------------------------------------------------------------------------
+
+test('N7: the status probe requests the v25.0 error fields alongside the status fields', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(() => true, fbOk({ async_status: 'Job Running' }));
+
+  await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+
+  const fields = String(paramsOf(fake.calls[0]).fields).split(',');
+  for (const f of [
+    'async_status',
+    'async_percent_completion',
+    'time_ref',
+    'error_code',
+    'error_message',
+    'error_subcode',
+    'error_user_title',
+    'error_user_msg',
+  ]) {
+    assert.ok(fields.includes(f), `fields must include ${f}`);
+  }
+  assert.equal(paramsOf(fake.calls[0]).fields, REPORT_RUN_FIELDS);
+});
+
+test('N7: a failed run surfaces the user title and message, code and subcode', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk({
+      async_status: 'Job Failed',
+      error_code: 100,
+      error_subcode: 1487534,
+      error_message: 'Invalid parameter',
+      error_user_title: 'Too much data',
+      error_user_msg: 'Reduce the date range or the number of breakdowns.',
+    }),
+  );
+
+  const status = await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+
+  assert.equal(status.phase, 'failed');
+  assert.deepEqual(status.failure, {
+    reason: 'Too much data: Reduce the date range or the number of breakdowns.',
+    code: 100,
+    subcode: 1487534,
+  });
+  // The existing shape is untouched.
+  assert.match(status.advice, /Do not keep polling/);
+  assert.equal(status.resultsReady, false);
+});
+
+test('N7: the reason prefers user_msg, then user_title, then error_message', () => {
+  assert.equal(
+    readReportRunFailure({ error_user_msg: 'User msg', error_message: 'Dev msg' })
+      ?.reason,
+    'User msg',
+  );
+  assert.equal(
+    readReportRunFailure({ error_user_title: 'User title', error_message: 'Dev msg' })
+      ?.reason,
+    'User title',
+  );
+  assert.equal(readReportRunFailure({ error_message: 'Dev msg' })?.reason, 'Dev msg');
+  // A message that already opens with its title is not prefixed twice.
+  assert.equal(
+    readReportRunFailure({
+      error_user_title: 'Too much data',
+      error_user_msg: 'Too much data in this report.',
+    })?.reason,
+    'Too much data in this report.',
+  );
+});
+
+test('N7: code and subcode alone still produce a failure, without a reason', () => {
+  assert.deepEqual(readReportRunFailure({ error_code: 2 }), { code: 2 });
+  assert.deepEqual(readReportRunFailure({ error_subcode: 99 }), { subcode: 99 });
+  // Older pins sent error_code as a numeric string.
+  assert.deepEqual(readReportRunFailure({ error_code: '2', error_subcode: ' 7 ' }), {
+    code: 2,
+    subcode: 7,
+  });
+});
+
+test('N7: absent, empty or malformed error fields yield no failure object', async () => {
+  assert.equal(readReportRunFailure({}), undefined);
+  assert.equal(
+    readReportRunFailure({
+      error_code: 'abc',
+      error_subcode: 1.5,
+      error_message: '   ',
+      error_user_title: '',
+      error_user_msg: 42,
+    }),
+    undefined,
+  );
+
+  // An older pin returns no error_* at all: the failed run looks exactly as before.
+  const fake = createFakeFbRequest();
+  fake.on(() => true, fbOk({ async_status: 'Job Failed' }));
+  const status = await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+  assert.equal(status.phase, 'failed');
+  assert.equal('failure' in status, false);
+});
+
+test('N7: a skipped run surfaces its reason too', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk({ async_status: 'Job Skipped', error_message: 'Duplicate of a running job' }),
+  );
+
+  const status = await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+
+  assert.equal(status.phase, 'skipped');
+  assert.deepEqual(status.failure, { reason: 'Duplicate of a running job' });
+});
+
+test('N7: error fields on a non-terminal or complete run are not surfaced', async () => {
+  for (const async_status of ['Job Running', 'Job Completed', 'Job Teleported']) {
+    const fake = createFakeFbRequest();
+    fake.on(() => true, fbOk({ async_status, error_code: 1, error_message: 'stale' }));
+    const status = await getReportRunStatus(fake.fn, { reportRunId: RUN_ID, nowMs: NOW });
+    assert.equal(status.failure, undefined, async_status);
+  }
+});
+
+test('N7: the reason is redacted, whitespace-collapsed and capped', async () => {
+  const secret = 'EAAB-SECRET-TOKEN-0123456789';
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk({
+      async_status: 'Job Failed',
+      error_message: `Token ${secret}\n\n  was   rejected`,
+    }),
+  );
+
+  const status = await getReportRunStatus(fake.fn, {
+    reportRunId: RUN_ID,
+    nowMs: NOW,
+    redactString: (s) => s.split(secret).join('[REDACTED]'),
+  });
+
+  assert.equal(status.failure?.reason, 'Token [REDACTED] was rejected');
+
+  const long = readReportRunFailure({ error_user_msg: 'x'.repeat(1000) });
+  assert.equal(long?.reason?.length, REPORT_RUN_REASON_MAX_CHARS);
+  assert.ok(long?.reason?.endsWith('…'));
+  const exact = 'y'.repeat(REPORT_RUN_REASON_MAX_CHARS);
+  assert.equal(readReportRunFailure({ error_user_msg: exact })?.reason, exact);
+});
+
+test('N7: redaction runs before the cap, so a secret on the cap boundary is scrubbed whole', () => {
+  const secret = 'S'.repeat(40);
+  // The secret starts 20 chars before the cap: capping first would leave a
+  // 19-char fragment no value-based redactor recognises.
+  const msg = `${'a'.repeat(REPORT_RUN_REASON_MAX_CHARS - 20)}${secret} tail`;
+  const failure = readReportRunFailure({ error_message: msg }, (s) =>
+    s.split(secret).join('[REDACTED]'),
+  );
+  assert.ok(failure?.reason);
+  assert.ok(!failure.reason.includes('SSSS'), 'no fragment of the secret survives');
+  assert.ok(failure.reason.includes('[REDACTED]'));
+  assert.ok(failure.reason.length <= REPORT_RUN_REASON_MAX_CHARS);
 });
 
 test('CC-ADS-5: a run stuck past the stall window gets "give up", not "keep waiting"', async () => {

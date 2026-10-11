@@ -755,6 +755,40 @@ test('fetch_results forwards limit and after to the run edge', async () => {
   assert.equal(params.after, 'CURSOR_2');
 });
 
+test("a failed run returns Meta's redacted reason, code and subcode", async () => {
+  const { fb, ctx } = makeHarness();
+  const secret = 'EAAB-LEAKED-TOKEN-9876543210';
+  const redactingCtx = { ...ctx, redactor: createFakeRedactor({ secrets: [secret] }) };
+  fb.on(
+    () => true,
+    fbOk({
+      async_status: 'Job Failed',
+      error_code: 2,
+      error_subcode: 1504044,
+      error_message: `Service temporarily unavailable for ${secret}`,
+    }),
+  );
+
+  const result = body(
+    await tool('facebook_ads_report_status').handler(
+      { report_run_id: REPORT_RUN_ID },
+      redactingCtx,
+    ),
+  );
+
+  assert.equal(result.phase, 'failed');
+  assert.ok(str(result.advice).length > 0, 'the existing advice is still there');
+  const failure = obj(result.failure);
+  assert.equal(failure.code, 2);
+  assert.equal(failure.subcode, 1504044);
+  assert.ok(str(failure.reason).startsWith('Service temporarily unavailable'));
+  assert.ok(
+    !JSON.stringify(result).includes(secret),
+    'the secret never reaches the model',
+  );
+  assert.ok(str(failure.reason).includes('[REDACTED]'));
+});
+
 test('a stalled run is flagged as stalled rather than reported as progressing', async () => {
   const { ctx, fb } = makeHarness();
   fb.on(

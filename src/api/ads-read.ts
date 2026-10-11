@@ -1251,6 +1251,81 @@ export function isTerminalPhase(phase: ReportRunPhase): boolean {
   return TERMINAL_PHASES.has(phase);
 }
 
+/**
+ * Fields read off one report run. The `error_*` five exist since Marketing API
+ * v25.0 (`error_code` became an int there); an older pin, or a run that did
+ * not fail, simply omits them, so every one is optional on the way in.
+ */
+export const REPORT_RUN_FIELDS =
+  'async_status,async_percent_completion,time_ref,time_completed,date_start,date_stop,' +
+  'error_code,error_message,error_subcode,error_user_title,error_user_msg';
+
+/** Hard cap on the surfaced failure reason, ellipsis included. */
+export const REPORT_RUN_REASON_MAX_CHARS = 300;
+
+/**
+ * Why Meta failed or skipped a run, as far as Graph said. Present only on a
+ * `failed` / `skipped` run that carried at least one `error_*` field.
+ */
+export interface ReportRunFailure {
+  /**
+   * One redacted, whitespace-collapsed, length-capped line: the user-facing
+   * title/message when Graph sent one, otherwise `error_message`.
+   */
+  readonly reason?: string;
+  readonly code?: number;
+  readonly subcode?: number;
+}
+
+/** A Graph error number: an int since v25.0, a numeric string on older pins. */
+function readErrorNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : undefined;
+  if (typeof value === 'string' && /^\d{1,15}$/.test(value.trim()))
+    return Number(value.trim());
+  return undefined;
+}
+
+function readErrorText(value: unknown): string | undefined {
+  const text = readString(value)?.replace(/\s+/g, ' ').trim();
+  return text !== undefined && text.length > 0 ? text : undefined;
+}
+
+/**
+ * Build the {@link ReportRunFailure} for a run body. Pure — exported for
+ * testing. Redaction runs BEFORE the cap: a secret cut in half by the cap would
+ * no longer match its registered value and could leak its first half.
+ */
+export function readReportRunFailure(
+  body: Readonly<Record<string, unknown>>,
+  redactString: (s: string) => string = (s) => s,
+): ReportRunFailure | undefined {
+  const code = readErrorNumber(body.error_code);
+  const subcode = readErrorNumber(body.error_subcode);
+  const userTitle = readErrorText(body.error_user_title);
+  const userMsg = readErrorText(body.error_user_msg);
+  const message = readErrorText(body.error_message);
+
+  let reason: string | undefined;
+  if (userTitle !== undefined && userMsg !== undefined) {
+    reason = userMsg.startsWith(userTitle) ? userMsg : `${userTitle}: ${userMsg}`;
+  } else {
+    reason = userMsg ?? userTitle ?? message;
+  }
+  if (reason !== undefined) {
+    reason = redactString(reason);
+    if (reason.length > REPORT_RUN_REASON_MAX_CHARS)
+      reason = `${reason.slice(0, REPORT_RUN_REASON_MAX_CHARS - 1)}…`;
+  }
+
+  if (reason === undefined && code === undefined && subcode === undefined)
+    return undefined;
+  return {
+    ...(reason !== undefined ? { reason } : {}),
+    ...(code !== undefined ? { code } : {}),
+    ...(subcode !== undefined ? { subcode } : {}),
+  };
+}
+
 export interface ReportRunStatus {
   readonly reportRunId: string;
   readonly phase: ReportRunPhase;
@@ -1266,6 +1341,8 @@ export interface ReportRunStatus {
   /** True ⇒ the run has been alive past {@link REPORT_STALL_MS} without finishing. */
   readonly stalled: boolean;
   readonly advice: string;
+  /** Meta's stated reason, on a failed or skipped run that carried one. */
+  readonly failure?: ReportRunFailure;
 }
 
 function readEpochMs(value: unknown): number | undefined {
@@ -1317,7 +1394,12 @@ export function reportRunAdvice(input: {
  */
 export async function getReportRunStatus(
   fbRequest: FbRequestFn,
-  opts: AdsRequestOptions & { readonly reportRunId: string; readonly nowMs: number },
+  opts: AdsRequestOptions & {
+    readonly reportRunId: string;
+    readonly nowMs: number;
+    /** Scrubs the failure reason before it is capped (the tool passes its redactor). */
+    readonly redactString?: (s: string) => string;
+  },
 ): Promise<ReportRunStatus> {
   const res = await fbRequest<unknown>({
     protocol: 'json',
@@ -1325,10 +1407,7 @@ export async function getReportRunStatus(
     host: 'graph',
     api: MARKETING_API,
     path: `/${opts.reportRunId}`,
-    params: {
-      fields:
-        'async_status,async_percent_completion,time_ref,time_completed,date_start,date_stop',
-    },
+    params: { fields: REPORT_RUN_FIELDS },
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   });
 
@@ -1344,6 +1423,10 @@ export async function getReportRunStatus(
     startedAtMs !== undefined ? Math.max(0, opts.nowMs - startedAtMs) : undefined;
   const terminal = isTerminalPhase(phase);
   const stalled = !terminal && ageMs !== undefined && ageMs > REPORT_STALL_MS;
+  const failure =
+    phase === 'failed' || phase === 'skipped'
+      ? readReportRunFailure(body, opts.redactString)
+      : undefined;
 
   return {
     reportRunId: opts.reportRunId,
@@ -1361,6 +1444,7 @@ export async function getReportRunStatus(
       ...(percentComplete !== undefined ? { percentComplete } : {}),
       stalled,
     }),
+    ...(failure !== undefined ? { failure } : {}),
   };
 }
 

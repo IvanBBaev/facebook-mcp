@@ -698,7 +698,8 @@ export function createAdsPackage(): PackageSpec {
       'polling. Wait about 10s between probes and give up after ~15 minutes ' +
       'without progress: very large runs can hang indefinitely and there is no ' +
       'cancel API, so the way out is a narrower run, not more polling. A FAILED ' +
-      'or SKIPPED run produced nothing — start a new one instead of re-probing.',
+      'or SKIPPED run produced nothing — start a new one instead of re-probing; ' +
+      'when Meta stated why, `failure` carries its reason, code and subcode.',
     inputSchema: z.object({
       report_run_id: reportRunIdArg,
       fetch_results: fetchResultsArg,
@@ -713,6 +714,9 @@ export function createAdsPackage(): PackageSpec {
         // The injected clock, never Date.now(): the run's age and the stall
         // verdict both depend on "now" and must stay testable.
         nowMs: ctx.clock.now(),
+        // Meta's failure reason is redacted BEFORE it is capped, so a secret the
+        // cap would cut in half is still recognised and scrubbed whole.
+        redactString: (s) => ctx.redactor.redactString(s),
         ...signalOf(ctx),
       });
 
