@@ -19,6 +19,48 @@ multiple agents can work in parallel; phase scopes below map to its waves
 (Phase 0 = Waves 1–3, Phases 1–3 = Wave 4 verticals, Phase 4 = Wave 5,
 Phase 5 = Wave 6).
 
+<!-- release-progress:begin -->
+## Release progress (Opus 5.5 hours)
+
+> Maintained by the `%-relase-opus-5-5-persentage` skill. Unit: wall-clock hours
+> of one autonomous Opus 5.5 session at this project's gate standard.
+> Numbers are computed by the skill's script from the table below.
+
+| | |
+|---|---|
+| Release target | `v1.0.0` — the live-verification gate of [10 §1](10-v1-release-definition.md) (current version `0.7.0`); Phase 5 / ads (`1.1.0`) is out of this target |
+| Progress | **89.2 %** — 247 h of 277 h earned |
+| Remaining | **30 h** Opus 5.5 (0 h workable now, 30 h blocked) |
+| Blocked by | live credentials + test Page (smokes, G-TOOL-3 probe); Graph-pin decision; dogfood period; non-author onboarding trial; manual client cold-start + push for the Windows CI leg; npm Trusted Publishing setup; go-ahead for issue triage and the release tag |
+| Calibration | WORKLOG + commit times: a single-concern item (e.g. `3e63741`, `f68c249`) ≈ 1–2 h; a cross-cutting item (ads pin `038d07c`: 6 call sites + generated docs) ≈ 2–3 h; one 7–8-lane hardening wave ≈ 3 h; finished phases estimated at that scale |
+| Updated | 2026-10-18 at `ee79b3a` |
+
+| ID | Item | Source | Status | Est h |
+|---|---|---|---|---|
+| P-1 | Day-0 gates G1–G4 + corpus updates A1–A16 (Wave 0) | Phase −1 | `done` | 6 |
+| P0 | Skeleton & quality rails: core, auth, mcp, test harness, CI, doctor v1 | Phase 0 | `done` | 30 |
+| P1 | Reading & insights: reader + insights packages, pagination, metric probe | Phase 1 | `done` | 14 |
+| P2 | Publishing: posts, photos, resumable video, Reels, scheduling, media containment | Phase 2 | `done` | 28 |
+| P3 | Moderation & messaging packages, client-side windows, taint envelope | Phase 3 | `done` | 16 |
+| P4 | Distribution: README/SECURITY/CHANGELOG, setup-token, release rail, 0.7.0 on npm | Phase 4 | `done` | 22 |
+| G | G-TOOL-1/2/4/5, G-RUN-1/2, G-DOC-1…6 (runbooks, hygiene, scope) | [10 §6](10-v1-release-definition.md) | `done` | 14 |
+| H1 | Defect queues + hardening waves 1–14 | WORKLOG 2026-08-21 … 09-23 | `done` | 40 |
+| H2 | Hardening waves 15–27 | WORKLOG 2026-09-23 … 09-26 | `done` | 36 |
+| W1 | Pre-live de-risking, waves 28–33: cold-start gate, G-TOOL-3 probe, smoke rehearsal/--plan, error catalog | WORKLOG 2026-09-28 … 10-03 | `done` | 24 |
+| W2 | Changelog-check follow-up, waves 34–37: metric table, ads pin v26.0, drift signals, ads fixture recorder, report-run failure | [12](12-graph-changelog-check-2026-10.md) | `done` | 17 |
+| L1 | Live smoke pass Phases 1–3 on the test Page; record CC-INS-5, CC-PUB-9, CC-MOD-4 ✎ behaviors; operator-window runbook once | Phase 1–3 exit gates | `blocked-external` | 6 |
+| L2 | Run `reels/lifecycle-probe`, record the G-TOOL-3 verdict, update delete/list descriptions | [10 §2 G-TOOL-3](10-v1-release-definition.md) | `blocked-external` | 2 |
+| L3 | Fix what the first live pass finds (nothing has ever run against real Graph) | [10 §6](10-v1-release-definition.md) | `blocked-external` | 12 |
+| L4 | Graph-pin decision (v23.0 vs bump) + doc-12 UNVERIFIED rows (M1, L3, L4) + fixture shape-diff | [12 dispositions](12-graph-changelog-check-2026-10.md) | `blocked-owner` | 3 |
+| O1 | Dogfood period (2–4 weeks on the real Page) — triage findings | Phase 4 entry | `blocked-owner` | 2 |
+| O2 | Non-author onboarding ≤20 min + manual Claude Desktop/Code cold-start on macOS + Windows | Phase 4 exit gate | `blocked-owner` | 2 |
+| R1 | Release rail: npm Trusted Publishing OIDC instead of `NPM_TOKEN` (#15) | Phase 4 release rail | `blocked-owner` | 1 |
+| R2 | Issue triage (15 close-as-shipped, rescope #11/#15/#19) + cut `1.0.0` (version, CHANGELOG, §1 map, tag) | [10 §1](10-v1-release-definition.md) | `blocked-owner` | 2 |
+
+### History
+- 2026-10-18 `ee79b3a` — 89.2 %, 30 h left (first run; baseline; every code-level 1.0 item is done, all remaining work waits on credentials or owner acts)
+<!-- release-progress:end -->
+
 ## Smoke Safety Protocol (binding for all phases — B2)
 
 1. All write smokes run against a **dedicated test Page** in the same Business
