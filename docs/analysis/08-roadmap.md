@@ -29,11 +29,11 @@ Phase 5 = Wave 6).
 | | |
 |---|---|
 | Release target | `v1.0.0` — the live-verification gate of [10 §1](10-v1-release-definition.md) (current version `0.7.0`); Phase 5 / ads (`1.1.0`) is out of this target |
-| Progress | **89.2 %** — 247 h of 277 h earned |
-| Remaining | **30 h** Opus 5.5 (0 h workable now, 30 h blocked) |
-| Blocked by | live credentials + test Page (smokes, G-TOOL-3 probe); Graph-pin decision; dogfood period; non-author onboarding trial; manual client cold-start + push for the Windows CI leg; npm Trusted Publishing setup; go-ahead for issue triage and the release tag |
+| Progress | **90 %** — 249.2 h of 277 h earned |
+| Remaining | **27.8 h** Opus 5.5 (2.8 h in partial rows, 25 h blocked; the partial remainders also wait on L1 and the release cut, so nothing is workable now) |
+| Blocked by | live credentials + test Page (smokes, G-TOOL-3 probe); dogfood period; non-author onboarding trial; manual client cold-start + push for the Windows CI leg; deleting the bootstrap `NPM_TOKEN` secret; the release tag |
 | Calibration | WORKLOG + commit times: a single-concern item (e.g. `3e63741`, `f68c249`) ≈ 1–2 h; a cross-cutting item (ads pin `038d07c`: 6 call sites + generated docs) ≈ 2–3 h; one 7–8-lane hardening wave ≈ 3 h; finished phases estimated at that scale |
-| Updated | 2026-10-18 at `ee79b3a` |
+| Updated | 2026-10-22 at `bb36778` |
 
 | ID | Item | Source | Status | Est h |
 |---|---|---|---|---|
@@ -51,14 +51,15 @@ Phase 5 = Wave 6).
 | L1 | Live smoke pass Phases 1–3 on the test Page; record CC-INS-5, CC-PUB-9, CC-MOD-4 ✎ behaviors; operator-window runbook once | Phase 1–3 exit gates | `blocked-external` | 6 |
 | L2 | Run `reels/lifecycle-probe`, record the G-TOOL-3 verdict, update delete/list descriptions | [10 §2 G-TOOL-3](10-v1-release-definition.md) | `blocked-external` | 2 |
 | L3 | Fix what the first live pass finds (nothing has ever run against real Graph) | [10 §6](10-v1-release-definition.md) | `blocked-external` | 12 |
-| L4 | Graph-pin decision (v23.0 vs bump) + doc-12 UNVERIFIED rows (M1, L3, L4) + fixture shape-diff | [12 dispositions](12-graph-changelog-check-2026-10.md) | `blocked-owner` | 3 |
+| L4 | Graph-pin decision (v23.0 vs bump) + doc-12 UNVERIFIED rows (M1, L3, L4) + fixture shape-diff — decided and bumped to v26.0 (`bb36778`); UNVERIFIED rows + shape-diff ride the L1 live pass | [12 dispositions](12-graph-changelog-check-2026-10.md) | `partial:40` | 3 |
 | O1 | Dogfood period (2–4 weeks on the real Page) — triage findings | Phase 4 entry | `blocked-owner` | 2 |
 | O2 | Non-author onboarding ≤20 min + manual Claude Desktop/Code cold-start on macOS + Windows | Phase 4 exit gate | `blocked-owner` | 2 |
-| R1 | Release rail: npm Trusted Publishing OIDC instead of `NPM_TOKEN` (#15) | Phase 4 release rail | `blocked-owner` | 1 |
-| R2 | Issue triage (15 close-as-shipped, rescope #11/#15/#19) + cut `1.0.0` (version, CHANGELOG, §1 map, tag) | [10 §1](10-v1-release-definition.md) | `blocked-owner` | 2 |
+| R1 | Release rail: npm Trusted Publishing OIDC instead of `NPM_TOKEN` (#15) — workflow already OIDC-first; owner: confirm the npmjs.com trusted publisher, delete the `NPM_TOKEN` secret | Phase 4 release rail | `blocked-owner` | 1 |
+| R2 | Issue triage (15 close-as-shipped, rescope #11/#15/#19) + cut `1.0.0` (version, CHANGELOG, §1 map, tag) — triage done 2026-10-22 (15 closed, 3 rescoped); cut waits on L1–O2 | [10 §1](10-v1-release-definition.md) | `partial:50` | 2 |
 
 ### History
 - 2026-10-18 `ee79b3a` — 89.2 %, 30 h left (first run; baseline; every code-level 1.0 item is done, all remaining work waits on credentials or owner acts)
+- 2026-10-22 `bb36778` — 90 %, 27.8 h left (+0.8 pp, −2.2 h; owner decisions unlocked three rows: L4 blocked-owner→partial:40 (Graph pin bumped to v26.0), R2 blocked-owner→partial:50 (15 issues closed, #11/#15/#19 rescoped), R1 stays blocked-owner — the workflow was already OIDC-first, only the `NPM_TOKEN` secret deletion remains; no re-estimates, no scope change)
 <!-- release-progress:end -->
 
 ## Smoke Safety Protocol (binding for all phases — B2)
