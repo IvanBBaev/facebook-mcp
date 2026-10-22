@@ -6,7 +6,9 @@ import prettier from 'eslint-config-prettier';
 import globals from 'globals';
 
 export default tseslint.config(
-  { ignores: ['build/', 'coverage/', 'node_modules/', 'docs/'] },
+  // `.claude/` is the local-only AI harness; agent worktrees checked out under
+  // it carry their own build/ trees and must never fail this repo's lint.
+  { ignores: ['build/', 'coverage/', 'node_modules/', 'docs/', '.claude/'] },
 
   js.configs.recommended,
 

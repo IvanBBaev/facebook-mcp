@@ -8,3 +8,4 @@ package-lock.json
 # AI-harness files are formatted (or intentionally not) by their own owners.
 docs/
 WORKLOG.md
+.claude/
