@@ -54,7 +54,7 @@
     "prepublishOnly": "node -e \"if(!process.env.GITHUB_ACTIONS&&process.env.ALLOW_LOCAL_PUBLISH!=='1'){console.error('Refusing: publishing happens in .github/workflows/release.yml, triggered by a v*.*.* tag, never from a laptop. The one documented exception is the first-ever publish that reserves the npm name (docs/runbooks/release.md, One-time setup); for that, and only that, set ALLOW_LOCAL_PUBLISH=1.');process.exit(1)}\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "dotenv": "^17.4.2",
     "zod": "^3.25.76"
   },

@@ -2353,6 +2353,16 @@ setup-token` has nothing to open. The required scopes are named inline now,
 
 ### Security
 
+- **The MCP SDK floor moves from `^1.29.0` to `^1.32.1`.** Every SDK release
+  up to 1.31.0 is covered by high-severity advisories, among them one HTTP
+  request within the default size limit exhausting server memory during
+  validation (GHSA-46jr-4wx8-v453), which reaches this server's HTTP transport.
+  The others concern the SDK's OAuth client, bearer authentication and
+  experimental tasks, none of which this server uses, but the floor rules them
+  out for anyone installing it. `npm audit fix` also lifted the lockfile past
+  the advisories in `fast-uri` (via `ajv`) and the dev-only `brace-expansion`;
+  `npm audit` reports 0 vulnerabilities.
+
 - **The credential file and the write journal could be created outside the
   per-user config directory.** The XDG and `%APPDATA%` base directories were read
   with `??`, which only guards `undefined` — an EMPTY value is a real thing when
