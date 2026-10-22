@@ -55,7 +55,14 @@
 // Exit codes: 0 pass, 1 cold-start failed, 2 usage error.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -489,7 +496,12 @@ function killTree(child) {
 }
 
 async function coldStart(options) {
-  const temp = mkdtempSync(join(tmpdir(), 'facebook-mcp-cold-start-'));
+  // The long-name form of the temp root: a Windows runner hands out the 8.3
+  // short name (`C:\Users\RUNNER~1\...`), whose `~` becomes `%7E` in the
+  // tarball's file: URL — and `%` is one of the characters quoteForCmd refuses.
+  const temp = mkdtempSync(
+    join(realpathSync.native(tmpdir()), 'facebook-mcp-cold-start-'),
+  );
   const dirs = {
     work: join(temp, 'work'),
     cache: join(temp, 'npm-cache'),
