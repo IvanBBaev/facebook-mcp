@@ -8,7 +8,8 @@ only be confirmed against a live Page/portfolio are marked ✎ with their phase.
 ## Versioning
 
 - **Pin Graph API v23.0** as a config constant (`FB_API_VERSION`, default
-  `v23.0` — the shipped value in `src/core/settings.ts`). Versions live ~2 years;
+  `v23.0`; ✎ the shipped value in `src/core/settings.ts` is `v26.0` since
+  2026-10-22, see [12](12-graph-changelog-check-2026-10.md)). Versions live ~2 years;
   releases every 3–5 months. Marketing API shares the same version track and
   URLs.
 - Base hosts: `graph.facebook.com` (everything), `graph-video.facebook.com`

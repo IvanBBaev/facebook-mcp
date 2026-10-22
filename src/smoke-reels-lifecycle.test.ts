@@ -305,7 +305,7 @@ test('escape hatch: a derived token must be for exactly the test Page', async ()
   graph.track(VIDEO);
   assert.equal((await graph.presence(VIDEO)).state, 'present');
   const [derive, read] = right.calls;
-  assert.equal(derive?.url.pathname, `/v23.0/${TEST_PAGE}`);
+  assert.equal(derive?.url.pathname, `/v26.0/${TEST_PAGE}`);
   assert.equal(derive?.url.searchParams.get('fields'), 'id,access_token');
   assert.equal(derive?.authorization, 'Bearer EAAsystemtoken');
   assert.equal(read?.authorization, 'Bearer EAAderivedtestpage');
@@ -362,7 +362,7 @@ test('escape hatch: DELETE of an owned video, and of one already gone', async ()
   assert.equal(deleted.absent, false);
   assert.deepEqual(
     owned.calls.map((call) => `${call.method} ${call.url.pathname}`),
-    [`GET /v23.0/${VIDEO}`, `DELETE /v23.0/${VIDEO}`],
+    [`GET /v26.0/${VIDEO}`, `DELETE /v26.0/${VIDEO}`],
   );
 
   const gone = fakeFetch([[400, graphError(100, 33)]]);

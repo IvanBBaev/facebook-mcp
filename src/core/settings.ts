@@ -31,7 +31,7 @@ import {
 // --- Defaults (F04 owns these; the manifest snapshot pins the API version, R01) ---
 
 /** Pinned default Graph API version. Overridable verbatim via `FB_API_VERSION`. */
-export const DEFAULT_API_VERSION = 'v23.0';
+export const DEFAULT_API_VERSION = 'v26.0';
 /**
  * Pinned default Marketing API version for the `ads` package. Overridable
  * verbatim via `FB_ADS_API_VERSION`.
@@ -42,6 +42,7 @@ export const DEFAULT_API_VERSION = 'v23.0';
  * 2027-10-08 (docs/analysis/12-graph-changelog-check-2026-10.md, H1). v26.0 is
  * the newest Marketing API version (released 2026-07-29) and so has the longest
  * runway; v25.0 is the fallback if v26.0 does not answer on the ads edges.
+ * Both pins happen to name v26.0 today; they still move independently.
  */
 export const DEFAULT_ADS_API_VERSION = 'v26.0';
 /** Structure-aware truncation budget default (~25k chars). */

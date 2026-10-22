@@ -62,7 +62,7 @@
           "description": "Graph API version to target. Defaults to the tested pinned version; other values are accepted verbatim as an escape hatch but are not tested.",
           "isRequired": false,
           "format": "string",
-          "default": "v23.0"
+          "default": "v26.0"
         },
         {
           "name": "FB_ADS_API_VERSION",

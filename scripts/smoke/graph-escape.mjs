@@ -47,7 +47,7 @@ import { SMOKE_ENV } from './env.mjs';
 export const ESCAPE_GRAPH_ORIGIN = 'https://graph.facebook.com';
 
 /** Mirrors `DEFAULT_API_VERSION` in src/core/settings.ts; `FB_API_VERSION` overrides. */
-export const ESCAPE_DEFAULT_API_VERSION = 'v23.0';
+export const ESCAPE_DEFAULT_API_VERSION = 'v26.0';
 
 /** Per-request timeout. Independent of the run timeout on purpose (see header). */
 export const ESCAPE_REQUEST_TIMEOUT_MS = 30_000;

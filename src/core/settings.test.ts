@@ -177,7 +177,7 @@ const BASE_ENV = { FB_ACCESS_TOKEN: 'fake', FB_APP_SECRET: 's', FB_PAGE_ID: '1' 
 
 test('H1: the ads pin defaults to v26.0 and is independent of the Graph pin', () => {
   assert.equal(DEFAULT_ADS_API_VERSION, 'v26.0');
-  assert.equal(DEFAULT_API_VERSION, 'v23.0', 'the Graph pin is unchanged');
+  assert.equal(DEFAULT_API_VERSION, 'v26.0', 'the Graph pin is its own constant');
   const { settings, report } = loadSettings({ ...POSIX, env: { ...BASE_ENV } });
   assert.equal(settings.adsApiVersion, DEFAULT_ADS_API_VERSION);
   assert.equal(settings.apiVersion, DEFAULT_API_VERSION);

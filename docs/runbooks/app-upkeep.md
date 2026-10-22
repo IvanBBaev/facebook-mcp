@@ -60,12 +60,12 @@ retire versions on different clocks:
 
 | Pin | Override | Currently | Used by |
 |---|---|---|---|
-| `DEFAULT_API_VERSION` | `FB_API_VERSION` | `v23.0` | every Graph call (Pages, posts, comments, Reels, insights, messages, token checks) |
+| `DEFAULT_API_VERSION` | `FB_API_VERSION` | `v26.0` | every Graph call (Pages, posts, comments, Reels, insights, messages, token checks) |
 | `DEFAULT_ADS_API_VERSION` | `FB_ADS_API_VERSION` | `v26.0` | every Marketing API call of the `ads` package (ad accounts, campaigns, ad sets, ads, ads insights, async report runs, status/budget writes) |
 
 Meta ships a new version roughly quarterly and supports each **Graph** API
 version for about two years, so the Graph pin ages out on a predictable, slow
-clock (Graph v23.0 runs until 2027-10-08).
+clock (Graph v26.0 was released 2026-07-29; its end date is not yet listed).
 
 The **Marketing** API runs on a much shorter clock: a Marketing API version is
 typically retired a few months after the version two releases newer ships

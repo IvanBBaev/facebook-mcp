@@ -7,6 +7,20 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Graph API pin moves from `v23.0` to `v26.0`.** `DEFAULT_API_VERSION`
+  (the `FB_API_VERSION` default) now targets Graph API v26.0, the newest
+  version (released 2026-07-29), so the 1.0 live verification runs against the
+  version that ships instead of verifying v23.0 and bumping afterwards (doc 12,
+  Recommendation, option C). The 2026-10 changelog check found no v24.0–v26.0
+  breaking change on a Pages, video, Reels, comments or Messenger field this
+  server reads or writes. Both pins now name `v26.0` but still move
+  independently. `FB_API_VERSION=v23.0` stays a supported override until
+  2027-10-08 for anyone who needs the old behaviour. Not yet verified against
+  live Graph: the `doctor` run, live smokes and fixture shape-diff of the
+  app-upkeep runbook §2 are part of the 1.0 live pass.
+
 ### Added
 
 - **A failed async report run said only "FAILED", never why.** Since Marketing
@@ -229,7 +243,7 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   `DEFAULT_ADS_API_VERSION` = `v26.0` (doc 12, finding H1, option C; `v25.0` is
   the fallback), overridable with the new `FB_ADS_API_VERSION` (validated like
   `FB_API_VERSION`, with the same off-default and format warnings). Graph calls
-  stay on `v23.0`. `doctor`, `facebook_whoami` and the `server started` log line
+  keep their own pin (see Changed for its move to `v26.0`). `doctor`, `facebook_whoami` and the `server started` log line
   report both versions, and the app-upkeep runbook §2 now covers bumping each pin
   independently.
 

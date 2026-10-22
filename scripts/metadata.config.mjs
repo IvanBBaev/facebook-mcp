@@ -208,13 +208,13 @@ export const env = Object.freeze([
     group: 'Graph API wire',
     required: 'no',
     secret: false,
-    default: 'v23.0',
+    default: 'v26.0',
     format: 'string',
     summary:
       'Graph API version to pin. Off-default values are accepted, but only the default is tested.',
     description:
       'Graph API version to target. Defaults to the tested pinned version; other values are accepted verbatim as an escape hatch but are not tested.',
-    example: 'v23.0',
+    example: 'v26.0',
   },
   {
     name: 'FB_ADS_API_VERSION',

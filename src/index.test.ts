@@ -1861,7 +1861,7 @@ test('the "server started" line names the packages the registry loaded, not ever
   assert.equal(fields['version'], '1.2.3');
   // Doc 12 H1: both pins are logged, so a support ticket shows which version
   // each API family was called on.
-  assert.equal(fields['apiVersion'], 'v23.0');
+  assert.equal(fields['apiVersion'], 'v26.0');
   assert.equal(fields['adsApiVersion'], 'v26.0');
 
   const { settings: adsOnly } = loadSettings({

@@ -189,6 +189,13 @@ the 1.0 live verification remains the **owner's open decision**; this update
 does not make it. M1–M3 and L1–L2 were handled as separate changes (see
 [Dispositions](#dispositions-2026-10-11)).
 
+✎ **Decided 2026-10-22.** The owner took option C for the Graph pin as well:
+`DEFAULT_API_VERSION` is now `v26.0`, as its own change (CHANGELOG
+`[Unreleased]` → Changed). Because the bump lands before the 1.0 live pass,
+runbook §2 steps 1–3 (`doctor`, live smokes, fixture shape-diff) run as part of
+that pass rather than before the constant moved; `FB_API_VERSION=v25.0` is the
+Graph fallback if v26.0 misbehaves live.
+
 ## Sources
 
 1. Graph API changelog, versions table — <https://developers.facebook.com/docs/graph-api/changelog>

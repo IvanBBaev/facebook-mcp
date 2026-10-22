@@ -846,7 +846,7 @@ export async function startFakeGraph({ now = () => Date.now(), adVersionWarning 
       });
       return ok({
         video_id: videoId,
-        upload_url: `https://rupload.facebook.com/video-upload/v23.0/${videoId}`,
+        upload_url: `https://rupload.facebook.com/video-upload/v26.0/${videoId}`,
       });
     }
     if (phase === 'finish') {
