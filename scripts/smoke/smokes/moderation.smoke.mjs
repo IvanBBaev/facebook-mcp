@@ -188,7 +188,7 @@ async function applyIrreversible(ctx, tool, args, what) {
   } catch (err) {
     if (err !== null && typeof err === 'object' && err.code === 'confirmation_denied') {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(confirmationMismatch(what, message));
+      throw new Error(confirmationMismatch(what, message), { cause: err });
     }
     throw err;
   }

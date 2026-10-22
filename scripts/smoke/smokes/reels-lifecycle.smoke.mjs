@@ -234,7 +234,7 @@ registerSmoke({
     /** Findings that make the run fail, without aborting the rest of the probe. */
     const problems = [];
     let failure;
-    let leaks = [];
+    const leaks = [];
 
     const createReel = async (state, extra = {}) => {
       const label = LABEL[state];
@@ -453,7 +453,6 @@ registerSmoke({
     } finally {
       // Cleanup: every Reel not already confirmed gone, through the escape hatch
       // only — the MCP session may already be closed by a run timeout.
-      leaks = [];
       for (const reel of created) {
         if (reel.gone) continue;
         try {

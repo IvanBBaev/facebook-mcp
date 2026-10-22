@@ -1010,7 +1010,7 @@ export async function runSetupToken(deps: SetupTokenDeps): Promise<SetupTokenRes
   }
 
   // --- 4. Pages -------------------------------------------------------------
-  let pages: SetupTokenPage[] = [];
+  let pages: SetupTokenPage[];
   let selectedPageId: string | undefined;
   let pageToken: string | undefined;
 

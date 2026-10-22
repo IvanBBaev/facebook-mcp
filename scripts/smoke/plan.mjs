@@ -295,7 +295,7 @@ function valueProblems(env, { relevant, sweepEnabled }) {
 
   const photo = nonEmpty(env, 'FB_SMOKE_PHOTO_URL');
   if (photo !== undefined) {
-    let ok = false;
+    let ok;
     try {
       ok = new URL(photo).protocol === 'https:';
     } catch {
