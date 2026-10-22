@@ -34,7 +34,9 @@ import { findSecrets } from './testing/fixtures.js';
 /** This file compiles to `build/record-fixture-ads.test.js`, so the root is one level up. */
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(REPO_ROOT, 'scripts', 'record-fixture.mjs');
-const FENCE = join(REPO_ROOT, 'build', 'testing', 'network-fence.js');
+// `--import` takes a module specifier, so the fence goes as a file: URL — a bare
+// Windows path (`D:\...`) is read as a URL with the scheme `d:` and refused.
+const FENCE = pathToFileURL(join(REPO_ROOT, 'build', 'testing', 'network-fence.js')).href;
 
 interface PlannedRequest {
   readonly out: string;
