@@ -273,6 +273,7 @@ Newest first. Link a dated analysis doc when the pass produced findings.
 
 | Date | Newest Graph / Marketing API | Data Use Checkup | Credential expiry | Outcome |
 | ---- | ---------------------------- | ---------------- | ----------------- | ------- |
+| 2026-10-22 | v26.0 / v26.0 (Marketing v24.0 available until 2026-11-10, v25.0 until 2027-02-23) | not checked (console step, desk check only) | not checked | Early desk pass (cadence due 2026-10-30), both pins now `v26.0`. Since 2026-10-02: no new Graph or Marketing version, no out-of-cycle changes (newest 2025-04-08), Messenger changelog unchanged since 2026-04-27 (message-tag removal, not used here), Page Insights: only the June 2026 removals, already in the metric table (`aac03ff`). No source changed. Next pass due 2026-11-19. |
 | 2026-10-02 | v26.0 / v25.0 (v26.0 announced, not yet in the Marketing table) | not checked (console step, desk check only) | not checked | Pin `v23.0`: Graph fine to 2027-10-08, but Marketing API v23.0 retired 2026-06-09 (HIGH). Recommend bumping to v26.0 as its own release before the 1.0 live pass. Insights rename-table gaps (MEDIUM). No source changed. See [`12-graph-changelog-check-2026-10.md`](../analysis/12-graph-changelog-check-2026-10.md). ✎ 2026-10-11: follow-up split the pins (ads on Marketing v26.0, Graph stays `v23.0`) and fixed the insights table; see the doc's Dispositions. |
 
 ## Related
