@@ -224,6 +224,32 @@ test('an overlapping-window total takes the newest date, whatever order Graph se
   assert.equal(out.metrics[0]?.totalIsLatest, true);
 });
 
+test('a stock metric takes the latest count in a daily series, never the sum of snapshots', () => {
+  // Regression coverage (PR #41, live Graph v25): page_follows with period=day
+  // is the follower COUNT at the end of each day. Summing seven of them turned
+  // an 881 → 882 week into "6166".
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_follows', 'day', [
+        [end('2026-07-01'), 881],
+        [end('2026-07-02'), 880],
+        [end('2026-07-03'), 882],
+      ]),
+      series('page_daily_follows', 'day', [
+        [end('2026-07-01'), 0],
+        [end('2026-07-02'), 0],
+        [end('2026-07-03'), 2],
+      ]),
+    ),
+  );
+  const stock = out.metrics.find((m) => m.metric === 'page_follows');
+  assert.equal(stock?.total, 882);
+  assert.equal(stock?.totalIsLatest, true);
+  const flow = out.metrics.find((m) => m.metric === 'page_daily_follows');
+  assert.equal(flow?.total, 2, 'a daily flow is still a sum');
+  assert.equal(flow?.totalIsLatest, undefined);
+});
+
 test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
   const out = reshapeInsights(
     insightsBody(
@@ -764,7 +790,8 @@ test('fetchInsights aggregate mode returns totals only, with no per-point rows',
     result.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
     [
       ['page_media_view', 60, 120],
-      ['page_follows', 60, 60],
+      // page_follows is a stock: the latest daily count, not 60 counts summed.
+      ['page_follows', 60, 1],
     ],
   );
   assert.equal(

@@ -154,13 +154,24 @@ export const PERIOD_BOUNDARY_NOTE =
  */
 const OVERLAPPING_PERIODS: ReadonlySet<string> = new Set(['week', 'days_28', 'lifetime']);
 
+/**
+ * Metrics that are a STOCK (a level, read at the end of each bucket), not a
+ * flow, whatever period Graph echoes: `page_follows` with `period=day` is the
+ * follower count at the end of each day. Summing seven of those turned a live
+ * 881 → 882 week into "6166" (PR #41), so they take the latest point, exactly
+ * like an overlapping period.
+ */
+const STOCK_METRICS: ReadonlySet<string> = new Set(['page_follows']);
+
 /** Why `total` is the latest point, not a sum, for an overlapping period. */
 export const OVERLAPPING_TOTAL_NOTE =
   '`total` for a week / days_28 / lifetime metric with more than one point is ' +
   'the value of the LATEST point (`totalIsLatest: true`), not a sum: every ' +
   'point already covers a rolling (or, for lifetime, cumulative) window that ' +
   'overlaps the previous one, so adding them would count the same day up to 28 ' +
-  'times. Only day, month and total_over_range totals are sums.';
+  'times. The same holds for a stock metric such as page_follows in any period: ' +
+  'each point is the follower count at that date, so the total is the latest ' +
+  'count. Only day, month and total_over_range flow totals are sums.';
 
 /** One metric whose per-point rows the cap cut short (or cut entirely). */
 interface CutSeries {
@@ -589,9 +600,10 @@ export interface MetricSummary {
   /**
    * The metric's total across breakdown keys. Absent ⇒ no numeric point. For a
    * disjoint period (`day`, `month`, `total_over_range`) this is the sum of all
-   * numeric points; for an overlapping one (`week`, `days_28`, `lifetime`) with
-   * points on more than one date it is the LATEST date's value only, flagged by
-   * `totalIsLatest` — see {@link OVERLAPPING_TOTAL_NOTE}.
+   * numeric points; for an overlapping one (`week`, `days_28`, `lifetime`) or a
+   * stock metric (`page_follows`) with points on more than one date it is the
+   * LATEST date's value only, flagged by `totalIsLatest` — see
+   * {@link OVERLAPPING_TOTAL_NOTE}.
    */
   readonly total?: number;
   /** True ⇒ `total` is the newest point (overlapping period), not a sum. */
@@ -695,8 +707,9 @@ function summarize(
   nonNumeric: boolean,
   emptyMapDates: ReadonlySet<string> = new Set(),
 ): MetricSummary {
-  // A rolling / cumulative period with points on several dates: the honest
-  // headline is the newest window, not 30 overlapping ones added together
+  // A rolling / cumulative period (or a stock metric) with points on several
+  // dates: the honest headline is the newest window, not 30 overlapping ones
+  // added together
   // (a steady 100 views per 28 days summed to "3000" before this). The newest
   // date is chosen by value, not array position — Graph documents oldest-first
   // but a reversed body must not quietly hand back the OLDEST window as the
@@ -711,7 +724,7 @@ function summarize(
   );
   if (rows.length > 0) for (const date of emptyMapDates) dates.add(date);
   const latestDate =
-    OVERLAPPING_PERIODS.has(period) && dates.size > 1
+    (OVERLAPPING_PERIODS.has(period) || STOCK_METRICS.has(metric)) && dates.size > 1
       ? [...dates].reduce((max, date) => (date > max ? date : max))
       : undefined;
   let total: number | undefined;

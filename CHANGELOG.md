@@ -242,6 +242,15 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
 
 ### Fixed
 
+- **Insights summed follower counts.** `page_follows` is a stock (the follower
+  count at the end of each bucket), but with `period=day` its points were
+  added like a flow, so a week that went from 881 to 882 followers reported a
+  `total` of 6166 (live Graph v25 report in PR #41). A stock metric now takes
+  the latest point, flagged `totalIsLatest: true` with the same note as the
+  overlapping `week` / `days_28` / `lifetime` periods; flows such as
+  `page_daily_follows` are still summed. Thanks to Lukasz Liniewicz for the
+  report.
+
 - **`facebook_get_page` failed outright on a real Page.** It requested
   `video_upload_limits`, which Graph rejects on the Page node
   (`(#100) Tried accessing nonexisting field (video_upload_limits)`, seen live

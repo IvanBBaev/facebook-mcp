@@ -477,7 +477,8 @@ test('page_insights aggregate mode returns per-metric totals and no rows at all'
     summariesOf(parsed).map((m) => [m.metric, m.points, m.total]),
     [
       ['page_media_view', 60, 120],
-      ['page_follows', 60, 60],
+      // page_follows is a stock: the latest daily count, not 60 counts summed.
+      ['page_follows', 60, 1],
     ],
   );
   assert.equal(noteMatching(parsed, /Row cap reached/), undefined);
