@@ -304,6 +304,43 @@ test('CC-CFG-1: loadEnvFile is env-first (client-passed env wins) and quiet on s
   );
 });
 
+test('CC-CFG-1: ambient DOTENV_* variables neither reach stdout nor redirect the env file', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'fbmcp-env-ambient-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.env');
+  const decoy = path.join(dir, 'decoy.env');
+  await writeFile(file, 'FBMCP_TEST_AMBIENT=from-file\n');
+  await writeFile(decoy, 'FBMCP_TEST_AMBIENT=from-decoy\n');
+
+  await withEnv(
+    {
+      FBMCP_TEST_AMBIENT: undefined,
+      DOTENV_DEBUG: 'true',
+      DOTENV_QUIET: 'false',
+      DOTENV_PATH: decoy,
+      DOTENV_CONFIG_DEBUG: 'true',
+      DOTENV_CONFIG_PATH: decoy,
+    },
+    () => {
+      const original = process.stdout.write.bind(process.stdout);
+      let captured = '';
+      process.stdout.write = (chunk: string | Uint8Array): boolean => {
+        captured +=
+          typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+        return true;
+      };
+      try {
+        const result = loadEnvFile({ path: file });
+        assert.equal(result.loaded, true);
+      } finally {
+        process.stdout.write = original;
+      }
+      assert.equal(captured, '', 'nothing written to stdout');
+      assert.equal(process.env.FBMCP_TEST_AMBIENT, 'from-file');
+    },
+  );
+});
+
 test('loadEnvFile tolerates a missing file (optional env file)', () => {
   const result = loadEnvFile({
     path: path.join(tmpdir(), 'fbmcp-does-not-exist-xyz', '.env'),

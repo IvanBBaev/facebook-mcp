@@ -21,6 +21,14 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
   live Graph: the `doctor` run, live smokes and fixture shape-diff of the
   app-upkeep runbook §2 are part of the 1.0 live pass.
 
+- **dotenv moves from `^17.4.2` to `^18.0.8`.** dotenv 18 takes its `path`,
+  `encoding`, `quiet`, `debug`, `override` and `fast` defaults from
+  `DOTENV_<NAME>` / `DOTENV_CONFIG_<NAME>` in the environment, and its debug
+  lines go to stdout. The env-file loader now passes every one of them
+  explicitly, so a `DOTENV_DEBUG` in the client's environment cannot write to
+  the stdio JSON-RPC channel and a `DOTENV_PATH` cannot load a different file
+  than the one the server names. No behaviour change otherwise.
+
 ### Added
 
 - **A failed async report run said only "FAILED", never why.** Since Marketing

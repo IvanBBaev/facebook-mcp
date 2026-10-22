@@ -162,15 +162,24 @@ export function loadEnvFile(options: LoadEnvFileOptions = {}): LoadEnvFileResult
   // a field left empty arrives as FB_ACCESS_TOKEN="" — shadowed the file's
   // value. Settings reads blank as unset, so startup then said "No access token
   // configured" while the token sat in the env file. Blank is unset here too.
+  //
+  // Every option dotenv also reads from the environment is passed explicitly:
+  // dotenv v18 defaults ENCODING, PATH, QUIET, DEBUG, OVERRIDE and FAST from
+  // DOTENV_<NAME> / DOTENV_CONFIG_<NAME>, so an ambient DOTENV_DEBUG would print
+  // debug lines to stdout (CC-CFG-1) and DOTENV_PATH would load another file.
   const scratch: Record<string, string> = {};
-  const utf16 = readUtf16EnvFile(options.path ?? path.resolve(process.cwd(), '.env'));
+  const file = options.path ?? path.resolve(process.cwd(), '.env');
+  const utf16 = readUtf16EnvFile(file);
   const result =
     utf16 !== undefined
       ? { parsed: dotenv.parse(utf16) }
       : dotenv.config({
+          path: file,
+          encoding: 'utf8',
           quiet: true,
+          debug: false,
+          override: false,
           processEnv: scratch,
-          ...(options.path !== undefined ? { path: options.path } : {}),
         });
   const error = result.error as NodeJS.ErrnoException | undefined;
   const parsed = result.parsed ?? {};
