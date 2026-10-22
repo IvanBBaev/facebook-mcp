@@ -89,8 +89,10 @@ phase tag. A phase gate is not passable while one of its items is unverified.
 - **[Phase 5 / v1.1] ASC/AAC campaign merge shape** (`smart_promotion_type`) —
   verify before building campaign-type logic; ads ships in 1.1 (doc 10 §1), so
   this lands with the ads package.
-- **[Phase 2] `video_upload_limits` values** — field unconfirmed (C10); read for
-  the target Page and degrade gracefully if absent.
+- ~~**[Phase 2] `video_upload_limits` values**~~ — ✎ resolved 2026-10-22: Graph
+  v25.0 rejects the field on the Page node (`#100`, live report in PR #40), so
+  `facebook_get_page` no longer requests it; upload limits come from Meta's
+  upload validation errors instead.
 - **[Phase 3] NPE per-field behavior** (`private_reply_conversation`,
   `visitor_posts`) — verify per-field on the real Page (R6); tolerate nulls.
 - **[Phase 0] SDK v1 (1.29) spec coverage** — confirm the SDK version implements

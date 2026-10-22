@@ -242,6 +242,13 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
 
 ### Fixed
 
+- **`facebook_get_page` failed outright on a real Page.** It requested
+  `video_upload_limits`, which Graph rejects on the Page node
+  (`(#100) Tried accessing nonexisting field (video_upload_limits)`, seen live
+  on v25.0), so the whole call errored instead of returning the other fields.
+  The field is no longer requested and the tool description no longer promises
+  upload limits. Thanks to Lukasz Liniewicz for the live report and fix (#40).
+
 - **The `ads` package called a retired Marketing API version.** Every ads request
   shared the Graph pin `v23.0`, but the Marketing API retires versions on its own,
   shorter clock: Marketing v23.0 ended 2026-06-09 (Graph v23.0 runs to
