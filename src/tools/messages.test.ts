@@ -1775,6 +1775,19 @@ test('facebook_get_conversation does not declare the window closed past a droppe
   );
 });
 
+test('facebook_get_conversation returns the page note as notes[] and the deprecated note', async () => {
+  const { fb, ctx } = makeCtx();
+  stubThread(fb, threadWithDroppedNewestRow());
+
+  const payload = body(
+    await tool(TOOL_GET).handler({ conversation_id: CONVERSATION_ID }, ctx),
+  );
+  assert.ok(Array.isArray(payload.notes), 'notes is an array');
+  const notes = payload.notes as readonly string[];
+  assert.equal(notes.length, 1);
+  assert.equal(payload.note, notes[0]);
+});
+
 test('facebook_send_message does not refuse locally past a dropped unreadable row', async () => {
   const { fb, journal, ctx } = makeCtx();
   stubThread(fb, threadWithDroppedNewestRow());

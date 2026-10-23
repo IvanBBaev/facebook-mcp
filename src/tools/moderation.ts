@@ -821,9 +821,7 @@ export function createModerationPackage(): PackageSpec {
           ? EMPTY_PAGE_TOKEN_HINT
           : undefined,
         summaryNote,
-      ]
-        .filter((n): n is string => n !== undefined)
-        .join(' ');
+      ].filter((n): n is string => n !== undefined);
 
       return shapeFor(ctx, {
         pageId: resolved.pageId,
@@ -833,7 +831,9 @@ export function createModerationPackage(): PackageSpec {
         truncated: page.truncated,
         ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
         ...(summary !== undefined ? { summary } : {}),
-        ...(notes.length > 0 ? { note: notes } : {}),
+        // `notes` keeps each advisory separate so a caller can branch on one;
+        // `note` is the deprecated joined form, removed in 2.0.
+        ...(notes.length > 0 ? { notes, note: notes.join(' ') } : {}),
         guidance: MODERATION_GUIDANCE,
       });
     },

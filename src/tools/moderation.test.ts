@@ -502,6 +502,7 @@ test('facebook_list_comments explains an empty edge as the silent user-token tra
   );
 
   assert.equal(payload.count, 0);
+  assert.deepEqual(payload.notes, [EMPTY_PAGE_TOKEN_HINT]);
   assert.equal(payload.note, EMPTY_PAGE_TOKEN_HINT);
   assert.equal(paramsOf(firstCall(fb)).limit, 25, 'the shared default page size');
 });
@@ -597,6 +598,52 @@ test('facebook_list_comments keeps the comments when only the summary call fails
   assert.equal(payload.summary, undefined, 'no count is invented');
   assert.match(str(payload.note), /summary/i);
   assert.match(str(payload.note), /request limit reached/);
+});
+
+test('facebook_list_comments returns each advisory as its own notes[] element', async () => {
+  const { fb, ctx } = makeHarness();
+  // An empty edge plus a failed summary call: two independent advisories.
+  fb.on(
+    (r) => r.method === 'GET' && paramsOf(r).summary === 'true',
+    fbErr(
+      new GraphApiError('(#4) Application request limit reached', {
+        code: 4,
+        httpStatus: 400,
+        action: {
+          category: 'rate_limit',
+          retryable: true,
+          operatorText: 'the app is rate limited',
+        },
+      }),
+    ),
+  );
+  fb.on((r) => r.method === 'GET', fbOk({ data: [] }));
+
+  const payload = body(
+    await tool('facebook_list_comments').handler(
+      { object_id: OBJECT_ID, include_summary: true },
+      ctx,
+    ),
+  );
+
+  assert.ok(Array.isArray(payload.notes));
+  const notes = payload.notes as readonly string[];
+  assert.equal(notes.length, 2);
+  assert.equal(notes[0], EMPTY_PAGE_TOKEN_HINT);
+  assert.match(notes[1] ?? '', /summary could not be read/);
+  assert.equal(payload.note, notes.join(' '), 'the deprecated joined form is kept');
+});
+
+test('facebook_list_comments omits notes when there is nothing to say', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk({ data: [rawComment()] }));
+
+  const payload = body(
+    await tool('facebook_list_comments').handler({ object_id: OBJECT_ID }, ctx),
+  );
+
+  assert.equal(payload.notes, undefined);
+  assert.equal(payload.note, undefined);
 });
 
 test('facebook_list_comments still fails loudly when the summary call finds the token dead', async () => {

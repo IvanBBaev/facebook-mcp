@@ -37,6 +37,11 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Read notes come as an array (backlog F5).** `facebook_list_comments`,
+  `facebook_list_conversations` and `facebook_get_conversation` now return
+  `notes: string[]`, one advisory per element, so a caller can branch on one
+  note without splitting prose.
+
 - **A failed or skipped async ads report carries the error matrix's advice
   (backlog A2).** `failure.action` is now the same category / retryable /
   next-tool / operator text a synchronous Graph error with that
@@ -292,6 +297,13 @@ cover)`. The exit code stays 0 on purpose — an idle Page is a property of the
   per smoke, whether it will run and what it creates, cleans up and leaves on the
   real Page. It exits non-zero when the live run would refuse. Every smoke now
   declares its `effects`, checked against `writes` at registration.
+
+### Deprecated
+
+- **The joined `note` string on reads.** `facebook_list_comments`,
+  `facebook_list_conversations` and `facebook_get_conversation` still emit
+  `note` (the advisories joined by a space) next to the new `notes[]`; it is
+  removed in 2.0. Read `notes` instead.
 
 ### Fixed
 

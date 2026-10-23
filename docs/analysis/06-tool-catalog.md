@@ -168,6 +168,10 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   schema exists.
 - Errors: mapped `GraphApiError` with actionable text ("permission X missing —
   run facebook_whoami", "rate limited — retry after N min").
+- Advisory notes on a read come as `notes: string[]`, one advisory per element
+  (`facebook_list_comments`, `facebook_list_conversations`,
+  `facebook_get_conversation`). The joined `note` string is still emitted next
+  to it but is **deprecated** and removed in 2.0.
 
 **Total as shipped: 30 model-facing tools in the default `core` profile** (core 4
 + posts 8 + reader 4 + insights 3 + moderation 8 + messages 3), with the opt-in

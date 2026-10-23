@@ -196,7 +196,9 @@ function pagingFields(page: {
   return {
     ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
     truncated: page.truncated,
-    ...(page.note !== undefined ? { note: page.note } : {}),
+    // `notes` is the array form every read converges on; `note` is the
+    // deprecated single string, removed in 2.0.
+    ...(page.note !== undefined ? { notes: [page.note], note: page.note } : {}),
   };
 }
 
