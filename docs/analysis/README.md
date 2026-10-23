@@ -46,6 +46,7 @@ Three findings shape the design:
 | [10-v1-release-definition.md](10-v1-release-definition.md) | v1.0 definition, version map, gap additions (G-items) |
 | [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) | Multi-agent work plan: waves, task IDs, file ownership, dependency DAG |
 | [12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md) | Post-launch Meta changelog check (2026-10-02): versions, v23.0 sunset, impact matrix, bump recommendation |
+| [v2/](v2/README.md) | v2.0.0 analysis (2026-10-24): fix-before-1.0 list, v1.x backlog, v2 scope, owner decisions, roadmap and risks |
 
 ## Status
 
@@ -69,6 +70,9 @@ Three findings shape the design:
   with version-drift detection, and the insights table fixes landed. ✎
   2026-10-22: the Graph pin moved to `v26.0` too (owner decision, option C), so
   the live verification runs on the version that ships.
+- **v2.0.0 analysis:** ✎ 2026-10-24: [v2/](v2/README.md) adds a fix-before-1.0
+  list (F1–F14) for the contract freeze, plus the 2.0 scope (forced by the MCP SDK
+  v2 migration) and owner decisions D1–D7.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
   runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
   the release rail in [../runbooks/release.md](../runbooks/release.md) has already
