@@ -45,6 +45,17 @@ const EXPECTED_IDS = [
   'rate-613',
   'rate-341',
   'rate-buc',
+  'ads-adset-budget-hourly',
+  'ads-account-spendlimit-daily',
+  'ads-creation-capped-by-spend',
+  'ads-object-edit-too-fast',
+  'ads-mutation-qps',
+  'ads-buc-17',
+  'ads-buc-613',
+  'ads-dsa-payor-missing',
+  'ads-dsa-beneficiary-missing',
+  'ads-ca-terms',
+  'ads-ca-business-link',
   'duplicate-506',
   'not-found-100-21',
   'not-found-21',
@@ -126,9 +137,11 @@ test('every row has substantial, sentence-like operator text', () => {
   }
 });
 
-test('honor-ETA throttle rows carry the default surfaced retry-after (so an ETA-less throttle still hints)', () => {
+test('honor-ETA throttle family rows carry the default surfaced retry-after (so an ETA-less throttle still hints)', () => {
+  // A subcode row may name its own documented window (4 budget edits an hour,
+  // one object edit per 30 s); the code-wide family rows all share the default.
   for (const r of ERROR_MATRIX) {
-    if (!r.honorEta || r.category !== 'rate_limit') continue;
+    if (!r.honorEta || r.category !== 'rate_limit' || r.subcode !== undefined) continue;
     assert.equal(
       typeof r.retryAfterMs,
       'number',
@@ -263,5 +276,34 @@ test('an undocumented subcode under a family code falls back to that family, nev
   ];
   for (const [code, id] of expected) {
     assert.equal(matchErrorRow(code, UNSEEN)?.id, id, `code ${code} + unseen subcode`);
+  }
+});
+
+test('the Marketing API subcodes win over their code-only family and are never retryable', () => {
+  const expected: readonly (readonly [
+    number,
+    number,
+    string,
+    string,
+    number | undefined,
+  ])[] = [
+    [613, 1487632, 'ads-adset-budget-hourly', 'rate_limit', 15 * 60_000],
+    [17, 1885172, 'ads-account-spendlimit-daily', 'rate_limit', 24 * 60 * 60_000],
+    [613, 1487225, 'ads-creation-capped-by-spend', 'rate_limit', undefined],
+    [613, 4841018, 'ads-object-edit-too-fast', 'rate_limit', 30_000],
+    [613, 5044001, 'ads-mutation-qps', 'rate_limit', 1_000],
+    [17, 2446079, 'ads-buc-17', 'rate_limit', DEFAULT_THROTTLE_RETRY_AFTER_MS],
+    [613, 1487742, 'ads-buc-613', 'rate_limit', DEFAULT_THROTTLE_RETRY_AFTER_MS],
+    [100, 3858079, 'ads-dsa-payor-missing', 'validation', undefined],
+    [100, 3858081, 'ads-dsa-beneficiary-missing', 'validation', undefined],
+    [200, 1870090, 'ads-ca-terms', 'permission', undefined],
+    [200, 1870050, 'ads-ca-business-link', 'permission', undefined],
+  ];
+  for (const [code, subcode, id, category, retryAfterMs] of expected) {
+    const row = matchErrorRow(code, subcode);
+    assert.equal(row?.id, id, `${code}/${subcode}`);
+    assert.equal(row?.category, category, id);
+    assert.equal(row?.retryable, false, id);
+    assert.equal(row?.retryAfterMs, retryAfterMs, id);
   }
 });

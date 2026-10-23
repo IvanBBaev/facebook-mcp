@@ -191,6 +191,80 @@ const MATRIX_SNAPSHOT: Record<string, ErrorAction> = {
     nextTool: 'facebook_usage',
     retryAfterMs: 60000,
   },
+  'ads-adset-budget-hourly': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad set budget was changed too often (code 613/1487632): Meta allows 4 budget changes per ad set per hour. Nothing was changed; wait before editing this budget again.',
+    retryAfterMs: 900000,
+  },
+  'ads-account-spendlimit-daily': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad account spending limit was changed too often (code 17/1885172): Meta allows 10 changes per day. This server never writes the account limit, so the changes came from elsewhere (Ads Manager); wait a day before changing it again.',
+    retryAfterMs: 86400000,
+  },
+  'ads-creation-capped-by-spend': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'Ad creation is capped by the account daily spend (code 613/1487225): the account has too many ads for what it currently spends. This is not time-based; archive or delete unused ads before creating more.',
+  },
+  'ads-object-edit-too-fast': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'This ad object was edited too often (code 613/4841018): Meta allows about one edit per object every 30 seconds. Nothing was changed; wait before editing it again.',
+    retryAfterMs: 30000,
+  },
+  'ads-mutation-qps': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The Marketing API mutation rate limit was hit (code 613/5044001): too many ad writes per second for this app. Nothing was changed; wait a moment before the next write.',
+    retryAfterMs: 1000,
+  },
+  'ads-buc-17': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad account business-use-case limit was reached (code 17/2446079). Ad writes are not retried; wait for the estimated cool-down and check facebook_usage for the ads bucket.',
+    nextTool: 'facebook_usage',
+    retryAfterMs: 60000,
+  },
+  'ads-buc-613': {
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad account business-use-case limit was reached (code 613/1487742, legacy form). Ad writes are not retried; wait for the estimated cool-down and check facebook_usage.',
+    nextTool: 'facebook_usage',
+    retryAfterMs: 60000,
+  },
+  'ads-dsa-payor-missing': {
+    category: 'validation',
+    retryable: false,
+    operatorText:
+      'An ad set that targets the EU needs a DSA payor (code 100/3858079). Set dsa_payor on the ad set, or default_dsa_payor on the ad account, and try again.',
+  },
+  'ads-dsa-beneficiary-missing': {
+    category: 'validation',
+    retryable: false,
+    operatorText:
+      'An ad set that targets the EU needs a DSA beneficiary (code 100/3858081). Set dsa_beneficiary on the ad set, or default_dsa_beneficiary on the ad account, and try again.',
+  },
+  'ads-ca-terms': {
+    category: 'permission',
+    retryable: false,
+    operatorText:
+      'The custom audience terms of service are not accepted for this ad account (code 200/1870090). Custom audiences are outside this server; accept the terms in Ads Manager if the audience is needed.',
+  },
+  'ads-ca-business-link': {
+    category: 'permission',
+    retryable: false,
+    operatorText:
+      'The custom audience needs the ad account linked to a Business (code 200/1870050). Custom audiences are outside this server; link the account in Business Manager if the audience is needed.',
+  },
   'duplicate-506': {
     category: 'duplicate',
     retryable: false,

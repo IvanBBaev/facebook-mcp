@@ -345,6 +345,143 @@ export const ERROR_MATRIX: readonly ErrorMatrixRow[] = [
     honorEta: true,
   },
 
+  // --- Marketing API mutation / rate subcodes (ads package) ----------------
+  // Narrower than the throttle families above. They arrive on ads WRITES, which
+  // are never auto-retried (C2), so every row is `retryable: false`: the cool-down
+  // is surfaced for the operator, never acted on. The transport's throttle loop
+  // keys on the top-level code alone, so a read that meets 17/613 is still spaced
+  // by the family back-off before one of these rows describes the final error.
+  {
+    id: 'ads-adset-budget-hourly',
+    code: 613,
+    subcode: 1487632,
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad set budget was changed too often (code 613/1487632): Meta allows 4 budget ' +
+      'changes per ad set per hour. Nothing was changed; wait before editing this budget again.',
+    retryAfterMs: 15 * 60_000,
+    honorEta: true,
+  },
+  {
+    id: 'ads-account-spendlimit-daily',
+    code: 17,
+    subcode: 1885172,
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The ad account spending limit was changed too often (code 17/1885172): Meta allows 10 ' +
+      'changes per day. This server never writes the account limit, so the changes came from ' +
+      'elsewhere (Ads Manager); wait a day before changing it again.',
+    retryAfterMs: 24 * 60 * 60_000,
+    honorEta: true,
+  },
+  {
+    id: 'ads-creation-capped-by-spend',
+    code: 613,
+    subcode: 1487225,
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'Ad creation is capped by the account daily spend (code 613/1487225): the account has too ' +
+      'many ads for what it currently spends. This is not time-based; archive or delete unused ' +
+      'ads before creating more.',
+  },
+  {
+    id: 'ads-object-edit-too-fast',
+    code: 613,
+    subcode: 4841018,
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'This ad object was edited too often (code 613/4841018): Meta allows about one edit per ' +
+      'object every 30 seconds. Nothing was changed; wait before editing it again.',
+    retryAfterMs: 30_000,
+    honorEta: true,
+  },
+  {
+    id: 'ads-mutation-qps',
+    code: 613,
+    subcode: 5044001,
+    category: 'rate_limit',
+    retryable: false,
+    operatorText:
+      'The Marketing API mutation rate limit was hit (code 613/5044001): too many ad writes per ' +
+      'second for this app. Nothing was changed; wait a moment before the next write.',
+    retryAfterMs: 1_000,
+    honorEta: true,
+  },
+  {
+    id: 'ads-buc-17',
+    code: 17,
+    subcode: 2446079,
+    category: 'rate_limit',
+    retryable: false,
+    nextTool: 'facebook_usage',
+    operatorText:
+      'The ad account business-use-case limit was reached (code 17/2446079). Ad writes are not ' +
+      'retried; wait for the estimated cool-down and check facebook_usage for the ads bucket.',
+    retryAfterMs: DEFAULT_THROTTLE_RETRY_AFTER_MS,
+    honorEta: true,
+  },
+  {
+    id: 'ads-buc-613',
+    code: 613,
+    subcode: 1487742,
+    category: 'rate_limit',
+    retryable: false,
+    nextTool: 'facebook_usage',
+    operatorText:
+      'The ad account business-use-case limit was reached (code 613/1487742, legacy form). Ad ' +
+      'writes are not retried; wait for the estimated cool-down and check facebook_usage.',
+    retryAfterMs: DEFAULT_THROTTLE_RETRY_AFTER_MS,
+    honorEta: true,
+  },
+  {
+    // The top-level code of the two DSA refusals is not documented; 100 is the
+    // assumption until a live call shows otherwise.
+    id: 'ads-dsa-payor-missing',
+    code: 100,
+    subcode: 3858079,
+    category: 'validation',
+    retryable: false,
+    operatorText:
+      'An ad set that targets the EU needs a DSA payor (code 100/3858079). Set dsa_payor on the ' +
+      'ad set, or default_dsa_payor on the ad account, and try again.',
+  },
+  {
+    id: 'ads-dsa-beneficiary-missing',
+    code: 100,
+    subcode: 3858081,
+    category: 'validation',
+    retryable: false,
+    operatorText:
+      'An ad set that targets the EU needs a DSA beneficiary (code 100/3858081). Set ' +
+      'dsa_beneficiary on the ad set, or default_dsa_beneficiary on the ad account, and try again.',
+  },
+  {
+    id: 'ads-ca-terms',
+    code: 200,
+    subcode: 1870090,
+    category: 'permission',
+    retryable: false,
+    operatorText:
+      'The custom audience terms of service are not accepted for this ad account (code ' +
+      '200/1870090). Custom audiences are outside this server; accept the terms in Ads Manager ' +
+      'if the audience is needed.',
+  },
+  {
+    id: 'ads-ca-business-link',
+    code: 200,
+    subcode: 1870050,
+    category: 'permission',
+    retryable: false,
+    operatorText:
+      'The custom audience needs the ad account linked to a Business (code 200/1870050). Custom ' +
+      'audiences are outside this server; link the account in Business Manager if the audience ' +
+      'is needed.',
+  },
+
   // --- Duplicate post: surfaced, NEVER retried -----------------------------
   {
     id: 'duplicate-506',

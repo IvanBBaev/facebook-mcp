@@ -534,13 +534,13 @@ export function planAdObjectUpdate(
         (value) => value !== undefined && READ_ONLY_STATUSES.has(value),
       );
   if (blocking !== undefined) {
-    // Meta cannot restore a deleted campaign, ad set or ad; only archived ones
-    // can be brought back. Advising a restore for DELETED names a step that
-    // does not exist.
+    // Meta cannot restore a deleted campaign, ad set or ad. An archived one
+    // cannot be resumed through the API either, and Ads Manager does not offer
+    // a restore for every archived object, so the advice must not promise one.
     const nextStep =
       blocking === 'DELETED'
         ? 'Deletion is permanent and it cannot be restored — create or duplicate a replacement in Ads Manager instead.'
-        : 'Restore (unarchive) it in Ads Manager first.';
+        : 'Archived objects cannot be resumed through the API; if Ads Manager offers to restore it, do that there, otherwise create or duplicate a replacement.';
     throw validationError(
       `${req.objectId} is ${blocking} and is read-only: archived and deleted ads objects cannot be edited or resumed through the API. Nothing was changed. ${nextStep}`,
     );

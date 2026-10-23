@@ -9,6 +9,12 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Changed
 
+- **The refusal for an ARCHIVED ads object no longer promises a restore.**
+  `facebook_update_ad_object` used to say "Restore (unarchive) it in Ads
+  Manager first", which Ads Manager does not offer for every archived object.
+  It now says the API cannot resume it and to restore it in Ads Manager only
+  if offered there, otherwise to create or duplicate a replacement.
+
 - **The Graph API pin moves from `v23.0` to `v26.0`.** `DEFAULT_API_VERSION`
   (the `FB_API_VERSION` default) now targets Graph API v26.0, the newest
   version (released 2026-07-29), so the 1.0 live verification runs against the
@@ -30,6 +36,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
   than the one the server names. No behaviour change otherwise.
 
 ### Added
+
+- **Marketing API mutation and rate subcodes get their own advice.** Eleven
+  `{code, subcode}` rows join the error matrix: the hourly ad-set budget edit
+  cap (613/1487632), the daily account spend-limit edit cap (17/1885172), ad
+  creation capped by spend (613/1487225), per-object edit pacing
+  (613/4841018), mutation QPS (613/5044001), the ad-account business-use-case
+  limits (17/2446079, 613/1487742), the two EU DSA payor/beneficiary refusals
+  (100/3858079, 100/3858081) and two custom-audience refusals (200/1870090,
+  200/1870050). Each names Meta's documented window where there is one and is
+  never `retryable` (an ads write is not auto-retried); before, they fell back
+  to the code-wide 613/17/100/200 advice. The DSA rows assume top-level code
+  100 until a live call confirms it.
 
 - **A failed async report run said only "FAILED", never why.** Since Marketing
   API v25.0 a report run carries `error_code`, `error_subcode`,

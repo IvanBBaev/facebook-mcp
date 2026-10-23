@@ -348,6 +348,10 @@ test('CC-ADS-4: an ARCHIVED object is refused before anything reaches the wire',
   );
   assert.match(err.message, /read-only/);
   assert.match(err.message, /Nothing was changed/);
+  // A4: an archived object is not always restorable in Ads Manager either.
+  assert.match(err.message, /cannot be resumed through the API/);
+  assert.match(err.message, /if Ads Manager offers to restore it/);
+  assert.doesNotMatch(err.message, /Restore \(unarchive\) it in Ads Manager first/);
 });
 
 test('CC-ADS-4: a DELETED object is refused even when only the effective status says so', () => {
