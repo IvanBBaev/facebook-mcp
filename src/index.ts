@@ -1222,10 +1222,21 @@ export function adAccountProbe(): AdAccountProbe {
     return {
       available: info.serving,
       ...(info.serving ? {} : { degraded: true }),
-      summary: `ad account ${info.id}: ${info.summary}`,
+      summary: `ad account ${info.id}: ${info.summary}${
+        info.moneySummary !== undefined ? ` ${info.moneySummary}` : ''
+      }`,
       details: {
         statusLabel: info.statusLabel,
         ...(info.currency !== undefined ? { currency: info.currency } : {}),
+        ...(info.spendCapMinor !== undefined
+          ? { spendCapMinor: info.spendCapMinor }
+          : {}),
+        ...(info.amountSpentMinor !== undefined
+          ? { amountSpentMinor: info.amountSpentMinor }
+          : {}),
+        ...(info.headroomMinor !== undefined
+          ? { headroomMinor: info.headroomMinor }
+          : {}),
         ...(info.disableReasonLabel !== undefined
           ? { disableReason: info.disableReasonLabel }
           : {}),

@@ -1500,6 +1500,31 @@ test('adAccountProbe reports a serving ad account', async () => {
   assert.equal(result.details?.['currency'], 'EUR');
 });
 
+test('adAccountProbe prints the account money headroom (A1)', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.path === '/act_12345',
+    fbOk({
+      id: 'act_12345',
+      account_status: 1,
+      currency: 'EUR',
+      spend_cap: '100000',
+      amount_spent: '25000',
+    }),
+  );
+
+  const { ctx } = probeContext(fb, { FB_AD_ACCOUNT_ID: '12345' });
+  const result = await adAccountProbe()(ctx);
+
+  assert.match(
+    result.summary,
+    /Account spend limit: 100000 minor units of EUR, spent: 25000 minor units of EUR, remaining: 75000 minor units of EUR\./,
+  );
+  assert.equal(result.details?.['spendCapMinor'], 100_000);
+  assert.equal(result.details?.['amountSpentMinor'], 25_000);
+  assert.equal(result.details?.['headroomMinor'], 75_000);
+});
+
 test('adAccountProbe surfaces the disable reason and omits an absent currency', async () => {
   const fb = createFakeFbRequest();
   // A disabled account with no currency: the reason is the only thing that

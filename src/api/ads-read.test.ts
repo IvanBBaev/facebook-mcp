@@ -649,6 +649,61 @@ test('CC-ADS-6: an ACTIVE account is reported as serving with its currency', () 
   assert.equal(info.currency, 'EUR');
 });
 
+test('A1: the account money headroom is read in minor units and summarised', () => {
+  const info = describeAdAccount(ACCOUNT, {
+    account_status: 1,
+    currency: 'EUR',
+    spend_cap: '500000',
+    amount_spent: '123456',
+    balance: '2500',
+    min_daily_budget: 100,
+    min_campaign_group_spend_cap: '10000',
+  });
+  assert.equal(info.spendCapMinor, 500_000);
+  assert.equal(info.amountSpentMinor, 123_456);
+  assert.equal(info.balanceMinor, 2_500);
+  assert.equal(info.headroomMinor, 376_544);
+  assert.equal(info.minDailyBudgetMinor, 100);
+  assert.equal(info.minCampaignSpendCapMinor, 10_000);
+  assert.equal(
+    info.moneySummary,
+    'Account spend limit: 500000 minor units of EUR, spent: 123456 minor units of EUR, remaining: 376544 minor units of EUR.',
+  );
+});
+
+test('A1: spend_cap "0" means no account limit, so there is no headroom figure', () => {
+  const info = describeAdAccount(ACCOUNT, {
+    account_status: 1,
+    currency: 'JPY',
+    spend_cap: '0',
+    amount_spent: '9000',
+  });
+  assert.equal(info.spendCapMinor, 0);
+  assert.equal(info.headroomMinor, undefined);
+  assert.match(
+    info.moneySummary ?? '',
+    /Account spend limit: none, spent: 9000 JPY \(whole units\), remaining: unlimited/,
+  );
+});
+
+test('A1: an overspent account reports zero headroom, and malformed amounts are absent, not guessed', () => {
+  const over = describeAdAccount(ACCOUNT, { spend_cap: '1000', amount_spent: '1200' });
+  assert.equal(over.headroomMinor, 0);
+
+  const bad = describeAdAccount(ACCOUNT, {
+    spend_cap: '12.5',
+    amount_spent: '-3',
+    balance: 'lots',
+    min_daily_budget: 1.5,
+  });
+  assert.equal(bad.spendCapMinor, undefined);
+  assert.equal(bad.amountSpentMinor, undefined);
+  assert.equal(bad.balanceMinor, undefined);
+  assert.equal(bad.minDailyBudgetMinor, undefined);
+  assert.equal(bad.moneySummary, undefined);
+  assert.ok(!('headroomMinor' in bad));
+});
+
 test('CC-ADS-6: a DISABLED account decodes its disable reason and refuses writes', () => {
   const info = describeAdAccount(ACCOUNT, { account_status: 2, disable_reason: 3 });
   assert.equal(info.serving, false);

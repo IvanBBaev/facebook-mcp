@@ -37,6 +37,15 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Ad account money headroom (backlog A1).** The ad account read now also
+  asks for `spend_cap`, `amount_spent`, `balance`, `min_daily_budget` and
+  `min_campaign_group_spend_cap`, parsed as minor units, and the doctor prints
+  "Account spend limit: X, spent: Y, remaining: Z" (`spend_cap` `0` reads as no
+  limit). The DSA payor/beneficiary defaults are left out of this read until a
+  live probe shows `ads_read` may read them, so a refusal cannot break every
+  write's pre-flight. Not yet verified against a live account: the read unit
+  of the account `spend_cap`.
+
 - **`FB_ADS_CAMPAIGN_SPEND_CAP_MAX` setting and shared ads money helpers.**
   The largest campaign `spend_cap` (minor units of the ad account currency) an
   ads write may set; unset means every write that would set a cap is refused,

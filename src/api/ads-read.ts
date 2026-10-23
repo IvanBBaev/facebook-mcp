@@ -41,6 +41,7 @@
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type { ApiFamily, Cursor, FbRequestFn, ParamValue } from '../core/index.js';
+import { formatMinor } from './ads-money.js';
 import { DEFAULT_PAGE_LIMIT, fetchPage } from './shared.js';
 import type { EdgeRequest } from './shared.js';
 
@@ -107,9 +108,14 @@ export const AD_LEVEL_DETAIL_FIELDS: Readonly<Record<AdLevel, string>> = {
 export const AD_OBJECT_COMMON_FIELDS =
   'id,name,status,effective_status,created_time,updated_time,account_id';
 
-/** Ad-account fields backing the health check and the currency echo. */
+/**
+ * Ad-account fields backing the health check, the currency echo and the money
+ * headroom (backlog A1). The DSA payor/beneficiary defaults are deliberately NOT
+ * here: whether `ads_read` may read them is unverified, and one unreadable field
+ * fails the whole read — and with it every write's pre-flight.
+ */
 export const AD_ACCOUNT_FIELDS =
-  'id,account_id,name,account_status,disable_reason,currency,timezone_name';
+  'id,account_id,name,account_status,disable_reason,currency,timezone_name,spend_cap,amount_spent,balance,min_daily_budget,min_campaign_group_spend_cap';
 
 /** Explains why `targeting` / `creative` specs are absent from a detail read. */
 export const OMITTED_BLOB_NOTE =
@@ -749,8 +755,98 @@ export interface AdAccountInfo {
    * is most urgent. See {@link assertAdAccountUsable}.
    */
   readonly atRisk: boolean;
+  /**
+   * Account spend limit in minor units; `0` means the account has no limit.
+   * Graph returns it as a numeric string (the account-level WRITE takes major
+   * units, the READ is documented as minor units — unverified on a live account).
+   */
+  readonly spendCapMinor?: number;
+  /** Lifetime amount spent, minor units. */
+  readonly amountSpentMinor?: number;
+  /** Outstanding bill amount, minor units. */
+  readonly balanceMinor?: number;
+  /** `spendCap − amountSpent` when the account has a limit; absent otherwise. */
+  readonly headroomMinor?: number;
+  /** Smallest daily budget Meta accepts on this account, minor units. */
+  readonly minDailyBudgetMinor?: number;
+  /** Smallest campaign spend cap Meta accepts on this account, minor units. */
+  readonly minCampaignSpendCapMinor?: number;
+  /** "Account spend limit: X, spent: Y, remaining: Z" — present when Graph returned the amounts. */
+  readonly moneySummary?: string;
   /** Operator-facing explanation; always present. */
   readonly summary: string;
+}
+
+/**
+ * A minor-unit amount Graph returned as a numeric string (or, for the `min_*`
+ * fields, a number). Anything that is not a non-negative safe integer is
+ * treated as absent rather than guessed at.
+ */
+function readMinor(value: unknown): number | undefined {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\d+$/.test(value)
+        ? Number(value)
+        : undefined;
+  return n !== undefined && Number.isSafeInteger(n) && n >= 0 ? n : undefined;
+}
+
+interface AccountMoney {
+  readonly spendCapMinor?: number;
+  readonly amountSpentMinor?: number;
+  readonly balanceMinor?: number;
+  readonly headroomMinor?: number;
+  readonly minDailyBudgetMinor?: number;
+  readonly minCampaignSpendCapMinor?: number;
+  readonly moneySummary?: string;
+}
+
+/** Decode the account's money headroom (backlog A1). Pure. */
+function describeAccountMoney(
+  src: Record<string, unknown>,
+  currency: string | undefined,
+): AccountMoney {
+  const spendCapMinor = readMinor(src.spend_cap);
+  const amountSpentMinor = readMinor(src.amount_spent);
+  const balanceMinor = readMinor(src.balance);
+  const minDailyBudgetMinor = readMinor(src.min_daily_budget);
+  const minCampaignSpendCapMinor = readMinor(src.min_campaign_group_spend_cap);
+  const headroomMinor =
+    spendCapMinor !== undefined && spendCapMinor > 0 && amountSpentMinor !== undefined
+      ? Math.max(0, spendCapMinor - amountSpentMinor)
+      : undefined;
+
+  let moneySummary: string | undefined;
+  if (spendCapMinor !== undefined || amountSpentMinor !== undefined) {
+    const limit =
+      spendCapMinor === undefined
+        ? 'unknown'
+        : spendCapMinor === 0
+          ? 'none'
+          : formatMinor(spendCapMinor, currency);
+    const spent =
+      amountSpentMinor === undefined
+        ? 'unknown'
+        : formatMinor(amountSpentMinor, currency);
+    const remaining =
+      headroomMinor !== undefined
+        ? formatMinor(headroomMinor, currency)
+        : spendCapMinor === 0
+          ? 'unlimited (no account spend limit)'
+          : 'unknown';
+    moneySummary = `Account spend limit: ${limit}, spent: ${spent}, remaining: ${remaining}.`;
+  }
+
+  return {
+    ...(spendCapMinor !== undefined ? { spendCapMinor } : {}),
+    ...(amountSpentMinor !== undefined ? { amountSpentMinor } : {}),
+    ...(balanceMinor !== undefined ? { balanceMinor } : {}),
+    ...(headroomMinor !== undefined ? { headroomMinor } : {}),
+    ...(minDailyBudgetMinor !== undefined ? { minDailyBudgetMinor } : {}),
+    ...(minCampaignSpendCapMinor !== undefined ? { minCampaignSpendCapMinor } : {}),
+    ...(moneySummary !== undefined ? { moneySummary } : {}),
+  };
 }
 
 /**
@@ -830,6 +926,7 @@ export function describeAdAccount(accountId: string, raw: unknown): AdAccountInf
     ...(timezone !== undefined ? { timezone } : {}),
     serving,
     atRisk,
+    ...describeAccountMoney(src, currency),
     summary,
   };
 }
