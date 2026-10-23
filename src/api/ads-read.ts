@@ -93,7 +93,7 @@ export const AD_LEVEL_LIST_FIELDS: Readonly<Record<AdLevel, string>> = {
  */
 export const AD_LEVEL_DETAIL_FIELDS: Readonly<Record<AdLevel, string>> = {
   campaign:
-    'id,name,status,effective_status,objective,buying_type,daily_budget,lifetime_budget,budget_remaining,spend_cap,bid_strategy,start_time,stop_time,created_time,updated_time,account_id',
+    'id,name,status,effective_status,objective,buying_type,daily_budget,lifetime_budget,budget_remaining,spend_cap,bid_strategy,start_time,stop_time,created_time,updated_time,account_id,advantage_state_info',
   adset:
     'id,name,status,effective_status,campaign_id,daily_budget,lifetime_budget,budget_remaining,optimization_goal,billing_event,bid_strategy,bid_amount,start_time,end_time,created_time,updated_time,account_id',
   ad: 'id,name,status,effective_status,adset_id,campaign_id,created_time,updated_time,account_id,creative{id,name}',
@@ -283,6 +283,40 @@ export interface AdRecord {
   readonly [key: string]: unknown;
 }
 
+/**
+ * A campaign's Advantage+ state (backlog A5), read-only. `state` is the
+ * campaign-wide verdict (`ADVANTAGE_PLUS_SALES`, `ADVANTAGE_PLUS_APP`,
+ * `ADVANTAGE_PLUS_LEADS`, `GENERAL`, …); the other three say whether each
+ * Advantage+ lever is on.
+ */
+export interface AdvantageState {
+  readonly state?: string;
+  readonly budget?: string;
+  readonly audience?: string;
+  readonly placement?: string;
+}
+
+/**
+ * Normalise `advantage_state_info` to {@link AdvantageState}. A value that is
+ * not an object, or carries none of the known keys, returns undefined so the
+ * caller keeps Graph's value verbatim instead of an empty shape.
+ */
+export function normalizeAdvantageState(raw: unknown): AdvantageState | undefined {
+  if (!isRecord(raw)) return undefined;
+  const state = readString(raw.advantage_state);
+  const budget = readString(raw.advantage_budget_state);
+  const audience = readString(raw.advantage_audience_state);
+  const placement = readString(raw.advantage_placement_state);
+  if ([state, budget, audience, placement].every((v) => v === undefined))
+    return undefined;
+  return {
+    ...(state !== undefined ? { state } : {}),
+    ...(budget !== undefined ? { budget } : {}),
+    ...(audience !== undefined ? { audience } : {}),
+    ...(placement !== undefined ? { placement } : {}),
+  };
+}
+
 /** Budget keys Graph returns as minor-unit strings; rewritten to `<key>_minor`. */
 const BUDGET_KEYS = [
   'daily_budget',
@@ -381,6 +415,13 @@ export function normalizeAdNode(raw: unknown): AdRecord {
   for (const key of Object.keys(src)) {
     if (key === 'paging') continue;
     if ((BUDGET_KEYS as readonly string[]).includes(key)) continue;
+    if (key === 'advantage_state_info') {
+      const advantage = normalizeAdvantageState(src[key]);
+      if (advantage !== undefined) {
+        out.advantage = advantage;
+        continue;
+      }
+    }
     setOwn(out, key, stripNestedPaging(src[key]));
   }
   out.id = readNodeId(src.id) ?? '';

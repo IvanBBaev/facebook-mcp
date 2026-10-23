@@ -884,3 +884,51 @@ test('a lifetime budget planned without a level does not claim the end time is m
   assert.equal(known.warnings.includes(LIFETIME_NEEDS_END_NOTE), false);
   assert.equal(known.warnings.includes(LIFETIME_END_UNVERIFIED_NOTE), false);
 });
+
+// ---------------------------------------------------------------------------
+// A5 — Advantage+ shopping/app campaigns
+// ---------------------------------------------------------------------------
+
+function advantageCampaign(state: string): AdRecord {
+  return current({ advantage_state_info: { advantage_state: state } });
+}
+
+test('A5: an Advantage+ shopping or app campaign refuses a resume or a budget change', () => {
+  for (const state of ['ADVANTAGE_PLUS_SALES', 'ADVANTAGE_PLUS_APP']) {
+    for (const req of [
+      { objectId: OBJECT_ID, level: 'campaign' as const, status: 'ACTIVE' },
+      { objectId: OBJECT_ID, level: 'campaign' as const, dailyBudgetMinor: 2000 },
+      {
+        objectId: OBJECT_ID,
+        level: 'campaign' as const,
+        status: 'PAUSED',
+        dailyBudgetMinor: 2000,
+      },
+    ]) {
+      const err = throwsGraph(() =>
+        planAdObjectUpdate(req, ctx({ current: advantageCampaign(state) })),
+      );
+      assert.match(err.message, /Advantage\+ shopping\/app campaigns are out of scope/);
+      assert.match(err.message, /Nothing was changed/);
+      assert.equal(err.action?.category, 'validation');
+    }
+  }
+});
+
+test('A5: an Advantage+ shopping campaign may still be paused', () => {
+  const plan = planAdObjectUpdate(
+    { objectId: OBJECT_ID, level: 'campaign', status: 'PAUSED' },
+    ctx({ current: advantageCampaign('ADVANTAGE_PLUS_SALES') }),
+  );
+  assert.equal(plan.params.status, 'PAUSED');
+});
+
+test('A5: other Advantage+ states, or no state at all, are not refused', () => {
+  for (const object of [advantageCampaign('ADVANTAGE_PLUS_LEADS'), current()]) {
+    const plan = planAdObjectUpdate(
+      { objectId: OBJECT_ID, level: 'campaign', dailyBudgetMinor: 2000 },
+      ctx({ current: object }),
+    );
+    assert.equal(plan.params.daily_budget, 2000);
+  }
+});

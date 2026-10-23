@@ -261,6 +261,20 @@ export interface AdUpdatePlan {
 // 5. The planner (pure)
 // ---------------------------------------------------------------------------
 
+/** Advantage+ campaign states whose edits this server refuses (A5). */
+export const OUT_OF_SCOPE_ADVANTAGE_STATES: ReadonlySet<string> = new Set([
+  'ADVANTAGE_PLUS_SALES',
+  'ADVANTAGE_PLUS_APP',
+]);
+
+/** The normalised `advantage.state` of a record, upper-cased; absent when not read. */
+function advantageStateOf(record: AdRecord): string | undefined {
+  const advantage: unknown = record['advantage'];
+  if (typeof advantage !== 'object' || advantage === null) return undefined;
+  const state: unknown = (advantage as Record<string, unknown>)['state'];
+  return typeof state === 'string' ? state.trim().toUpperCase() : undefined;
+}
+
 function currentString(record: AdRecord, key: string): string | undefined {
   const value: unknown = record[key];
   return typeof value === 'string' ? value : undefined;
@@ -410,6 +424,25 @@ export function planAdObjectUpdate(
         : 'Archived objects cannot be resumed through the API; if Ads Manager offers to restore it, do that there, otherwise create or duplicate a replacement.';
     throw validationError(
       `${req.objectId} is ${blocking} and is read-only: archived and deleted ads objects cannot be edited or resumed through the API. Nothing was changed. ${nextStep}`,
+    );
+  }
+
+  // A5 — Advantage+ sales/app campaigns are out of scope for edits, refused
+  // before Graph can reject them with a subcode no row maps yet. Pausing stays
+  // allowed: a guardrail that forbids stopping the spend is worse than none.
+  const advantageState = advantageStateOf(ctx.current);
+  const pauseOnly =
+    req.status !== undefined &&
+    resolveSettableStatus(req.status) === 'PAUSED' &&
+    req.dailyBudgetMinor === undefined &&
+    req.lifetimeBudgetMinor === undefined;
+  if (
+    advantageState !== undefined &&
+    OUT_OF_SCOPE_ADVANTAGE_STATES.has(advantageState) &&
+    !pauseOnly
+  ) {
+    throw validationError(
+      `${req.objectId} is an Advantage+ ${advantageState === 'ADVANTAGE_PLUS_APP' ? 'app' : 'shopping'} campaign (${advantageState}): Advantage+ shopping/app campaigns are out of scope for this server. Nothing was changed. Edit it in Ads Manager; pausing it with status:"PAUSED" and no budget field is still allowed here.`,
     );
   }
 

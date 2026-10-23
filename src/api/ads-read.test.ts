@@ -13,6 +13,7 @@ import type { FbRequest, ParamValue } from '../core/index.js';
 
 import {
   ADS_INSIGHTS_MAX_ROWS,
+  AD_LEVEL_DETAIL_FIELDS,
   AD_LEVEL_LIST_FIELDS,
   EFFECTIVE_STATUS_NOTE,
   MARKETING_API,
@@ -1669,4 +1670,39 @@ test('doc 12 H1: every ads read request is tagged for the Marketing API pin', as
       `${call.method} ${call.path} is not tagged marketing`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// A5 — Advantage+ state (read-only)
+// ---------------------------------------------------------------------------
+
+test('A5: the campaign detail read asks for advantage_state_info', () => {
+  assert.ok(AD_LEVEL_DETAIL_FIELDS.campaign.split(',').includes('advantage_state_info'));
+  assert.ok(!AD_LEVEL_DETAIL_FIELDS.adset.includes('advantage_state_info'));
+});
+
+test('A5: advantage_state_info is normalised to advantage {state, budget, audience, placement}', () => {
+  const record = normalizeAdNode({
+    id: '1',
+    status: 'ACTIVE',
+    advantage_state_info: {
+      advantage_state: 'ADVANTAGE_PLUS_SALES',
+      advantage_budget_state: 'ENABLED',
+      advantage_audience_state: 'ENABLED',
+      advantage_placement_state: 'DISABLED',
+    },
+  });
+  assert.deepStrictEqual(record['advantage'], {
+    state: 'ADVANTAGE_PLUS_SALES',
+    budget: 'ENABLED',
+    audience: 'ENABLED',
+    placement: 'DISABLED',
+  });
+  assert.ok(!('advantage_state_info' in record));
+});
+
+test('A5: an unrecognised advantage_state_info shape is kept verbatim, not emptied', () => {
+  const record = normalizeAdNode({ id: '1', advantage_state_info: { other: 1 } });
+  assert.deepStrictEqual(record['advantage_state_info'], { other: 1 });
+  assert.ok(!('advantage' in record));
 });

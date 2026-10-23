@@ -37,6 +37,15 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Advantage+ campaign state (backlog A5).** A campaign detail read
+  (`level: "campaign"`) now asks for `advantage_state_info` and returns it as
+  `advantage: {state, budget, audience, placement}`. `facebook_update_ad_object`
+  refuses to resume or re-budget an Advantage+ shopping or app campaign
+  (`ADVANTAGE_PLUS_SALES` / `ADVANTAGE_PLUS_APP`) before the request exists;
+  pausing one stays allowed. The state is known only when the write names
+  `level: "campaign"`. The exact v26 keys are not yet verified against live
+  Graph.
+
 - **Ad account money headroom (backlog A1).** The ad account read now also
   asks for `spend_cap`, `amount_spent`, `balance`, `min_daily_budget` and
   `min_campaign_group_spend_cap`, parsed as minor units, and the doctor prints
