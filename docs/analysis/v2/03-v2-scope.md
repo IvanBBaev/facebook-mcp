@@ -82,6 +82,9 @@ Each removal needs a 1.x deprecation first (warning in `doctor`, note in the too
 
 ## 3. Feature candidates
 
+Implementation-ready specs for these and further codeable features are in
+[features/](features/README.md).
+
 ### 3.1 Insights contract and reporting — **recommended**
 
 - PR #41 semantics become the only contract: `kind` (flow/gauge/unknown), `aggregation`

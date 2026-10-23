@@ -51,6 +51,7 @@ headlines (boost-post create-chain, Instagram) stay optional and depend on D1/D2
 | [03-v2-scope.md](03-v2-scope.md) | v2.0.0 candidates: platform migration, removals, features; ranked table; never-list |
 | [04-owner-decisions.md](04-owner-decisions.md) | Decisions the owner must take, each with options and a recommendation |
 | [05-roadmap-and-risks.md](05-roadmap-and-risks.md) | Phasing and dates from now to 2.0.0; risks; open live probes |
+| [features/](features/README.md) | Implementation-ready specs for every codeable v2 feature (insights, organic, messaging, ads, Instagram), build waves |
 
 ## Urgent dates
 
