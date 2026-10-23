@@ -40,7 +40,13 @@
 // adds guidance about dev-tier limits (CC-ADS-1) rather than re-parsing headers.
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
-import type { ApiFamily, Cursor, FbRequestFn, ParamValue } from '../core/index.js';
+import type {
+  ApiFamily,
+  Cursor,
+  ErrorAction,
+  FbRequestFn,
+  ParamValue,
+} from '../core/index.js';
 import { formatMinor } from './ads-money.js';
 import { DEFAULT_PAGE_LIMIT, fetchPage } from './shared.js';
 import type { EdgeRequest } from './shared.js';
@@ -1413,6 +1419,11 @@ export interface ReportRunFailure {
   readonly reason?: string;
   readonly code?: number;
   readonly subcode?: number;
+  /**
+   * The error matrix's verdict for `{code, subcode}` — the same advice a
+   * synchronous Graph error with that pair gets. Present whenever `code` is.
+   */
+  readonly action?: ErrorAction;
 }
 
 /** A Graph error number: an int since v25.0, a numeric string on older pins. */
@@ -1457,10 +1468,19 @@ export function readReportRunFailure(
 
   if (reason === undefined && code === undefined && subcode === undefined)
     return undefined;
+  const action =
+    code !== undefined
+      ? classifyGraphError({
+          code,
+          ...(subcode !== undefined ? { error_subcode: subcode } : {}),
+          ...(message !== undefined ? { message } : {}),
+        })
+      : undefined;
   return {
     ...(reason !== undefined ? { reason } : {}),
     ...(code !== undefined ? { code } : {}),
     ...(subcode !== undefined ? { subcode } : {}),
+    ...(action !== undefined ? { action } : {}),
   };
 }
 

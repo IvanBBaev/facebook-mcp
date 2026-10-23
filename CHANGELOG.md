@@ -37,6 +37,12 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **A failed or skipped async ads report carries the error matrix's advice
+  (backlog A2).** `failure.action` is now the same category / retryable /
+  next-tool / operator text a synchronous Graph error with that
+  `{code, subcode}` gets, so the Marketing API subcode rows apply to report
+  runs too.
+
 - **Advantage+ campaign state (backlog A5).** A campaign detail read
   (`level: "campaign"`) now asks for `advantage_state_info` and returns it as
   `advantage: {state, budget, audience, placement}`. `facebook_update_ad_object`

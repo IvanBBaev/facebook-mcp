@@ -1268,6 +1268,11 @@ test('N7: a failed run surfaces the user title and message, code and subcode', a
     reason: 'Too much data: Reduce the date range or the number of breakdowns.',
     code: 100,
     subcode: 1487534,
+    action: classifyGraphError({
+      code: 100,
+      error_subcode: 1487534,
+      message: 'Invalid parameter',
+    }),
   });
   // The existing shape is untouched.
   assert.match(status.advice, /Do not keep polling/);
@@ -1297,13 +1302,29 @@ test('N7: the reason prefers user_msg, then user_title, then error_message', () 
 });
 
 test('N7: code and subcode alone still produce a failure, without a reason', () => {
-  assert.deepEqual(readReportRunFailure({ error_code: 2 }), { code: 2 });
+  assert.deepEqual(readReportRunFailure({ error_code: 2 }), {
+    code: 2,
+    action: classifyGraphError({ code: 2 }),
+  });
+  // No code, nothing to classify: the subcode alone is echoed.
   assert.deepEqual(readReportRunFailure({ error_subcode: 99 }), { subcode: 99 });
   // Older pins sent error_code as a numeric string.
   assert.deepEqual(readReportRunFailure({ error_code: '2', error_subcode: ' 7 ' }), {
     code: 2,
     subcode: 7,
+    action: classifyGraphError({ code: 2, error_subcode: 7 }),
   });
+});
+
+test('A2: a failed run is classified through the error matrix, so the subcode rows apply', () => {
+  const failure = readReportRunFailure({
+    error_code: 613,
+    error_subcode: 1487742,
+    error_message: 'User request limit reached',
+  });
+  assert.equal(failure?.action?.category, 'rate_limit');
+  assert.equal(failure?.action?.retryable, false);
+  assert.equal(failure?.action?.nextTool, 'facebook_usage');
 });
 
 test('N7: absent, empty or malformed error fields yield no failure object', async () => {
