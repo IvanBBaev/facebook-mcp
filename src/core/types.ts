@@ -133,6 +133,11 @@ export interface Settings {
   readonly adAccountId?: string;
   /** `FB_ADS_BUDGET_CEILING` in minor currency units; refuses raises above this (CC-ADS-7). */
   readonly adsBudgetCeiling?: number;
+  /**
+   * `FB_ADS_CAMPAIGN_SPEND_CAP_MAX` in minor currency units; the largest campaign
+   * `spend_cap` an ads write may set. Unset ⇒ writes that set a cap are refused.
+   */
+  readonly adsCampaignSpendCapMax?: number;
 
   // Out-of-band confirmation fallback (B1)
   /** Operator confirmation token for the OOB gate when elicitation is unavailable (CC-MCP-6). */

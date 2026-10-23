@@ -172,6 +172,12 @@
           "format": "number"
         },
         {
+          "name": "FB_ADS_CAMPAIGN_SPEND_CAP_MAX",
+          "description": "Largest campaign spend_cap (the lifetime total a campaign may spend) that an ads write may set, in minor units of the ad account's own currency. Non-negative integer; a cap above it is refused, never clamped. Unset: every write that sets a campaign spend cap is refused. No currency conversion, same as FB_ADS_BUDGET_CEILING.",
+          "isRequired": false,
+          "format": "number"
+        },
+        {
           "name": "FB_LOG_LEVEL",
           "description": "Stderr log verbosity: debug, info, warn or error. Logs never go to stdout — that is the stdio protocol channel.",
           "isRequired": false,

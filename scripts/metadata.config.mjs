@@ -429,6 +429,18 @@ export const env = Object.freeze([
       "Hard ceiling for any ads budget write, in minor units of the ad account's own currency (e.g. cents for USD). Non-negative integer; a write above it is refused. No currency conversion: size it for the account's currency (1000 is $10 but only 1000 JPY).",
     example: '',
   },
+  {
+    name: 'FB_ADS_CAMPAIGN_SPEND_CAP_MAX',
+    group: 'Ads (opt-in package, off by default)',
+    required: 'no',
+    secret: false,
+    format: 'number',
+    summary:
+      'Largest campaign spend cap an ads write may set, in minor units of the ad account currency (non-negative integer, no currency conversion).',
+    description:
+      "Largest campaign spend_cap (the lifetime total a campaign may spend) that an ads write may set, in minor units of the ad account's own currency. Non-negative integer; a cap above it is refused, never clamped. Unset: every write that sets a campaign spend cap is refused. No currency conversion, same as FB_ADS_BUDGET_CEILING.",
+    example: '',
+  },
 
   // --- Diagnostics ---------------------------------------------------------
   {

@@ -783,6 +783,55 @@ test('numeric overrides parse; out-of-range/non-integer values error and fall ba
   assert.ok(codes(bad.report.errors).filter((c) => c === 'invalid-number').length >= 2);
 });
 
+test('FB_ADS_CAMPAIGN_SPEND_CAP_MAX parses as minor units and refuses anything but a non-negative integer', () => {
+  const env = (value: string) =>
+    loadSettings({
+      ...POSIX,
+      env: {
+        FB_ACCESS_TOKEN: 'fake',
+        FB_APP_SECRET: 's',
+        FB_PAGE_ID: '1',
+        FB_ADS_CAMPAIGN_SPEND_CAP_MAX: value,
+      },
+    });
+  const ok = env('500000');
+  assert.equal(ok.settings.adsCampaignSpendCapMax, 500000);
+  assert.equal(ok.report.ok, true);
+  assert.equal(env('0').settings.adsCampaignSpendCapMax, 0);
+  for (const value of ['-1', '12.5', 'ten', '1e30']) {
+    const bad = env(value);
+    assert.equal(bad.report.ok, false, value);
+    assert.equal(bad.settings.adsCampaignSpendCapMax, undefined, value);
+    const problem = bad.report.errors.find(
+      (p) => p.field === 'FB_ADS_CAMPAIGN_SPEND_CAP_MAX',
+    );
+    assert.equal(problem?.code, 'invalid-number', value);
+  }
+  assert.equal(
+    loadSettings({
+      ...POSIX,
+      env: { FB_ACCESS_TOKEN: 'fake', FB_APP_SECRET: 's', FB_PAGE_ID: '1' },
+    }).settings.adsCampaignSpendCapMax,
+    undefined,
+  );
+});
+
+test('a misspelt FB_ADS_CAMPAIGN_SPEND_CAP_MAX is flagged with the real name', () => {
+  const { report } = loadSettings({
+    ...POSIX,
+    env: {
+      FB_ACCESS_TOKEN: 'fake',
+      FB_APP_SECRET: 's',
+      FB_PAGE_ID: '1',
+      FB_ADS_CAMPAIGN_SPENDCAP_MAX: '100',
+    },
+  });
+  const typo = report.warnings.find(
+    (p) => p.code === 'unknown-setting' && p.field === 'FB_ADS_CAMPAIGN_SPENDCAP_MAX',
+  );
+  assert.ok(typo?.message.includes('FB_ADS_CAMPAIGN_SPEND_CAP_MAX'), typo?.message);
+});
+
 // --- Out-of-band confirmation token (B1 / CC-MCP-6) ---
 
 test('a too-short FB_CONFIRM_TOKEN is refused instead of arming the gate with it', () => {

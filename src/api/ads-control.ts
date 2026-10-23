@@ -43,6 +43,23 @@ import type {
 } from '../core/index.js';
 import { MARKETING_API } from './ads-read.js';
 import type { AdLevel, AdRecord } from './ads-read.js';
+import {
+  HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES,
+  ZERO_DECIMAL_CURRENCIES,
+  enforceCeiling,
+  formatMinor,
+  hundredthOffsetNote,
+  validateBudgetMinor,
+  zeroDecimalNote,
+} from './ads-money.js';
+
+// The money helpers moved to `./ads-money.js`; re-exported so existing imports
+// of this module keep working.
+export {
+  HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES,
+  ZERO_DECIMAL_CURRENCIES,
+  validateBudgetMinor,
+} from './ads-money.js';
 
 // ---------------------------------------------------------------------------
 // 1. Constants
@@ -60,56 +77,6 @@ export const READ_ONLY_STATUSES: ReadonlySet<string> = new Set(['DELETED', 'ARCH
 export const BUDGET_LEVELS: ReadonlySet<AdLevel> = new Set<AdLevel>([
   'campaign',
   'adset',
-]);
-
-/**
- * Ad-account currencies Meta counts in WHOLE units (offset 1 in Meta's currency
- * table, marketing-api/currencies), plus the ISO 4217 exponent-0 currencies.
- *
- * Meta takes every budget in the account currency's smallest unit AS META
- * DEFINES IT, and for these that unit IS the currency: `daily_budget=1000` on a
- * JPY account is 1000 JPY, not 10.00. That is not the same list as ISO 4217:
- * COP, CRC, HUF, IDR and TWD have two ISO decimals but a Meta offset of 1, so
- * `daily_budget=1000` on a TWD account is 1000 TWD, not 10.00. Calling such an amount "minor units" states the money at
- * a hundredth of its size in the one line an operator confirms before a
- * spend-tier write, so the preview names the currency in whole units instead.
- * The amount on the wire is untouched either way — this is what the number is
- * CALLED, never what is sent.
- */
-export const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
-  'BIF',
-  'CLP',
-  'COP',
-  'CRC',
-  'DJF',
-  'GNF',
-  'HUF',
-  'IDR',
-  'ISK',
-  'JPY',
-  'KMF',
-  'KRW',
-  'PYG',
-  'RWF',
-  'TWD',
-  'UGX',
-  'VND',
-  'VUV',
-  'XAF',
-  'XOF',
-  'XPF',
-]);
-
-/**
- * Ad-account currencies whose ISO 4217 minor unit is a THOUSANDTH but that Meta
- * counts in HUNDREDTHS (offset 100 in Meta's currency table). `daily_budget=2500`
- * on a BHD account is 25.00 BHD; calling it "2500 minor units of BHD" reads as
- * 2.500 BHD (2500 fils) to anyone who knows the currency — a tenfold
- * understatement — so the preview names the hundredths and the major amount.
- */
-export const HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
-  'BHD',
-  'JOD',
 ]);
 
 /** Emitted whenever a resume is planned: ACTIVE is a request, not a promise. */
@@ -241,33 +208,6 @@ export function resolveSettableStatus(raw: string): SettableStatus {
   );
 }
 
-/**
- * Validate one budget amount. Minor units only, integers only (CC-ADS-3) — a
- * float here would mean the caller is thinking in major units, which is exactly
- * the 100x mistake this package refuses to make.
- */
-export function validateBudgetMinor(field: string, value: number): number {
-  if (!Number.isFinite(value)) {
-    throw validationError(`\`${field}\` must be a number of minor currency units.`);
-  }
-  if (!Number.isInteger(value)) {
-    throw validationError(
-      `\`${field}\` must be a whole number of MINOR currency units, not ${String(value)}. ` +
-        'A minor unit is the unit Meta counts for the AD ACCOUNT currency (its currency ' +
-        'offset), not always the ISO subunit: for USD, 1000 means 10.00, not 1000.00; in a ' +
-        'zero-decimal currency such as JPY or TWD, the same 1000 means 1000. Either way ' +
-        'there is no float budget.',
-    );
-  }
-  if (value < 0) {
-    throw validationError(`\`${field}\` must not be negative (got ${String(value)}).`);
-  }
-  if (!Number.isSafeInteger(value)) {
-    throw validationError(`\`${field}\` is too large to represent exactly.`);
-  }
-  return value;
-}
-
 // ---------------------------------------------------------------------------
 // 4. Plan shapes
 // ---------------------------------------------------------------------------
@@ -394,39 +334,6 @@ function currentMinor(record: AdRecord, key: string): number | undefined {
 }
 
 /**
- * Name an amount the way the account's currency actually works. A currency with
- * no subunit ({@link ZERO_DECIMAL_CURRENCIES}) is stated in whole units, because
- * "N minor units of JPY" reads as N/100 to anyone who knows the term.
- */
-function formatMinor(value: number, currency: string | undefined): string {
-  if (currency === undefined) return `${String(value)} minor units`;
-  const code = currency.trim().toUpperCase();
-  if (ZERO_DECIMAL_CURRENCIES.has(code)) {
-    return `${String(value)} ${currency} (whole units)`;
-  }
-  if (HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES.has(code)) {
-    return `${String(value)} hundredths of ${currency} (${hundredthsAsMajor(value)} ${currency})`;
-  }
-  return `${String(value)} minor units of ${currency}`;
-}
-
-/** An integer count of hundredths as a two-decimal major amount, without float math. */
-function hundredthsAsMajor(value: number): string {
-  const whole = Math.trunc(value / 100);
-  const cents = value % 100;
-  return `${String(whole)}.${String(cents).padStart(2, '0')}`;
-}
-
-/** The warning a three-decimal currency Meta counts in hundredths gets beside every budget change. */
-function hundredthOffsetNote(argName: string, value: number, currency: string): string {
-  return (
-    `${currency}'s ISO minor unit is 1/1000, but Meta counts ${currency} budgets in ` +
-    `1/100: \`${argName}\` of ${String(value)} is ${hundredthsAsMajor(value)} ${currency}, ` +
-    `not ${String(value)} thousandths. The number is sent to Graph exactly as given.`
-  );
-}
-
-/**
  * The warning a budget write gets when the object runs on the OTHER budget
  * kind. Graph reads the unused kind back as `"0"` (or omits it), so the preview
  * line alone says "daily_budget: 0 -> N" — adding a budget to an object that
@@ -446,46 +353,6 @@ function budgetKindNote(
     `Meta does not switch a published campaign or ad set between daily and lifetime ` +
     `budgets, so expect Graph to reject this write — change \`${otherField}_minor\` ` +
     `instead, or change the budget kind in Ads Manager.`
-  );
-}
-
-/** The warning a zero-decimal account gets beside every budget change. */
-function zeroDecimalNote(argName: string, value: number, currency: string): string {
-  return (
-    `${currency} has no minor unit on a Meta ad account: \`${argName}\` of ${String(value)} is ` +
-    `${String(value)} ${currency}, not one hundredth of it. The number is sent to ` +
-    `Graph exactly as given — confirm the amount in whole ${currency}.`
-  );
-}
-
-/**
- * Enforce `FB_ADS_BUDGET_CEILING` BEFORE the request exists (CC-ADS-7).
- *
- * The ceiling blocks RAISES above the cap. A change that lowers an already
- * over-cap budget is allowed — refusing it would trap an operator above their
- * own ceiling with no way down through the API.
- *
- * @throws GraphApiError (validation) naming both numbers and both ways forward.
- *   Never clamps: a silently reduced budget is worse than a refusal.
- */
-function enforceCeiling(input: {
-  readonly field: string;
-  readonly requested: number;
-  readonly current: number | undefined;
-  readonly ceiling: number;
-  readonly currency: string | undefined;
-  readonly objectId: string;
-}): void {
-  if (input.requested <= input.ceiling) return;
-  const isLowering = input.current !== undefined && input.requested < input.current;
-  if (isLowering) return;
-  throw validationError(
-    `Refused: \`${input.field}\` of ${formatMinor(input.requested, input.currency)} exceeds FB_ADS_BUDGET_CEILING (${formatMinor(
-      input.ceiling,
-      input.currency,
-    )}). NOTHING was changed on ${input.objectId} and the amount was NOT reduced to the ceiling. Either request ${String(
-      input.ceiling,
-    )} or less, or raise FB_ADS_BUDGET_CEILING in the server configuration and restart.`,
   );
 }
 

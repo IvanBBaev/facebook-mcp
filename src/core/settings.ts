@@ -163,6 +163,7 @@ const SETTING_NAMES: readonly string[] = [
   'FB_LOG_LEVEL',
   'FB_AD_ACCOUNT_ID',
   'FB_ADS_BUDGET_CEILING',
+  'FB_ADS_CAMPAIGN_SPEND_CAP_MAX',
   'FB_CONFIRM_TOKEN',
 ];
 /**
@@ -424,7 +425,16 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
 
   // --- Ads (opt-in, 1.1) ---
   const adAccountId = str('FB_AD_ACCOUNT_ID');
-  const adsBudgetCeiling = resolveBudgetCeiling(str('FB_ADS_BUDGET_CEILING'), err);
+  const adsBudgetCeiling = resolveMinorUnitsEnv(
+    'FB_ADS_BUDGET_CEILING',
+    str('FB_ADS_BUDGET_CEILING'),
+    err,
+  );
+  const adsCampaignSpendCapMax = resolveMinorUnitsEnv(
+    'FB_ADS_CAMPAIGN_SPEND_CAP_MAX',
+    str('FB_ADS_CAMPAIGN_SPEND_CAP_MAX'),
+    err,
+  );
 
   // --- Out-of-band confirmation fallback (B1 / CC-MCP-6) ---
   const confirmToken = resolveConfirmToken(str('FB_CONFIRM_TOKEN'), err);
@@ -457,6 +467,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     logLevel,
     adAccountId,
     adsBudgetCeiling,
+    adsCampaignSpendCapMax,
     confirmToken,
   };
 
@@ -862,15 +873,23 @@ function resolveHttpToken(raw: string | undefined, report: Report): string | und
   return raw;
 }
 
-/** Ads budget ceiling in minor currency units — non-negative integer (CC-ADS-7). */
-function resolveBudgetCeiling(raw: string | undefined, err: Report): number | undefined {
+/**
+ * An ads money limit in minor currency units — non-negative integer, refused
+ * rather than clamped (CC-ADS-7). Shared by `FB_ADS_BUDGET_CEILING` and
+ * `FB_ADS_CAMPAIGN_SPEND_CAP_MAX`.
+ */
+function resolveMinorUnitsEnv(
+  name: string,
+  raw: string | undefined,
+  err: Report,
+): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0) {
+  if (!Number.isSafeInteger(n) || n < 0) {
     err(
       'invalid-number',
-      `FB_ADS_BUDGET_CEILING must be a non-negative integer (minor currency units); got ${JSON.stringify(raw)}.`,
-      'FB_ADS_BUDGET_CEILING',
+      `${name} must be a non-negative integer (minor currency units); got ${JSON.stringify(raw)}.`,
+      name,
     );
     return undefined;
   }

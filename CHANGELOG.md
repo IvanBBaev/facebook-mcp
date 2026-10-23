@@ -37,6 +37,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`FB_ADS_CAMPAIGN_SPEND_CAP_MAX` setting and shared ads money helpers.**
+  The largest campaign `spend_cap` (minor units of the ad account currency) an
+  ads write may set; unset means every write that would set a cap is refused,
+  with no implicit maximum. The money helpers (currency tables, minor-unit
+  validation, ceiling enforcement) move from `ads-control` into a new
+  `ads-money` module, which also gains the spend-cap guards (Meta's
+  "remove the cap" value is refused as out of scope) and a worst-case spend
+  envelope (175% of a daily budget per day, 7× per week, always bounded by the
+  spend cap). `FB_ADS_BUDGET_CEILING` now also rejects values beyond exact
+  integer range such as `1e30`.
+
 - **Marketing API mutation and rate subcodes get their own advice.** Eleven
   `{code, subcode}` rows join the error matrix: the hourly ad-set budget edit
   cap (613/1487632), the daily account spend-limit edit cap (17/1885172), ad
