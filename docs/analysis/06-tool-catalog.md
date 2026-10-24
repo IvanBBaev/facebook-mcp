@@ -88,9 +88,9 @@ stays ungated.
 
 | Tool | RO | D | I | OW | Notes |
 |---|---|---|---|---|---|
-| `facebook_page_insights` | true | false | true | true | Post-2025 metric names; metric list passed through; API errors surfaced readably; 90-day window enforced |
+| `facebook_page_insights` | true | false | true | true | Post-2025 metric names; metric list passed through; API errors surfaced readably; 90-day window enforced. Contract v2 (`contractVersion: 2`): each summary has `kind` + `aggregation` and a `value` only when that roll-up is safe (no `total`); window `[since, until)` in Pacific Time with `boundary`/`timezone`; `derived.followers` reconciles `page_follows` with daily follows − unfollows |
 | `facebook_post_insights` | true | false | true | true | `post_media_view`, `post_clicks`, reactions totals, video metrics. **Reels metrics are NOT reachable here** — they live on `/{video-id}/video_insights`, off the post-insights edge (G-TOOL-2); the description redirects to `facebook_reel_insights` |
-| `facebook_reel_insights` | true | false | true | true | `/{video-id}/video_insights` — the Reel edge (G-TOOL-2). Takes the **video ID** (digits only), not a `{page-id}_{post-id}` composite, which the schema rejects before any Graph call. Default period `lifetime`; same reshape/cap/aggregate contract as the other two. Metric vocabulary is its own — unknown names are reported, never silently dropped | |
+| `facebook_reel_insights` | true | false | true | true | `/{video-id}/video_insights` — the Reel edge (G-TOOL-2). Takes the **video ID** (digits only), not a `{page-id}_{post-id}` composite, which the schema rejects before any Graph call. Default period `lifetime`; same reshape/cap/aggregate contract (v2 `kind`/`aggregation`/`value`, `[since, until)` in UTC) as the other two. Metric vocabulary is its own — unknown names are reported, never silently dropped | |
 
 ## Package `moderation` (profile `moderator`)
 

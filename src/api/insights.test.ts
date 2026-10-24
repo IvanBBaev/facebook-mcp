@@ -14,6 +14,7 @@ import {
   INSIGHTS_MAX_WINDOW_DAYS,
   INSIGHTS_TOKEN_EMPTY_HINT,
   PAGE_ELIGIBILITY_NOTE,
+  PAGE_TIMEZONE_NOTE,
   PERIOD_BOUNDARY_NOTE,
   POST_EMPTY_NOTE,
   REEL_EMPTY_NOTE,
@@ -22,7 +23,10 @@ import {
   checkWindow,
   classifyMetric,
   classifyMetrics,
+  deriveFollowerReconciliation,
   fetchInsights,
+  insightsTimezone,
+  previousWindow,
   reshapeInsights,
   type InsightsRequest,
 } from './insights.js';
@@ -137,7 +141,7 @@ test('reshapeInsights flattens values into compact rows and drops Graph boilerpl
   assert.deepEqual(Object.keys(out.rows[0] ?? {}), ['metric', 'date', 'value']);
 });
 
-test('reshapeInsights carries period, totals and exact boundaries once per metric', () => {
+test('reshapeInsights carries period, kind, aggregation and exact boundaries once per metric', () => {
   const out = reshapeInsights(
     insightsBody(
       series('page_media_view', 'day', [
@@ -153,7 +157,11 @@ test('reshapeInsights carries period, totals and exact boundaries once per metri
       metric: 'page_media_view',
       period: 'day',
       points: 2,
-      total: 210,
+      kind: 'flow',
+      aggregation: 'sum',
+      value: 210,
+      firstValue: 120,
+      lastValue: 90,
       firstEnd: end('2026-07-01'),
       lastEnd: end('2026-07-02'),
     },
@@ -161,19 +169,24 @@ test('reshapeInsights carries period, totals and exact boundaries once per metri
       metric: 'page_follows',
       period: 'week',
       points: 1,
-      total: 4,
+      kind: 'gauge',
+      aggregation: 'single',
+      value: 4,
+      firstValue: 4,
+      lastValue: 4,
       firstEnd: end('2026-07-07'),
       lastEnd: end('2026-07-07'),
     },
   ]);
 });
 
-test('reshapeInsights never sums overlapping windows: a rolling or lifetime total is the latest point', () => {
+test('reshapeInsights never sums overlapping windows: a rolling window or a cumulative period is the latest point', () => {
   // Graph answers `week`, `days_28` and `lifetime` with ONE POINT PER DAY, each
   // point already covering a 7-day / 28-day / all-time window that overlaps the
   // previous one. Adding 30 such points counts every view up to 28 times: a
   // Page with a steady 100 views per 28 days read "total: 3000", and that was
-  // the headline number in aggregate mode.
+  // the headline number in aggregate mode. A breakdown map gets no scalar at
+  // all: its keys are not assumed additive.
   const out = reshapeInsights(
     insightsBody(
       series('page_media_view', 'days_28', days(30, 100)),
@@ -182,8 +195,6 @@ test('reshapeInsights never sums overlapping windows: a rolling or lifetime tota
         [end('2026-07-02'), 6],
         [end('2026-07-03'), 7],
       ]),
-      // A lifetime breakdown: the latest day's keys still add up (fans by
-      // country on the last day ARE the fan count), earlier days do not.
       series('page_fans_country', 'lifetime', [
         [end('2026-07-01'), { BG: 40, DE: 10 }],
         [end('2026-07-02'), { BG: 41, DE: 10 }],
@@ -197,17 +208,26 @@ test('reshapeInsights never sums overlapping windows: a rolling or lifetime tota
   );
 
   assert.deepEqual(
-    out.metrics.map((m) => [m.metric, m.period, m.points, m.total, m.totalIsLatest]),
+    out.metrics.map((m) => [
+      m.metric,
+      m.period,
+      m.points,
+      m.kind,
+      m.aggregation,
+      m.value,
+    ]),
     [
-      ['page_media_view', 'days_28', 30, 100, true],
-      ['page_follows', 'week', 3, 7, true],
-      ['page_fans_country', 'lifetime', 4, 51, true],
-      ['page_media_view', 'month', 2, 500, undefined],
+      ['page_media_view', 'days_28', 30, 'flow', 'latest_window', 100],
+      ['page_follows', 'week', 3, 'gauge', 'latest', 7],
+      ['page_fans_country', 'lifetime', 4, 'unknown', 'none', undefined],
+      ['page_media_view', 'month', 2, 'flow', 'sum', 500],
     ],
   );
+  assert.equal(out.metrics[1]?.change, 2, 'a gauge reports its change over the window');
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /rolling windows and overlap/);
 });
 
-test('an overlapping-window total takes the newest date, whatever order Graph sent the points in', () => {
+test('a rolling-window value takes the newest date, whatever order Graph sent the points in', () => {
   // Regression coverage: Graph documents oldest-first, but "latest" must mean
   // the newest END, not the last array element — a reversed body would
   // otherwise quietly hand the model the oldest window as the current total.
@@ -220,8 +240,10 @@ test('an overlapping-window total takes the newest date, whatever order Graph se
       ]),
     ),
   );
-  assert.equal(out.metrics[0]?.total, 30);
-  assert.equal(out.metrics[0]?.totalIsLatest, true);
+  assert.equal(out.metrics[0]?.value, 30);
+  assert.equal(out.metrics[0]?.aggregation, 'latest_window');
+  assert.equal(out.metrics[0]?.firstValue, 10);
+  assert.equal(out.metrics[0]?.lastValue, 30);
 });
 
 test('a stock metric takes the latest count in a daily series, never the sum of snapshots', () => {
@@ -243,11 +265,15 @@ test('a stock metric takes the latest count in a daily series, never the sum of 
     ),
   );
   const stock = out.metrics.find((m) => m.metric === 'page_follows');
-  assert.equal(stock?.total, 882);
-  assert.equal(stock?.totalIsLatest, true);
+  assert.equal(stock?.kind, 'gauge');
+  assert.equal(stock?.aggregation, 'latest');
+  assert.equal(stock?.value, 882);
+  assert.equal(stock?.change, 1);
+  assert.match(stock?.aggregationNote ?? '', /Gauge\/snapshot/);
   const flow = out.metrics.find((m) => m.metric === 'page_daily_follows');
-  assert.equal(flow?.total, 2, 'a daily flow is still a sum');
-  assert.equal(flow?.totalIsLatest, undefined);
+  assert.equal(flow?.aggregation, 'sum');
+  assert.equal(flow?.value, 2, 'a daily flow is still a sum');
+  assert.equal(flow?.aggregationNote, undefined);
 });
 
 test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
@@ -280,8 +306,12 @@ test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
     },
   ]);
   assert.equal(out.metrics[0]?.breakdowns, 3);
-  assert.equal(out.metrics[0]?.total, 8);
   assert.equal(out.metrics[0]?.points, 3);
+  // Breakdown keys may overlap, so no scalar is invented from them.
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.equal(Object.hasOwn(out.metrics[0] ?? {}, 'value'), false);
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /breakdown map/);
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /aggregate:false/);
 });
 
 test('reshapeInsights joins nested breakdown keys and guards excessive depth', () => {
@@ -303,7 +333,8 @@ test('reshapeInsights joins nested breakdown keys and guards excessive depth', (
     out.rows.find((row) => row.breakdown === 'deep/a/b')?.value,
     '[nested breakdown omitted]',
   );
-  assert.equal(out.metrics[0]?.total, 7, 'the placeholder stays out of the total');
+  assert.equal(out.metrics[0]?.value, undefined, 'a breakdown series has no scalar');
+  assert.equal(out.metrics[0]?.aggregation, 'none');
   assert.equal(out.metrics[0]?.nonNumeric, true);
 });
 
@@ -327,7 +358,8 @@ test('reshapeInsights omits null values instead of zero-filling absent days', ()
   );
   // A real zero is data and is kept; the null day is simply absent.
   assert.equal(out.metrics[0]?.points, 2);
-  assert.equal(out.metrics[0]?.total, 10);
+  assert.equal(out.metrics[0]?.value, 10);
+  assert.equal(out.metrics[0]?.aggregation, 'sum');
   assert.equal(out.metrics[0]?.lastEnd, end('2026-07-03'));
 });
 
@@ -343,17 +375,27 @@ test('reshapeInsights keeps non-numeric values as strings and flags them', () =>
 
   assert.equal(out.rows[1]?.value, 'n/a');
   assert.equal(out.metrics[0]?.nonNumeric, true);
-  assert.equal(out.metrics[0]?.total, 5, 'non-numeric points stay out of the total');
+  // A roll-up of only the numeric subset would misstate the range.
+  assert.equal(out.metrics[0]?.value, undefined);
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.equal(out.metrics[0]?.firstValue, 5);
+  assert.match(out.metrics[0]?.aggregationNote ?? '', /non-numeric/);
 });
 
 test('reshapeInsights records a metric with no values as an empty series', () => {
   const out = reshapeInsights(insightsBody(series('page_media_view', 'day', [])));
 
-  assert.equal(out.metrics[0]?.total, undefined, 'no points means no invented total');
+  assert.equal(out.metrics[0]?.value, undefined, 'no points means no invented value');
   assert.equal(out.metrics[0]?.firstEnd, undefined);
   assert.deepEqual(out.rows, []);
   assert.deepEqual(out.metrics, [
-    { metric: 'page_media_view', period: 'day', points: 0 },
+    {
+      metric: 'page_media_view',
+      period: 'day',
+      points: 0,
+      kind: 'flow',
+      aggregation: 'none',
+    },
   ]);
 });
 
@@ -375,7 +417,9 @@ test('reshapeInsights survives malformed bodies without throwing', () => {
   const unnamed = reshapeInsights({ data: [{ period: 'day', values: [] }] });
   assert.deepEqual(unnamed.metrics, [], 'an entry with no name is skipped');
   const noValues = reshapeInsights({ data: [{ name: 'm', values: 'x' }] });
-  assert.deepEqual(noValues.metrics, [{ metric: 'm', period: 'unknown', points: 0 }]);
+  assert.deepEqual(noValues.metrics, [
+    { metric: 'm', period: 'unknown', points: 0, kind: 'unknown', aggregation: 'none' },
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -408,26 +452,46 @@ test('capRows never emits a zero-row cap for a nonsense limit', () => {
 // 3. checkWindow — the 90-day ceiling (CC-INS-5)
 // ---------------------------------------------------------------------------
 
-test('checkWindow echoes the window and computes an inclusive day span', () => {
-  const window = checkWindow({ since: '2026-07-01', until: '2026-07-10', nowMs: NOW });
-  assert.deepEqual(window, { since: '2026-07-01', until: '2026-07-10', days: 10 });
+test('checkWindow echoes the window and computes an exclusive [since, until) day span', () => {
+  const window = checkWindow({
+    scope: 'post',
+    since: '2026-07-01',
+    until: '2026-07-10',
+    nowMs: NOW,
+  });
+  assert.deepEqual(window, {
+    since: '2026-07-01',
+    until: '2026-07-10',
+    days: 9,
+    boundary: '[since, until)',
+    timezone: 'UTC',
+  });
 });
 
 test('checkWindow measures a lone since against today and omits days without since', () => {
-  assert.equal(checkWindow({ since: '2026-07-18', nowMs: NOW }).days, 3);
-  assert.deepEqual(checkWindow({ until: '2026-07-10', nowMs: NOW }), {
+  assert.equal(checkWindow({ scope: 'post', since: '2026-07-18', nowMs: NOW }).days, 2);
+  assert.deepEqual(checkWindow({ scope: 'post', until: '2026-07-10', nowMs: NOW }), {
     until: '2026-07-10',
+    boundary: '[since, until)',
+    timezone: 'UTC',
   });
-  assert.deepEqual(checkWindow({ nowMs: NOW }), {});
+  assert.deepEqual(checkWindow({ scope: 'post', nowMs: NOW }), {
+    boundary: '[since, until)',
+    timezone: 'UTC',
+  });
+  // A lone since of today is an open, still-filling window, not an error.
+  assert.equal(checkWindow({ scope: 'post', since: '2026-07-20', nowMs: NOW }).days, 0);
 });
 
 test('checkWindow rejects a malformed date as a validation error', () => {
-  const err = throwsGraph(() => checkWindow({ since: '01/07/2026', nowMs: NOW }));
+  const err = throwsGraph(() =>
+    checkWindow({ scope: 'post', since: '01/07/2026', nowMs: NOW }),
+  );
   assert.equal(err.code, 100);
   assert.equal(err.httpStatus, 400);
   assert.equal(err.action?.category, 'validation');
   assert.match(err.message, /YYYY-MM-DD/);
-  throwsGraph(() => checkWindow({ until: '2026-13-45', nowMs: NOW }));
+  throwsGraph(() => checkWindow({ scope: 'post', until: '2026-13-45', nowMs: NOW }));
 });
 
 test('checkWindow rejects a calendar date that does not exist instead of rolling it over', () => {
@@ -441,17 +505,25 @@ test('checkWindow rejects a calendar date that does not exist instead of rolling
     ['2026-04-31', '2026-05-10'],
     ['2026-06-00', '2026-06-10'],
   ] as const) {
-    const err = throwsGraph(() => checkWindow({ since, until, nowMs: NOW }));
+    const err = throwsGraph(() =>
+      checkWindow({ scope: 'post', since, until, nowMs: NOW }),
+    );
     assert.equal(err.action?.category, 'validation', since);
     assert.match(err.message, /not a real date/, since);
   }
   const err = throwsGraph(() =>
-    checkWindow({ since: '2026-02-01', until: '2026-02-29', nowMs: NOW }),
+    checkWindow({ scope: 'post', since: '2026-02-01', until: '2026-02-29', nowMs: NOW }),
   );
   assert.match(err.message, /`until`.*not a real date/);
   assert.deepEqual(
-    checkWindow({ since: '2024-02-29', until: '2024-03-01', nowMs: NOW }),
-    { since: '2024-02-29', until: '2024-03-01', days: 2 },
+    checkWindow({ scope: 'post', since: '2024-02-29', until: '2024-03-01', nowMs: NOW }),
+    {
+      since: '2024-02-29',
+      until: '2024-03-01',
+      days: 1,
+      boundary: '[since, until)',
+      timezone: 'UTC',
+    },
   );
 });
 
@@ -466,7 +538,7 @@ test('fetchInsights refuses an impossible since date before touching the network
 
 test('checkWindow rejects a reversed window', () => {
   const err = throwsGraph(() =>
-    checkWindow({ since: '2026-07-10', until: '2026-07-01', nowMs: NOW }),
+    checkWindow({ scope: 'post', since: '2026-07-10', until: '2026-07-01', nowMs: NOW }),
   );
   assert.match(err.message, /is after/);
   assert.equal(err.action?.category, 'validation');
@@ -474,7 +546,7 @@ test('checkWindow rejects a reversed window', () => {
 
 test('checkWindow enforces the documented day ceiling with actionable text', () => {
   const err = throwsGraph(() =>
-    checkWindow({ since: '2026-01-01', until: '2026-07-01', nowMs: NOW }),
+    checkWindow({ scope: 'post', since: '2026-01-01', until: '2026-07-01', nowMs: NOW }),
   );
   assert.match(err.message, /Window too wide/);
   assert.match(err.message, new RegExp(String(INSIGHTS_MAX_WINDOW_DAYS)));
@@ -483,20 +555,28 @@ test('checkWindow enforces the documented day ceiling with actionable text', () 
 
   // Exactly at the ceiling is fine; one day more is not.
   const edge = checkWindow({
+    scope: 'post',
     since: '2026-07-01',
-    until: '2026-07-03',
+    until: '2026-07-04',
     nowMs: NOW,
     maxDays: 3,
   });
   assert.equal(edge.days, 3);
-  throwsGraph(() =>
-    checkWindow({ since: '2026-07-01', until: '2026-07-04', nowMs: NOW, maxDays: 3 }),
+  const wide = throwsGraph(() =>
+    checkWindow({
+      scope: 'post',
+      since: '2026-07-01',
+      until: '2026-07-05',
+      nowMs: NOW,
+      maxDays: 3,
+    }),
   );
+  assert.match(wide.message, /a boundary span of 4 days/);
 });
 
 test("checkWindow names the ceiling as this server's, not a false Graph maximum", () => {
   const err = throwsGraph(() =>
-    checkWindow({ since: '2026-01-01', until: '2026-07-01', nowMs: NOW }),
+    checkWindow({ scope: 'post', since: '2026-01-01', until: '2026-07-01', nowMs: NOW }),
   );
   assert.doesNotMatch(err.message, /Graph serves at most/, 'Graph allows up to 93 days');
   assert.match(err.message, /this server reads at most 90 days/);
@@ -504,7 +584,9 @@ test("checkWindow names the ceiling as this server's, not a false Graph maximum"
 
 test('checkWindow does not blame an `until` the caller never passed', () => {
   const today = new Date(NOW).toISOString().slice(0, 10);
-  const err = throwsGraph(() => checkWindow({ since: '2099-01-01', nowMs: NOW }));
+  const err = throwsGraph(() =>
+    checkWindow({ scope: 'post', since: '2099-01-01', nowMs: NOW }),
+  );
   assert.doesNotMatch(err.message, /is after `until`/);
   assert.match(
     err.message,
@@ -690,14 +772,18 @@ test('fetchInsights GETs the insights edge with a comma-joined metric list', asy
   });
 });
 
-test('fetchInsights defaults the period per scope and omits an unset window', async () => {
+test('fetchInsights defaults the period per scope; a Page always states its window timezone', async () => {
   const fake = createFakeFbRequest();
   fake.on(() => true, fbOk(insightsBody(series('page_media_view', 'day', days(1, 1)))));
 
   const page = await fetchInsights(fake.fn, pageRequest());
   assert.equal(paramsOf(fake.lastRequest()).period, 'day');
   assert.equal(page.period, 'day');
-  assert.equal(Object.hasOwn(page, 'window'), false, 'no window key without since/until');
+  // A Page's daily buckets are Pacific Time, so its window is always echoed.
+  assert.deepEqual(page.window, {
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
 
   fake.reset();
   fake.on(() => true, fbOk(insightsBody(series('post_media_view', 'lifetime', []))));
@@ -709,6 +795,11 @@ test('fetchInsights defaults the period per scope and omits an unset window', as
   });
   assert.equal(paramsOf(fake.lastRequest()).period, 'lifetime');
   assert.equal(post.period, 'lifetime');
+  assert.equal(
+    Object.hasOwn(post, 'window'),
+    false,
+    'no post window without since/until',
+  );
 });
 
 test('fetchInsights de-duplicates the metric list it sends', async () => {
@@ -751,9 +842,18 @@ test('fetchInsights returns flat rows plus summaries in series mode', async () =
     { metric: 'page_media_view', date: '2026-07-02', value: 5 },
     { metric: 'page_media_view', date: '2026-07-03', value: 5 },
   ]);
-  assert.equal(result.metrics[0]?.total, 15);
-  assert.deepEqual(result.window, { since: '2026-07-01', days: 20 });
+  assert.equal(result.metrics[0]?.value, 15);
+  assert.equal(result.metrics[0]?.aggregation, 'sum');
+  // until defaults to today in Pacific Time (2026-07-20), exclusive.
+  assert.deepEqual(result.window, {
+    since: '2026-07-01',
+    days: 19,
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
   assert.ok(result.notes.includes(PERIOD_BOUNDARY_NOTE));
+  assert.ok(result.notes.includes(PAGE_TIMEZONE_NOTE));
+  assert.equal(Object.hasOwn(result, 'derived'), false, 'no follower metric, no derived');
   assert.deepEqual(result.deprecatedMetrics, []);
   assert.deepEqual(result.unavailableMetrics, []);
   assert.deepEqual(result.emptyMetrics, []);
@@ -787,20 +887,27 @@ test('fetchInsights aggregate mode returns totals only, with no per-point rows',
   assert.equal(result.rowsAvailable, 120);
   assert.equal(result.truncated, false, 'aggregate mode never reports row truncation');
   assert.deepEqual(
-    result.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
+    result.metrics.map((metric) => [
+      metric.metric,
+      metric.points,
+      metric.aggregation,
+      metric.value,
+    ]),
     [
-      ['page_media_view', 60, 120],
+      ['page_media_view', 60, 'sum', 120],
       // page_follows is a stock: the latest daily count, not 60 counts summed.
-      ['page_follows', 60, 1],
+      ['page_follows', 60, 'latest', 1],
     ],
   );
+  // page_follows alone cannot be reconciled against daily flows.
+  assert.match(result.derived?.followers?.note ?? '', /partial/);
   assert.equal(
     result.notes.some((note) => note.includes('Row cap reached')),
     false,
   );
 });
 
-test('fetchInsights explains a rolling-window total, and only then', async () => {
+test('fetchInsights explains a rolling-window value, and only then', async () => {
   const fake = createFakeFbRequest();
   fake.on(
     () => true,
@@ -812,16 +919,17 @@ test('fetchInsights explains a rolling-window total, and only then', async () =>
     pageRequest({ metrics: ['page_media_view'], period: 'days_28', aggregate: true }),
   );
   assert.deepEqual(
-    rolling.metrics.map((metric) => [metric.metric, metric.points, metric.total]),
-    [['page_media_view', 30, 100]],
+    rolling.metrics.map((metric) => [
+      metric.metric,
+      metric.points,
+      metric.aggregation,
+      metric.value,
+    ]),
+    [['page_media_view', 30, 'latest_window', 100]],
   );
   // The note is matched by wording rather than imported as a constant on
   // purpose: reverting the fix must fail THIS assertion, not the module load.
-  assert.equal(
-    rolling.notes.filter((note) => /latest point|not a sum/i.test(note)).length,
-    1,
-    `expected exactly one rolling-window note in ${JSON.stringify(rolling.notes)}`,
-  );
+  assert.match(rolling.metrics[0]?.aggregationNote ?? '', /not the sum of all windows/);
 
   const daily = createFakeFbRequest();
   daily.on(
@@ -832,10 +940,11 @@ test('fetchInsights explains a rolling-window total, and only then', async () =>
     daily.fn,
     pageRequest({ metrics: ['page_media_view'], aggregate: true }),
   );
-  assert.equal(summed.metrics[0]?.total, 3000, 'a daily series is still a real sum');
+  assert.equal(summed.metrics[0]?.value, 3000, 'a daily series is still a real sum');
+  assert.equal(summed.metrics[0]?.aggregation, 'sum');
   assert.equal(
-    summed.notes.some((note) => /latest point|not a sum/i.test(note)),
-    false,
+    summed.metrics[0]?.aggregationNote,
+    undefined,
     'a disjoint period carries no rolling-window note',
   );
 });
@@ -1352,15 +1461,15 @@ test('the reel scope shares the reshape contract: rows, cap and aggregate', asyn
   assert.equal(totals.mode, 'aggregate');
   assert.equal(totals.rows, undefined);
   // Forty `lifetime` points are forty cumulative snapshots of the same
-  // counter, so the honest total is the newest one — not 40 × 3 = 120.
+  // counter, so the honest value is the newest one — not 40 × 3 = 120.
   assert.deepEqual(
     totals.metrics.map((metric) => [
       metric.metric,
       metric.points,
-      metric.total,
-      metric.totalIsLatest,
+      metric.aggregation,
+      metric.value,
     ]),
-    [['post_video_view_time', 40, 3, true]],
+    [['post_video_view_time', 40, 'latest', 3]],
   );
 });
 
@@ -1447,7 +1556,7 @@ test('a row cap that cuts across metrics names which series lost rows', async ()
 });
 
 test('firstEnd / lastEnd are the real window boundaries whatever order Graph sent', () => {
-  // `total` already picks the newest point by value; the boundaries were taken
+  // `value` already picks the newest point by date; the boundaries were taken
   // by array position, so a newest-first body reported firstEnd AFTER lastEnd.
   const out = reshapeInsights(
     insightsBody(
@@ -1543,9 +1652,10 @@ test('a metric Graph omits or leaves empty is not blamed on its name alone when 
   assert.match(emptyNote, /period "week"/);
 });
 
-test('an overlapping total whose newest point is an empty breakdown map is 0, not an older window', () => {
-  // `{}` is a point Graph DID return — a breakdown with no keys, i.e. zero.
-  // Skipping it made the previous window's 5 the "latest" 28-day total.
+test('a rolling series whose newest point is an empty breakdown map gets no scalar, not an older window', () => {
+  // `{}` is a point Graph DID return — a breakdown with no keys. Skipping it
+  // made the previous window's 5 the "latest" 28-day total; a breakdown series
+  // now gets no scalar at all, and the boundary still counts the `{}` point.
   const out = reshapeInsights(
     insightsBody(
       series('page_actions_post_reactions_total', 'days_28', [
@@ -1554,8 +1664,8 @@ test('an overlapping total whose newest point is an empty breakdown map is 0, no
       ]),
     ),
   );
-  assert.equal(out.metrics[0]?.total, 0);
-  assert.equal(out.metrics[0]?.totalIsLatest, true);
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.equal(out.metrics[0]?.value, undefined);
   assert.equal(out.metrics[0]?.lastEnd, end('2026-07-02'));
   assert.equal(out.metrics[0]?.points, 1, 'the empty map adds no row');
 });
@@ -1683,4 +1793,205 @@ test('a post metric rejected on the Page edge is named as a post metric', async 
   assert.match(err.message, /"post_clicks" is a post-level metric/);
   assert.match(err.message, /facebook_post_insights/);
   assert.doesNotMatch(err.message, /either a typo or unsupported/);
+});
+
+// ---------------------------------------------------------------------------
+// v2 — the semantics-aware contract (kind / aggregation, [since, until), PT)
+// ---------------------------------------------------------------------------
+
+test('a unique-audience daily series is not summed; its days_28 window is the latest one', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_total_media_view_unique', 'day', days(3, 40)),
+      series('page_total_media_view_unique', 'days_28', days(3, 90)),
+    ),
+  );
+  const [daily, rolling] = out.metrics;
+  assert.equal(daily?.kind, 'unique');
+  assert.equal(daily?.aggregation, 'none');
+  assert.equal(daily?.value, undefined, 'three overlapping daily reaches are not 120');
+  assert.equal(daily?.firstValue, 40);
+  assert.match(daily?.aggregationNote ?? '', /Unique-audience/);
+  assert.equal(rolling?.kind, 'unique');
+  assert.equal(rolling?.aggregation, 'latest_window');
+  assert.equal(rolling?.value, 90);
+});
+
+test('a metric outside the verified semantics table gets no day-series scalar', () => {
+  const out = reshapeInsights(
+    insightsBody(series('page_mystery_metric', 'day', days(3, 1))),
+  );
+  assert.equal(out.metrics[0]?.kind, 'unknown');
+  assert.equal(out.metrics[0]?.aggregation, 'none');
+  assert.match(
+    out.metrics[0]?.aggregationNote ?? '',
+    /not in the verified semantics table/,
+  );
+});
+
+test('no summary carries the removed v1 total / totalIsLatest fields', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'day', days(3, 5)),
+      series('page_follows', 'day', days(3, 9)),
+      series('page_media_view', 'days_28', days(3, 7)),
+      series('post_media_view', 'lifetime', days(2, 4)),
+    ),
+  );
+  for (const summary of out.metrics) {
+    assert.equal(Object.hasOwn(summary, 'total'), false, summary.metric);
+    assert.equal(Object.hasOwn(summary, 'totalIsLatest'), false, summary.metric);
+  }
+});
+
+test('checkWindow refuses since = until: until is exclusive, so the window is empty', () => {
+  const err = throwsGraph(() =>
+    checkWindow({ scope: 'page', since: '2026-07-10', until: '2026-07-10', nowMs: NOW }),
+  );
+  assert.equal(err.action?.category, 'validation');
+  assert.match(err.message, /empty window/);
+  assert.match(err.message, /until is exclusive/);
+  assert.match(err.message, /day after/);
+});
+
+test('the window timezone is Pacific Time for a Page and UTC for posts and Reels', () => {
+  assert.equal(insightsTimezone('page'), 'America/Los_Angeles');
+  assert.equal(insightsTimezone('post'), 'UTC');
+  assert.equal(insightsTimezone('reel'), 'UTC');
+  // 2026-07-21T03:00Z is still 2026-07-20 in Los Angeles: a lone Page since is
+  // measured against the Pacific date, a post since against the UTC one.
+  const lateUtc = Date.parse('2026-07-21T03:00:00Z');
+  assert.equal(
+    checkWindow({ scope: 'page', since: '2026-07-18', nowMs: lateUtc }).days,
+    2,
+  );
+  assert.equal(
+    checkWindow({ scope: 'post', since: '2026-07-18', nowMs: lateUtc }).days,
+    3,
+  );
+});
+
+test('a Page window across the DST switch counts calendar days and keeps the real boundaries', () => {
+  // Pacific midnight is 07:00Z under PDT and 08:00Z under PST (DST ends
+  // 2026-11-01): the window is still 30 calendar days, and each end_time keeps
+  // its own offset while its date stays the Pacific calendar date.
+  const window = checkWindow({
+    scope: 'page',
+    since: '2026-10-15',
+    until: '2026-11-14',
+    nowMs: Date.parse('2026-11-20T12:00:00Z'),
+  });
+  assert.equal(window.days, 30);
+  assert.equal(window.timezone, 'America/Los_Angeles');
+
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_media_view', 'day', [
+        ['2026-10-16T07:00:00+0000', 3],
+        ['2026-11-14T08:00:00+0000', 4],
+      ]),
+    ),
+  );
+  assert.deepEqual(
+    out.rows.map((row) => row.date),
+    ['2026-10-16', '2026-11-14'],
+  );
+  assert.equal(out.metrics[0]?.firstEnd, '2026-10-16T07:00:00+0000');
+  assert.equal(out.metrics[0]?.lastEnd, '2026-11-14T08:00:00+0000');
+});
+
+test('previousWindow is the same-length window ending where this one starts', () => {
+  const window = checkWindow({
+    scope: 'page',
+    since: '2026-07-01',
+    until: '2026-07-08',
+    nowMs: NOW,
+  });
+  assert.deepEqual(previousWindow(window), {
+    since: '2026-06-24',
+    until: '2026-07-01',
+    days: 7,
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
+  assert.equal(previousWindow(checkWindow({ scope: 'page', nowMs: NOW })), undefined);
+});
+
+test('derived.followers reconciles the stock change with daily follows minus unfollows', async () => {
+  const fake = createFakeFbRequest();
+  fake.on(
+    () => true,
+    fbOk(
+      insightsBody(
+        series('page_follows', 'day', [
+          [end('2026-07-01'), 860],
+          [end('2026-07-02'), 870],
+          [end('2026-07-03'), 882],
+        ]),
+        series('page_daily_follows', 'day', [
+          [end('2026-07-01'), 10],
+          [end('2026-07-02'), 11],
+          [end('2026-07-03'), 10],
+        ]),
+        series('page_daily_unfollows', 'day', [
+          [end('2026-07-01'), 3],
+          [end('2026-07-02'), 3],
+          [end('2026-07-03'), 3],
+        ]),
+      ),
+    ),
+  );
+  const result = await fetchInsights(
+    fake.fn,
+    pageRequest({
+      metrics: ['page_follows', 'page_daily_follows', 'page_daily_unfollows'],
+      since: '2026-07-01',
+      until: '2026-07-04',
+      aggregate: true,
+    }),
+  );
+  const followers = result.derived?.followers;
+  assert.ok(followers);
+  assert.equal(followers.start, 860);
+  assert.equal(followers.end, 882);
+  assert.equal(followers.stockChange, 22);
+  assert.equal(followers.follows, 31);
+  assert.equal(followers.unfollows, 9);
+  assert.equal(followers.unfollowsMetric, 'page_daily_unfollows');
+  assert.equal(followers.netFlow, 22);
+  assert.equal(followers.discrepancy, 0);
+  assert.equal(followers.consistent, true);
+  assert.match(followers.note, /reconciles exactly/);
+});
+
+test('follower reconciliation falls back to the unique unfollows flow and flags a mismatch', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('page_follows', 'day', [
+        [end('2026-07-01'), 100],
+        [end('2026-07-02'), 105],
+      ]),
+      series('page_daily_follows', 'day', [
+        [end('2026-07-01'), 4],
+        [end('2026-07-02'), 4],
+      ]),
+      series('page_daily_unfollows_unique', 'day', [
+        [end('2026-07-01'), 1],
+        [end('2026-07-02'), 1],
+      ]),
+    ),
+  );
+  const followers = deriveFollowerReconciliation(out.metrics);
+  assert.ok(followers);
+  assert.equal(followers.unfollowsMetric, 'page_daily_unfollows_unique');
+  assert.equal(followers.unfollows, 2);
+  assert.equal(followers.netFlow, 6);
+  assert.equal(followers.discrepancy, -1);
+  assert.equal(followers.consistent, false);
+  assert.match(followers.note, /does NOT reconcile/);
+
+  const unrelated = reshapeInsights(
+    insightsBody(series('page_media_view', 'day', days(2, 1))),
+  );
+  assert.equal(deriveFollowerReconciliation(unrelated.metrics), undefined);
 });

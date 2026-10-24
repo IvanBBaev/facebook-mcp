@@ -13,7 +13,8 @@
 // this module owns four things, all pure except the single GET:
 //
 //   1. RESHAPE — flatten to compact rows `{ metric, date, breakdown?, value }`
-//      plus one summary row per metric (period, points, total). `title`,
+//      plus one summary row per metric (period, points, kind, aggregation and
+//      the one safe scalar `value`, when there is one). `title`,
 //      `description` and `id` are dropped; `period` is carried once per metric
 //      instead of once per data point. Days Graph omits stay omitted — no
 //      gap-filling invention (CC-INS-3).
@@ -73,6 +74,19 @@ const DATE_PREFIX = /^(\d{4}-\d{2}-\d{2})/;
 
 const MS_PER_DAY = 86_400_000;
 
+/**
+ * Facebook Page Insights daily buckets are defined in Pacific Time, not the
+ * operator's local timezone and not a Page-node timezone field. Using the IANA
+ * zone rather than a fixed UTC offset keeps DST boundaries correct.
+ */
+export const META_INSIGHTS_TIMEZONE = 'America/Los_Angeles';
+
+/** The literal `window.boundary`: `since` is inclusive, `until` exclusive. */
+export const INSIGHTS_WINDOW_BOUNDARY = '[since, until)';
+
+/** Top-level `contractVersion` of every insights result (F1, 2.0.0). */
+export const INSIGHTS_CONTRACT_VERSION = 2;
+
 /** Deepest breakdown nesting flattened into `breakdown` paths before giving up. */
 const MAX_BREAKDOWN_DEPTH = 3;
 
@@ -83,8 +97,9 @@ const MAX_BREAKDOWN_DEPTH = 3;
 /** Insights lag: a same-day zero usually means "not computed yet" (CC-INS-6). */
 export const FRESHNESS_NOTE =
   'Data freshness: Graph computes insights with a lag (minutes to hours, ' +
-  'occasionally a full day). A zero or a missing point for today is normally ' +
-  '"not computed yet", NOT "no engagement" — re-read later before concluding.';
+  'occasionally a full day). A zero or a missing point in the still-open current ' +
+  'bucket is normally "not computed yet", NOT "no engagement" — re-read later ' +
+  'before concluding.';
 
 /** Empty Page series are usually an eligibility floor, not an error (CC-INS-2). */
 export const PAGE_ELIGIBILITY_NOTE = `Every requested metric came back empty. This is usually an eligibility floor, not an error: a Page with fewer than ${String(PAGE_INSIGHTS_LIKES_FLOOR)} likes/followers returns empty insights. Check fan_count/followers_count with facebook_get_page, and confirm the token carries read_insights plus the ANALYZE Page task.`;
@@ -138,40 +153,15 @@ export const INSIGHTS_TOKEN_EMPTY_HINT =
   'facebook_whoami to confirm a Page token is available for this Page before ' +
   'concluding the numbers are genuinely zero.';
 
-/** Period boundaries are Page-timezone based; end_time is the END of the period. */
+/** Graph reports end_time as the exclusive boundary of each returned period. */
 export const PERIOD_BOUNDARY_NOTE =
-  "`date` is the calendar date of Graph's `end_time`, i.e. the END of the " +
-  'period the value covers, in the Page timezone — so the current day is a ' +
-  'partial bucket. Days with no data are absent; nothing is zero-filled.';
+  "`date` is the calendar date of Graph's `end_time`, the EXCLUSIVE end boundary " +
+  'of the period. Days with no data are absent; nothing is zero-filled.';
 
-/**
- * Periods whose consecutive points OVERLAP: Graph answers `week` and `days_28`
- * with one point per day, each already covering the trailing 7 / 28 days, and
- * `lifetime` on a Page with one cumulative point per day. Summing such points
- * counts the same day up to 28 times (CC-INS-4: the sum IS the headline of
- * aggregate mode). `day`, `month` and `total_over_range` are disjoint buckets
- * whose sum is a real total, and stay one.
- */
-const OVERLAPPING_PERIODS: ReadonlySet<string> = new Set(['week', 'days_28', 'lifetime']);
-
-/**
- * Metrics that are a STOCK (a level, read at the end of each bucket), not a
- * flow, whatever period Graph echoes: `page_follows` with `period=day` is the
- * follower count at the end of each day. Summing seven of those turned a live
- * 881 → 882 week into "6166" (PR #41), so they take the latest point, exactly
- * like an overlapping period.
- */
-const STOCK_METRICS: ReadonlySet<string> = new Set(['page_follows']);
-
-/** Why `total` is the latest point, not a sum, for an overlapping period. */
-export const OVERLAPPING_TOTAL_NOTE =
-  '`total` for a week / days_28 / lifetime metric with more than one point is ' +
-  'the value of the LATEST point (`totalIsLatest: true`), not a sum: every ' +
-  'point already covers a rolling (or, for lifetime, cumulative) window that ' +
-  'overlaps the previous one, so adding them would count the same day up to 28 ' +
-  'times. The same holds for a stock metric such as page_follows in any period: ' +
-  'each point is the follower count at that date, so the total is the latest ' +
-  'count. Only day, month and total_over_range flow totals are sums.';
+/** Page daily Insights use midnight Pacific Time boundaries. */
+export const PAGE_TIMEZONE_NOTE =
+  `Page period=day buckets use Pacific Time (${META_INSIGHTS_TIMEZONE}). ` +
+  'For example, an end boundary dated 2026-08-30 covers the 2026-08-29 Pacific day.';
 
 /** One metric whose per-point rows the cap cut short (or cut entirely). */
 interface CutSeries {
@@ -198,7 +188,7 @@ function truncationNote(
           .map((c) => `${c.metric} (kept ${String(c.kept)} of ${String(c.available)})`)
           .join(', ')}.`
       : '';
-  return `Row cap reached: kept the first ${String(kept)} of ${String(kept + dropped)} data points and dropped ${String(dropped)}.${detail} Re-run with aggregate:true for per-metric totals, or narrow the window (since/until) or the metric list.`;
+  return `Row cap reached: kept the first ${String(kept)} of ${String(kept + dropped)} data points and dropped ${String(dropped)}.${detail} Re-run with aggregate:true for per-metric summaries, or narrow the window (since/until) or the metric list.`;
 }
 
 /** Per-metric kept-vs-available counts for every metric the cap cut short. */
@@ -583,7 +573,7 @@ export function classifyMetrics(metrics: readonly string[]): readonly MetricVerd
  */
 export interface InsightRow {
   readonly metric: string;
-  /** Calendar date of Graph's `end_time` (period END, Page timezone). */
+  /** Calendar date of Graph's `end_time`: the EXCLUSIVE end of the period. */
   readonly date?: string;
   /** Breakdown key path (`by_action_type` maps, `/`-joined when nested). */
   readonly breakdown?: string;
@@ -597,25 +587,35 @@ export interface MetricSummary {
   readonly period: string;
   /** Number of flattened data points Graph returned for this metric. */
   readonly points: number;
+  /** Semantic class that decides whether a multi-point roll-up is safe. */
+  readonly kind: MetricKind;
+  /** How `value` was derived. `none` ⇒ the server deliberately refused to guess. */
+  readonly aggregation: MetricAggregation;
   /**
-   * The metric's total across breakdown keys. Absent ⇒ no numeric point. For a
-   * disjoint period (`day`, `month`, `total_over_range`) this is the sum of all
-   * numeric points; for an overlapping one (`week`, `days_28`, `lifetime`) or a
-   * stock metric (`page_follows`) with points on more than one date it is the
-   * LATEST date's value only, flagged by `totalIsLatest` — see
-   * {@link OVERLAPPING_TOTAL_NOTE}.
+   * The one recommended scalar. Present iff `aggregation` is not `none`: the
+   * sum of disjoint flow buckets, the latest gauge / rolling-window / lifetime
+   * observation, or the single point Graph returned.
    */
-  readonly total?: number;
-  /** True ⇒ `total` is the newest point (overlapping period), not a sum. */
-  readonly totalIsLatest?: true;
+  readonly value?: number;
+  /** Oldest / newest numeric scalar point (by date), whenever there is one. */
+  readonly firstValue?: number;
+  readonly lastValue?: number;
+  /** `lastValue − firstValue`; gauges only — a stock's change over the window. */
+  readonly change?: number;
   /** Raw `end_time` of the first/last point — the exact boundary, kept once. */
   readonly firstEnd?: string;
   readonly lastEnd?: string;
   /** Distinct breakdown keys seen; absent ⇒ a plain scalar series. */
   readonly breakdowns?: number;
-  /** True when at least one point was not numeric (excluded from `total`). */
+  /** True when at least one point was not numeric (no roll-up is then made). */
   readonly nonNumeric?: boolean;
+  /** Why this aggregation was chosen, especially when none was safe. */
+  readonly aggregationNote?: string;
 }
+
+/** `flow` adds up over disjoint buckets; a `gauge` is a level; `unique` overlaps. */
+export type MetricKind = 'flow' | 'gauge' | 'unique' | 'unknown';
+export type MetricAggregation = 'sum' | 'latest' | 'latest_window' | 'single' | 'none';
 
 /** Output of the pure reshape step. */
 export interface ReshapedInsights {
@@ -699,45 +699,189 @@ interface RawValuePoint {
   readonly end_time?: unknown;
 }
 
+/**
+ * Metrics whose points are disjoint counts that add up over day / month
+ * buckets. Deliberately a SMALL allow-list: an unknown metric with several
+ * points is safer left unaggregated than silently double-counted.
+ */
+const FLOW_METRICS: ReadonlySet<string> = new Set([
+  'page_media_view',
+  'page_views_total',
+  'page_post_engagements',
+  'page_daily_follows',
+  'page_daily_follows_unique',
+  'page_daily_unfollows',
+  'page_daily_unfollows_unique',
+  'page_video_views',
+  'page_video_view_time',
+  // Post / Reel counters are flows in day / month buckets and cumulative as
+  // lifetime; the period decides which (see safeRollup).
+  'post_media_view',
+  'post_clicks',
+  'post_video_views',
+  'post_video_view_time',
+  'blue_reels_play_count',
+]);
+
+/**
+ * Stock metrics — a level read at the end of each bucket, whatever period
+ * Graph echoes. Summing seven daily `page_follows` turned a live 881 → 882
+ * week into "6166" (PR #41).
+ */
+const GAUGE_METRICS: ReadonlySet<string> = new Set(['page_follows']);
+
+/**
+ * Unique-audience metrics: a person seen on two days counts once per day, so
+ * daily uniques overlap and do not add up to a window reach.
+ */
+const UNIQUE_METRICS = /_unique$|_total_media_view_unique$/;
+
+/**
+ * Unique FLOWS that stay additive over disjoint days: each day's uniques are a
+ * per-day count of follow (unfollow) events, so the sum is follower-days.
+ */
+const UNIQUE_FLOWS: ReadonlySet<string> = new Set([
+  'page_daily_follows_unique',
+  'page_daily_unfollows_unique',
+]);
+
+function metricKind(metric: string): MetricKind {
+  const canonical = canonicalMetricName(metric);
+  if (GAUGE_METRICS.has(canonical)) return 'gauge';
+  if (UNIQUE_METRICS.test(canonical) && !UNIQUE_FLOWS.has(canonical)) return 'unique';
+  if (FLOW_METRICS.has(canonical)) return 'flow';
+  return 'unknown';
+}
+
+interface SafeRollup {
+  readonly kind: MetricKind;
+  readonly aggregation: MetricAggregation;
+  readonly value?: number;
+  readonly firstValue?: number;
+  readonly lastValue?: number;
+  readonly change?: number;
+  readonly note?: string;
+}
+
+const GAUGE_NOTE =
+  'Gauge/snapshot metric: value is the latest observation; summing observations would double-count the stock.';
+const UNIQUE_NOTE =
+  'Unique-audience metric: daily uniques overlap and are not additive. Use period=week or days_28 for a window reach.';
+const UNKNOWN_NOTE =
+  'No scalar roll-up: this metric has several observations but its additivity is not in the verified semantics table. Read firstValue/lastValue or the per-point rows.';
+const NON_NUMERIC_NOTE =
+  'No scalar roll-up: at least one returned point is non-numeric, so a roll-up of only the numeric subset would misstate the range.';
+const BREAKDOWN_NOTE =
+  'No scalar roll-up: this metric is a breakdown map whose keys may overlap and are not assumed additive. Read the per-key rows with aggregate:false.';
+
+/** A numeric scalar point; dated ones are ordered oldest → newest. */
+type ScalarRow = InsightRow & { readonly value: number };
+
+/**
+ * Produce one scalar only when the point semantics make it safe:
+ *   - a breakdown map, an empty-map point or a non-numeric point ⇒ none;
+ *   - one numeric point ⇒ single;
+ *   - a gauge ⇒ latest, with the change over the window;
+ *   - week / days_28 points are rolling windows ⇒ latest_window;
+ *   - lifetime / total_over_range are already cumulative ⇒ latest;
+ *   - a known flow over disjoint day / month buckets ⇒ sum;
+ *   - anything else (unique or unknown day / month series) ⇒ none.
+ *
+ * "Latest" is chosen by date, not array position: Graph documents oldest-first,
+ * but a reversed body must not hand back the OLDEST window as the current one.
+ */
+function safeRollup(
+  metric: string,
+  period: string,
+  rows: readonly InsightRow[],
+  breakdowns: number,
+  nonNumeric: boolean,
+  hasEmptyMap: boolean,
+): SafeRollup {
+  const kind = metricKind(metric);
+  const numeric = rows
+    .filter(
+      (row): row is ScalarRow =>
+        row.breakdown === undefined && typeof row.value === 'number',
+    )
+    .map((row, index) => ({ row, index }))
+    .sort(
+      (a, b) => (a.row.date ?? '').localeCompare(b.row.date ?? '') || a.index - b.index,
+    )
+    .map(({ row }) => row);
+  const firstValue = numeric[0]?.value;
+  const lastValue = numeric[numeric.length - 1]?.value;
+  const ends = {
+    ...(firstValue !== undefined ? { firstValue } : {}),
+    ...(lastValue !== undefined ? { lastValue } : {}),
+  };
+
+  if (breakdowns > 0 || hasEmptyMap) {
+    return { kind, aggregation: 'none', ...ends, note: BREAKDOWN_NOTE };
+  }
+  if (nonNumeric) return { kind, aggregation: 'none', ...ends, note: NON_NUMERIC_NOTE };
+  if (firstValue === undefined || lastValue === undefined) {
+    return { kind, aggregation: 'none' };
+  }
+  if (numeric.length === 1) {
+    return { kind, aggregation: 'single', value: lastValue, ...ends };
+  }
+  if (kind === 'gauge') {
+    return {
+      kind,
+      aggregation: 'latest',
+      value: lastValue,
+      ...ends,
+      change: lastValue - firstValue,
+      note: GAUGE_NOTE,
+    };
+  }
+  if (period === 'week' || period === 'days_28') {
+    return {
+      kind,
+      aggregation: 'latest_window',
+      value: lastValue,
+      ...ends,
+      note: `${period} points are rolling windows and overlap; value is the latest window, not the sum of all windows.`,
+    };
+  }
+  if (period === 'lifetime' || period === 'total_over_range') {
+    return {
+      kind,
+      aggregation: 'latest',
+      value: lastValue,
+      ...ends,
+      note: `${period} is already a cumulative period; value is the latest observation, never a sum of observations.`,
+    };
+  }
+  if (kind === 'flow' && (period === 'day' || period === 'month')) {
+    return {
+      kind,
+      aggregation: 'sum',
+      value: numeric.reduce((sum, row) => sum + row.value, 0),
+      ...ends,
+    };
+  }
+  return {
+    kind,
+    aggregation: 'none',
+    ...ends,
+    note: kind === 'unique' ? UNIQUE_NOTE : UNKNOWN_NOTE,
+  };
+}
+
 function summarize(
   metric: string,
   period: string,
   rows: readonly InsightRow[],
   ends: readonly string[],
   nonNumeric: boolean,
-  emptyMapDates: ReadonlySet<string> = new Set(),
+  hasEmptyMap = false,
 ): MetricSummary {
-  // A rolling / cumulative period (or a stock metric) with points on several
-  // dates: the honest headline is the newest window, not 30 overlapping ones
-  // added together
-  // (a steady 100 views per 28 days summed to "3000" before this). The newest
-  // date is chosen by value, not array position — Graph documents oldest-first
-  // but a reversed body must not quietly hand back the OLDEST window as the
-  // current total. A single date (or none) is summed like any other period:
-  // the sum and the latest point are then the same number.
-  //
-  // A point whose value is an EMPTY breakdown map (`{}`) is a point Graph did
-  // return — a breakdown with no keys, i.e. zero — so it competes for "latest"
-  // too. Skipping it made the previous window's figure the current total.
-  const dates = new Set(
-    rows.map((row) => row.date).filter((d): d is string => d !== undefined),
-  );
-  if (rows.length > 0) for (const date of emptyMapDates) dates.add(date);
-  const latestDate =
-    (OVERLAPPING_PERIODS.has(period) || STOCK_METRICS.has(metric)) && dates.size > 1
-      ? [...dates].reduce((max, date) => (date > max ? date : max))
-      : undefined;
-  let total: number | undefined;
-  for (const row of rows) {
-    if (latestDate !== undefined && row.date !== latestDate) continue;
-    if (typeof row.value === 'number') total = (total ?? 0) + row.value;
-  }
-  if (total === undefined && latestDate !== undefined && emptyMapDates.has(latestDate)) {
-    total = 0;
-  }
   const breakdowns = new Set(
     rows.filter((r) => r.breakdown !== undefined).map((r) => r.breakdown),
   ).size;
+  const rollup = safeRollup(metric, period, rows, breakdowns, nonNumeric, hasEmptyMap);
   // Boundaries by time, not array position: Graph documents oldest-first, but
   // a reversed body must not report a `firstEnd` later than its `lastEnd`.
   let first: string | undefined;
@@ -750,14 +894,17 @@ function summarize(
     metric,
     period,
     points: rows.length,
-    ...(total !== undefined ? { total } : {}),
-    ...(total !== undefined && latestDate !== undefined
-      ? { totalIsLatest: true as const }
-      : {}),
+    kind: rollup.kind,
+    aggregation: rollup.aggregation,
+    ...(rollup.value !== undefined ? { value: rollup.value } : {}),
+    ...(rollup.firstValue !== undefined ? { firstValue: rollup.firstValue } : {}),
+    ...(rollup.lastValue !== undefined ? { lastValue: rollup.lastValue } : {}),
+    ...(rollup.change !== undefined ? { change: rollup.change } : {}),
     ...(first !== undefined ? { firstEnd: first } : {}),
     ...(last !== undefined ? { lastEnd: last } : {}),
     ...(breakdowns > 0 ? { breakdowns } : {}),
     ...(nonNumeric ? { nonNumeric: true } : {}),
+    ...(rollup.note !== undefined ? { aggregationNote: rollup.note } : {}),
   };
 }
 
@@ -810,18 +957,11 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
     for (const row of metricRows) rows.push(row);
     // Empty-map points only shape a series that has data at all: a metric whose
     // every point is `{}` stays an empty series (emptyMetrics), with no invented
-    // boundaries or total.
-    if (metricRows.length > 0) for (const endTime of emptyMapEnds) ends.push(endTime);
-    metrics.push(
-      summarize(
-        name,
-        period,
-        metricRows,
-        ends,
-        nonNumeric,
-        new Set(emptyMapEnds.map((endTime) => endDate(endTime))),
-      ),
-    );
+    // boundaries. A `{}` point is a breakdown with no keys, so the series is a
+    // breakdown series and gets no scalar roll-up.
+    const hasEmptyMap = metricRows.length > 0 && emptyMapEnds.length > 0;
+    if (hasEmptyMap) for (const endTime of emptyMapEnds) ends.push(endTime);
+    metrics.push(summarize(name, period, metricRows, ends, nonNumeric, hasEmptyMap));
   }
 
   return { rows, metrics };
@@ -852,10 +992,38 @@ export function capRows(rows: readonly InsightRow[], maxRows: number): CappedRow
 
 /** The validated query window echoed back to the caller. */
 export interface InsightsWindow {
+  /** Inclusive start boundary. */
   readonly since?: string;
+  /** EXCLUSIVE end boundary. */
   readonly until?: string;
-  /** Inclusive span in days, when both ends are known (`until` defaults to today). */
+  /** Boundary span `until − since` in days (`until` defaults to today). */
   readonly days?: number;
+  readonly boundary: typeof INSIGHTS_WINDOW_BOUNDARY;
+  /** Pacific Time for a Page's daily buckets; UTC for posts and Reels. */
+  readonly timezone: string;
+}
+
+/** The timezone a scope's date boundaries are read in. */
+export function insightsTimezone(scope: InsightsScope): string {
+  return scope === 'page' ? META_INSIGHTS_TIMEZONE : 'UTC';
+}
+
+/** Today's calendar date in {@link META_INSIGHTS_TIMEZONE} (DST-aware). */
+export function insightsDate(ms: number): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: META_INSIGHTS_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(ms));
+  const read = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? '';
+  return `${read('year')}-${read('month')}-${read('day')}`;
+}
+
+/** Today's date as the implicit `until` of a scope. */
+export function scopeToday(scope: InsightsScope, nowMs: number): string {
+  return scope === 'page' ? insightsDate(nowMs) : utcDate(nowMs);
 }
 
 /** A client-side parameter error, classified through the F06 matrix (code 100). */
@@ -892,12 +1060,15 @@ function utcDate(ms: number): string {
  * Validate `since`/`until` and compute the span. Enforces the documented
  * {@link INSIGHTS_MAX_WINDOW_DAYS} ceiling client-side so an over-wide query
  * fails with an actionable message instead of a Graph 400 (or, worse, a
- * silently clipped series). A lone `since` is measured against today.
+ * silently clipped series). The window is `[since, until)`: `days` is the
+ * boundary span, and a lone `since` is measured against today in the scope's
+ * timezone (Pacific Time for a Page, UTC otherwise).
  *
- * @throws GraphApiError (validation) on a malformed date, a reversed window, or
- *   a span over the ceiling.
+ * @throws GraphApiError (validation) on a malformed date, a reversed or empty
+ *   window, or a span over the ceiling.
  */
 export function checkWindow(input: {
+  readonly scope: InsightsScope;
   readonly since?: string;
   readonly until?: string;
   readonly nowMs: number;
@@ -909,22 +1080,28 @@ export function checkWindow(input: {
 
   let days: number | undefined;
   if (sinceMs !== undefined) {
-    const endMs = untilMs ?? parseDate('until', utcDate(input.nowMs));
+    const today = scopeToday(input.scope, input.nowMs);
+    const endMs = untilMs ?? parseDate('until', today);
     if (endMs < sinceMs) {
       // A lone \`since\` is measured against today: name that, not an \`until\`
       // the caller never passed.
       const end =
         input.until !== undefined
           ? `\`until\` (${input.until})`
-          : `today (${utcDate(input.nowMs)}, the default \`until\`)`;
+          : `today (${today}, the default \`until\`)`;
       throw validationError(
         `Invalid window: \`since\` (${String(input.since)}) is after ${end}.`,
       );
     }
-    days = Math.round((endMs - sinceMs) / MS_PER_DAY) + 1;
+    if (untilMs === sinceMs) {
+      throw validationError(
+        `Invalid window: empty window: until is exclusive, so since = until (${String(input.until)}) covers no day. Pass the day after as \`until\`.`,
+      );
+    }
+    days = Math.round((endMs - sinceMs) / MS_PER_DAY);
     if (days > maxDays) {
       throw validationError(
-        `Window too wide: ${String(days)} days requested but this server reads at most ${String(maxDays)} days of insights per query (inside Graph's 93-day maximum; 2-year retention overall). Narrow since/until, or read the window in ${String(maxDays)}-day slices.`,
+        `Window too wide: a boundary span of ${String(days)} days was requested but this server reads at most ${String(maxDays)} days of insights per query (inside Graph's 93-day maximum; 2-year retention overall). Narrow since/until, or read the window in ${String(maxDays)}-day slices.`,
       );
     }
   }
@@ -933,6 +1110,27 @@ export function checkWindow(input: {
     ...(input.since !== undefined ? { since: input.since } : {}),
     ...(input.until !== undefined ? { until: input.until } : {}),
     ...(days !== undefined ? { days } : {}),
+    boundary: INSIGHTS_WINDOW_BOUNDARY,
+    timezone: insightsTimezone(input.scope),
+  };
+}
+
+/**
+ * The window of the same length that ends where `window` starts — the
+ * comparison period of a report. Undefined unless `since` and `days` are known.
+ */
+export function previousWindow(window: InsightsWindow): InsightsWindow | undefined {
+  if (window.since === undefined || window.days === undefined || window.days <= 0) {
+    return undefined;
+  }
+  const sinceMs = Date.parse(`${window.since}T00:00:00Z`);
+  if (Number.isNaN(sinceMs)) return undefined;
+  return {
+    since: utcDate(sinceMs - window.days * MS_PER_DAY),
+    until: window.since,
+    days: window.days,
+    boundary: window.boundary,
+    timezone: window.timezone,
   };
 }
 
@@ -967,15 +1165,109 @@ export interface InsightsRequest {
   readonly nowMs: number;
 }
 
+/** Follower stock change checked against the daily follow / unfollow flows. */
+export interface FollowerReconciliation {
+  /** First and last `page_follows` snapshots in the returned series. */
+  readonly start?: number;
+  readonly end?: number;
+  readonly stockChange?: number;
+  /** Sums of the disjoint daily flow buckets, when requested and returned. */
+  readonly follows?: number;
+  readonly unfollows?: number;
+  /** Which unfollow metric `unfollows` was read from. */
+  readonly unfollowsMetric?: 'page_daily_unfollows' | 'page_daily_unfollows_unique';
+  readonly netFlow?: number;
+  /** `stockChange − netFlow`. Zero ⇒ the two independent views reconcile. */
+  readonly discrepancy?: number;
+  readonly consistent?: boolean;
+  readonly note: string;
+}
+
+export interface InsightsDerived {
+  readonly followers?: FollowerReconciliation;
+}
+
+const FOLLOWER_METRICS: ReadonlySet<string> = new Set([
+  'page_follows',
+  'page_daily_follows',
+  'page_daily_unfollows',
+  'page_daily_unfollows_unique',
+]);
+
+/** The flow's sum, when its summary carries one. */
+function flowSum(summary: MetricSummary | undefined): number | undefined {
+  return summary?.aggregation === 'sum' ? summary.value : undefined;
+}
+
+/**
+ * Reconcile the `page_follows` stock change with daily follows minus daily
+ * unfollows. Prefers `page_daily_unfollows` and falls back to
+ * `page_daily_unfollows_unique` when the former is absent or has no sum.
+ * Undefined when no follower metric was queried.
+ */
+export function deriveFollowerReconciliation(
+  metrics: readonly MetricSummary[],
+  queried: readonly string[] = metrics.map((metric) => metric.metric),
+): FollowerReconciliation | undefined {
+  if (!queried.some((metric) => FOLLOWER_METRICS.has(canonicalMetricName(metric)))) {
+    return undefined;
+  }
+  const find = (name: string): MetricSummary | undefined =>
+    metrics.find((metric) => canonicalMetricName(metric.metric) === name);
+  const stock = find('page_follows');
+  const followFlow = flowSum(find('page_daily_follows'));
+  const plain = flowSum(find('page_daily_unfollows'));
+  const unique = flowSum(find('page_daily_unfollows_unique'));
+  const unfollowsMetric =
+    plain !== undefined
+      ? ('page_daily_unfollows' as const)
+      : unique !== undefined
+        ? ('page_daily_unfollows_unique' as const)
+        : undefined;
+  const unfollowFlow = plain ?? unique;
+
+  const start = stock?.firstValue;
+  const end = stock?.lastValue;
+  const stockChange = stock?.change;
+  const netFlow =
+    followFlow !== undefined && unfollowFlow !== undefined
+      ? followFlow - unfollowFlow
+      : undefined;
+  const discrepancy =
+    stockChange !== undefined && netFlow !== undefined
+      ? stockChange - netFlow
+      : undefined;
+
+  return {
+    ...(start !== undefined ? { start } : {}),
+    ...(end !== undefined ? { end } : {}),
+    ...(stockChange !== undefined ? { stockChange } : {}),
+    ...(followFlow !== undefined ? { follows: followFlow } : {}),
+    ...(unfollowFlow !== undefined ? { unfollows: unfollowFlow } : {}),
+    ...(unfollowsMetric !== undefined ? { unfollowsMetric } : {}),
+    ...(netFlow !== undefined ? { netFlow } : {}),
+    ...(discrepancy !== undefined ? { discrepancy, consistent: discrepancy === 0 } : {}),
+    note:
+      discrepancy === undefined
+        ? 'Follower reconciliation is partial: request page_follows, page_daily_follows and page_daily_unfollows (or page_daily_unfollows_unique) together with period=day to compare the stock change against net daily flows.'
+        : discrepancy === 0
+          ? 'Follower stock change reconciles exactly with daily follows minus daily unfollows for the returned buckets.'
+          : 'Follower stock change does NOT reconcile with daily follows minus daily unfollows. This can happen around the still-open current bucket, late Meta recomputation or missing points; treat the discrepancy as a data-quality warning.',
+  };
+}
+
 /** The reshaped, capped, annotated result a tool hands to the shaper. */
 export interface InsightsResult {
   readonly mode: 'series' | 'aggregate';
   /** The period actually requested (Graph's echoed period is per metric). */
   readonly period: string;
+  /** Present for a Page always, for a post / Reel only when a window was passed. */
   readonly window?: InsightsWindow;
   /** Metric names actually sent to Graph (deprecated names removed). */
   readonly queriedMetrics: readonly string[];
   readonly metrics: readonly MetricSummary[];
+  /** Cross-metric checks (Page scope, follower metrics queried). */
+  readonly derived?: InsightsDerived;
   /** Per-point rows; absent in `aggregate` mode. */
   readonly rows?: readonly InsightRow[];
   /** Data points Graph returned, before the row cap. */
@@ -1235,20 +1527,25 @@ function rejectedNote(rejected: readonly RejectedMetric[]): string {
  * the tail is missing (Graph has not computed it yet) — CC-INS-6.
  */
 function needsFreshnessNote(
+  scope: InsightsScope,
   rows: readonly InsightRow[],
   until: string | undefined,
   nowMs: number,
 ): boolean {
   if (rows.length === 0) return true;
-  const today = utcDate(nowMs);
+  const today = scopeToday(scope, nowMs);
   let latest: string | undefined;
   for (const row of rows) {
     if (row.date !== undefined && (latest === undefined || row.date > latest)) {
       latest = row.date;
     }
   }
-  if (latest === undefined || latest >= today) return true;
-  return until === undefined || until >= today;
+  // `date` is an exclusive end boundary: one later than today means the
+  // series holds the still-open current day.
+  if (latest === undefined || latest > today) return true;
+  // An omitted `until` lets Graph pick a live tail. An explicit `until` equal
+  // to today excludes today under [since, until); a later one does not.
+  return until === undefined || until > today;
 }
 
 function buildNotes(input: {
@@ -1300,11 +1597,10 @@ function buildNotes(input: {
     notes.push(emptyMetricsNote(input.emptyMetrics, input.period));
   }
 
-  if (needsFreshnessNote(input.rows, input.until, input.nowMs))
+  if (needsFreshnessNote(input.scope, input.rows, input.until, input.nowMs))
     notes.push(FRESHNESS_NOTE);
-  if (input.metrics.some((metric) => metric.totalIsLatest === true))
-    notes.push(OVERLAPPING_TOTAL_NOTE);
   notes.push(PERIOD_BOUNDARY_NOTE);
+  if (input.scope === 'page') notes.push(PAGE_TIMEZONE_NOTE);
   return notes;
 }
 
@@ -1323,12 +1619,15 @@ export async function fetchInsights(
 ): Promise<InsightsResult> {
   const period = req.period ?? defaultPeriod(req.scope);
   const window = checkWindow({
+    scope: req.scope,
     ...(req.since !== undefined ? { since: req.since } : {}),
     ...(req.until !== undefined ? { until: req.until } : {}),
     nowMs: req.nowMs,
   });
   const mode: 'series' | 'aggregate' = req.aggregate === true ? 'aggregate' : 'series';
-  const hasWindow = window.since !== undefined || window.until !== undefined;
+  // A Page always states its timezone; a post / Reel echoes only a real window.
+  const hasWindow =
+    req.scope === 'page' || window.since !== undefined || window.until !== undefined;
 
   const verdicts = classifyMetrics(req.metrics);
   const deprecated = verdicts.filter((verdict) => verdict.status !== 'ok');
@@ -1386,6 +1685,10 @@ export async function fetchInsights(
   const emptyMetrics = reshaped.metrics
     .filter((metric) => metric.points === 0)
     .map((metric) => metric.metric);
+  const followers =
+    req.scope === 'page'
+      ? deriveFollowerReconciliation(reshaped.metrics, live)
+      : undefined;
 
   return {
     mode,
@@ -1393,6 +1696,7 @@ export async function fetchInsights(
     ...(hasWindow ? { window } : {}),
     queriedMetrics: live,
     metrics: reshaped.metrics,
+    ...(followers !== undefined ? { derived: { followers } } : {}),
     ...(mode === 'series' ? { rows: capped.rows } : {}),
     rowsAvailable: reshaped.rows.length,
     truncated: capped.truncated,

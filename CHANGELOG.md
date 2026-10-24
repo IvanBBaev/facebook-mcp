@@ -9,6 +9,42 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Changed
 
+- **BREAKING: insights summaries follow a semantics-aware contract (v2).**
+  `facebook_page_insights`, `facebook_post_insights` and
+  `facebook_reel_insights` no longer report a `total` on each metric summary,
+  because summing a series is only honest for some metrics. Daily
+  `page_follows` is a follower count, so seven of them summed read "6166" for
+  an 881 → 882 week. Daily unique reach overlaps from day to day, and breakdown
+  keys may overlap too. Each summary now carries a `kind`
+  (`flow` | `gauge` | `unique` | `unknown`) and an `aggregation`
+  (`sum` | `latest` | `latest_window` | `single` | `none`). There is a `value`
+  only when that aggregation is safe, plus `firstValue` / `lastValue`, a
+  `change` for gauges, and an `aggregationNote` that explains any `none`.
+  Moving from v1:
+  - `total` (summed) → `value` with `aggregation: "sum"` (known flows over
+    `day` / `month` only).
+  - `total` with `totalIsLatest: true` → `value` with `aggregation: "latest"`
+    (gauges, `lifetime`, `total_over_range`) or `"latest_window"` (`week`,
+    `days_28`).
+  - A breakdown series, or one that holds a non-numeric or empty-map point,
+    has no `value` (`aggregation: "none"`). Read the per-key rows with
+    `aggregate: false`.
+  - A unique or unclassified metric over `day` / `month` has no `value`.
+
+  The window is now explicitly `[since, until)`. `until` is **exclusive**, so
+  `window.days` is `until − since`, one less than before. `since = until` is
+  refused as an empty window. `window` also carries `boundary` and
+  `timezone`: Page daily buckets are Pacific Time (`America/Los_Angeles`,
+  DST-aware), and the implicit `until` of a Page read is today in Pacific
+  Time. Posts and Reels use UTC. A Page result always carries `window`.
+  When follower metrics are queried, a Page read adds
+  `derived.followers`, which reconciles the `page_follows` change with daily
+  follows minus unfollows. It falls back to `page_daily_unfollows_unique`, and
+  any mismatch is flagged as a data-quality warning. Every result carries
+  `contractVersion: 2`. A comma-packed `metrics` entry is still refused, now
+  through the schema itself. The metric classification and the stock-metric
+  fix build on PR #41 by @lukaszliniewicz.
+
 - **The refusal for an ARCHIVED ads object no longer promises a restore.**
   `facebook_update_ad_object` used to say "Restore (unarchive) it in Ads
   Manager first", which Ads Manager does not offer for every archived object.

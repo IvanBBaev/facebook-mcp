@@ -387,12 +387,28 @@ test('page_insights reads the resolved Page with its token and flattens the seri
       metric: 'page_media_view',
       period: 'day',
       points: 2,
-      total: 210,
+      kind: 'flow',
+      aggregation: 'sum',
+      value: 210,
+      firstValue: 120,
+      lastValue: 90,
       firstEnd: end('2026-07-01'),
       lastEnd: end('2026-07-02'),
     },
   ]);
-  assert.deepEqual(parsed.window, { since: '2026-07-01', until: '2026-07-02', days: 2 });
+  assert.deepEqual(parsed.window, {
+    since: '2026-07-01',
+    until: '2026-07-02',
+    days: 1,
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
+  assert.equal(parsed.contractVersion, 2, 'the v2 summary contract is versioned');
+  assert.deepEqual(Object.keys(parsed).slice(0, 3), [
+    'profile',
+    'pageId',
+    'contractVersion',
+  ]);
 });
 
 test('page_insights with no profile resolves the default Page and echoes profile null', async () => {
@@ -432,7 +448,9 @@ test('page_insights flattens a breakdown map into breakdown rows', async () => {
     ],
   );
   assert.equal(summariesOf(parsed)[0]?.breakdowns, 2);
-  assert.equal(summariesOf(parsed)[0]?.total, 7);
+  // Breakdown keys may overlap: no scalar is invented from them.
+  assert.equal(summariesOf(parsed)[0]?.aggregation, 'none');
+  assert.equal(Object.hasOwn(summariesOf(parsed)[0] ?? {}, 'value'), false);
 });
 
 test('page_insights never lets the token-bearing paging block reach the model', async () => {
@@ -454,7 +472,7 @@ test('page_insights never lets the token-bearing paging block reach the model', 
 // Aggregate mode and the row cap (CC-INS-4)
 // ---------------------------------------------------------------------------
 
-test('page_insights aggregate mode returns per-metric totals and no rows at all', async () => {
+test('page_insights aggregate mode returns per-metric values and no rows at all', async () => {
   const { fb, ctx } = makeCtx();
   serve(
     fb,
@@ -474,21 +492,21 @@ test('page_insights aggregate mode returns per-metric totals and no rows at all'
   assert.equal(parsed.rowsAvailable, 120, 'the honest available count is still reported');
   assert.equal(parsed.truncated, false, 'aggregate mode never reports row truncation');
   assert.deepEqual(
-    summariesOf(parsed).map((m) => [m.metric, m.points, m.total]),
+    summariesOf(parsed).map((m) => [m.metric, m.points, m.aggregation, m.value]),
     [
-      ['page_media_view', 60, 120],
+      ['page_media_view', 60, 'sum', 120],
       // page_follows is a stock: the latest daily count, not 60 counts summed.
-      ['page_follows', 60, 1],
+      ['page_follows', 60, 'latest', 1],
     ],
   );
   assert.equal(noteMatching(parsed, /Row cap reached/), undefined);
 });
 
-test('page_insights aggregate mode reports a rolling-window total as the latest point, and says so', async () => {
+test('page_insights aggregate mode reports a rolling-window value as the latest window, and says so', async () => {
   // `days_28` comes back as one point per day, each already a 28-day window.
   // Summing 30 of them told the model "3000 views" for a Page that had 100 —
   // the headline figure of aggregate mode, which the description sells as
-  // "per-metric totals". The total is the newest window and the notes say why.
+  // "per-metric totals". The value is the newest window and the summary says why.
   const { fb, ctx } = makeCtx();
   serve(fb, series('page_media_view', 'days_28', days(30, 100)));
 
@@ -504,19 +522,16 @@ test('page_insights aggregate mode reports a rolling-window total as the latest 
       m.metric,
       m.period,
       m.points,
-      m.total,
-      m.totalIsLatest,
+      m.aggregation,
+      m.value,
     ]),
-    [['page_media_view', 'days_28', 30, 100, true]],
+    [['page_media_view', 'days_28', 30, 'latest_window', 100]],
   );
   // Matched by wording rather than an imported constant on purpose: reverting
   // the fix must fail this assertion, not the module load.
-  const note = noteMatching(parsed, /latest point|not a sum/i);
-  assert.ok(
-    note,
-    `expected the rolling-window note in ${JSON.stringify(notesOf(parsed))}`,
-  );
-  assert.match(note, /week|days_28|lifetime/);
+  const note = summariesOf(parsed)[0]?.aggregationNote;
+  assert.equal(typeof note, 'string');
+  assert.match(String(note), /days_28 points are rolling windows/);
 });
 
 test('page_insights enforces the default row cap and says exactly what was dropped', async () => {
@@ -735,7 +750,7 @@ test('page_insights states the freshness caveat only while the window can still 
     'a window that ended before today is already settled',
   );
   // The period-boundary note is unconditional: `date` is the END of the bucket.
-  assert.ok(noteMatching(settled, /END of the\s+period/));
+  assert.ok(noteMatching(settled, /EXCLUSIVE end\s+boundary/));
 });
 
 test('page_insights measures a lone `since` against the INJECTED clock, not the wall clock', async () => {
@@ -748,9 +763,14 @@ test('page_insights measures a lone `since` against the INJECTED clock, not the 
       ctx,
     ),
   );
-  // 2026-07-18 .. 2026-07-20 inclusive = 3 days. Any other span means the code
-  // consulted Date.now() instead of ctx.clock.
-  assert.deepEqual(parsed.window, { since: '2026-07-18', days: 3 });
+  // [2026-07-18, 2026-07-20) = 2 days, today in Pacific Time being the implicit
+  // exclusive until. Any other span means the code consulted Date.now().
+  assert.deepEqual(parsed.window, {
+    since: '2026-07-18',
+    days: 2,
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -834,7 +854,13 @@ test('page_insights still sends a window starting tomorrow (UTC), which is today
     ),
   );
   assert.equal(fb.calls.length, 1);
-  assert.deepEqual(parsed.window, { since: '2026-07-21', until: '2026-07-22', days: 2 });
+  assert.deepEqual(parsed.window, {
+    since: '2026-07-21',
+    until: '2026-07-22',
+    days: 1,
+    boundary: '[since, until)',
+    timezone: 'America/Los_Angeles',
+  });
 });
 
 test('page_insights surfaces a malformed date as one actionable validation error', async () => {
@@ -1096,7 +1122,7 @@ test('post_insights explains an empty post result as publish lag, or a Reel', as
   );
 });
 
-test('post_insights aggregate mode collapses a long series to totals', async () => {
+test('post_insights aggregate mode collapses a long daily flow to its sum', async () => {
   const { fb, ctx } = makeCtx();
   serve(fb, series('post_video_views', 'day', days(40, 3)));
 
@@ -1110,8 +1136,8 @@ test('post_insights aggregate mode collapses a long series to totals', async () 
   assert.equal(parsed.mode, 'aggregate');
   assert.equal(Object.hasOwn(parsed, 'rows'), false);
   assert.deepEqual(
-    summariesOf(parsed).map((m) => [m.metric, m.points, m.total]),
-    [['post_video_views', 40, 120]],
+    summariesOf(parsed).map((m) => [m.metric, m.points, m.aggregation, m.value]),
+    [['post_video_views', 40, 'sum', 120]],
   );
 });
 
@@ -1140,8 +1166,8 @@ test('reel_insights reads /video_insights, not /insights', async () => {
     'a Reel must never be reported under a post key',
   );
   assert.deepEqual(
-    summariesOf(parsed).map((m) => [m.metric, m.total]),
-    [['blue_reels_play_count', 4200]],
+    summariesOf(parsed).map((m) => [m.metric, m.aggregation, m.value]),
+    [['blue_reels_play_count', 'single', 4200]],
   );
 });
 
@@ -1277,10 +1303,10 @@ test('reel_insights shares the reshape contract: rows, cap and aggregate mode', 
   assert.equal(totals.mode, 'aggregate');
   assert.equal(Object.hasOwn(totals, 'rows'), false);
   // Forty `lifetime` points are forty cumulative snapshots of the same
-  // counter, so the honest total is the newest one — not 40 × 3 = 120.
+  // counter, so the honest value is the newest one — not 40 × 3 = 120.
   assert.deepEqual(
-    summariesOf(totals).map((m) => [m.metric, m.points, m.total, m.totalIsLatest]),
-    [['post_video_view_time', 40, 3, true]],
+    summariesOf(totals).map((m) => [m.metric, m.points, m.aggregation, m.value]),
+    [['post_video_view_time', 40, 'latest', 3]],
   );
 });
 
