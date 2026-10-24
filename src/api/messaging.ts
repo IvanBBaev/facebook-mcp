@@ -10,7 +10,8 @@
 //     a stream (CC-MSG-5).
 //   * send          — `POST /{page-id}/messages` with `messaging_type=RESPONSE`,
 //     `recipient={id}` and `message={text}`. Requires `pages_messaging` plus the
-//     `MESSAGING` task on the Page.
+//     `MESSAGING` task on the Page. An optional `reply_to={mid}` threads the
+//     message as a quoted reply to one message of the same conversation.
 //
 // The module is SHAPING-ONLY and deliberately does not touch the taint envelope:
 // `taint()` lives in the `mcp` layer, which `api` may not import. So every field
@@ -65,11 +66,19 @@ export const MESSAGING_TYPE_RESPONSE = 'RESPONSE';
 export const CONVERSATION_FIELDS =
   'id,snippet,updated_time,unread_count,message_count,can_reply,participants{id,name}';
 
+/**
+ * Whether message reads ask for `reply_to{mid,is_self_reply}`. Off until the
+ * field is verified on a live thread (probe P-1): an unknown field fails the
+ * whole read, so it must not ride along on every `get_conversation`.
+ */
+export const READ_REPLY_TO = false;
+
 /** Fields read for a message node, including attachment metadata (CC-MSG-6). */
 export const MESSAGE_FIELDS =
   'id,created_time,from{id,name},to{id,name},message,sticker,' +
   'attachments{id,mime_type,name,size,image_data,video_data,file_url},' +
-  'shares{link,name}';
+  'shares{link,name},reactions{reaction,users{id}}' +
+  (READ_REPLY_TO ? ',reply_to{mid,is_self_reply}' : '');
 
 /**
  * What a caller can actually do once the 24-hour window has closed. Used both by
@@ -150,6 +159,19 @@ export interface RawShare {
   readonly name?: string;
 }
 
+/** One reaction on a message. `reaction` is the emoji — USER-CHOSEN content. */
+export interface RawReaction {
+  readonly reaction?: string;
+  /** A bare array or an edge, depending on the expansion. */
+  readonly users?: readonly RawParticipant[] | RawEdge<RawParticipant>;
+}
+
+/** The message a message quotes (read only when {@link READ_REPLY_TO}). */
+export interface RawReplyTo {
+  readonly mid?: string;
+  readonly is_self_reply?: boolean;
+}
+
 export interface RawMessage {
   readonly id?: string;
   readonly created_time?: string;
@@ -160,6 +182,8 @@ export interface RawMessage {
   readonly sticker?: string;
   readonly attachments?: RawEdge<RawAttachment>;
   readonly shares?: RawEdge<RawShare>;
+  readonly reactions?: RawEdge<RawReaction>;
+  readonly reply_to?: RawReplyTo;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +238,23 @@ export interface MessageRecord {
   readonly body?: string;
   readonly attachments: readonly AttachmentPlaceholder[];
   readonly attachmentNames: readonly AttachmentNameRef[];
+  /** The quoted message's mid (`reply_to.mid`). */
+  readonly replyToMessageId?: string;
+  readonly isSelfReply?: boolean;
+  /** Reactions folded per emoji; absent when the message has none. */
+  readonly reactions?: readonly ReactionSummary[];
+}
+
+/**
+ * One emoji's reactions on a message, with the reactors folded to a count: a
+ * reactor's PSID identifies a person and is never echoed, only whether the
+ * Page itself is among them.
+ */
+export interface ReactionSummary {
+  /** The emoji — raw user content; MUST be tainted before it is surfaced. */
+  readonly reaction: string;
+  readonly count: number;
+  readonly byPage: boolean;
 }
 
 export interface ConversationRecord {
@@ -483,10 +524,46 @@ export function attachmentNames(raw: RawMessage): AttachmentNameRef[] {
   return names;
 }
 
-export function shapeMessage(raw: RawMessage): MessageRecord {
+/**
+ * A reaction's users, whether Graph sends them as a bare array or as an edge
+ * (`{data: [...]}`); anything else counts as no users.
+ */
+function reactionUsers(raw: unknown): readonly RawParticipant[] {
+  const rows: unknown = Array.isArray(raw) ? raw : isRecord(raw) ? raw.data : undefined;
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row): row is RawParticipant => isRecord(row));
+}
+
+/**
+ * Fold a message's reactions per emoji. A row without users still counts as
+ * one reaction; a row without an emoji is dropped rather than guessed.
+ */
+export function foldReactions(
+  edge: RawEdge<RawReaction> | undefined,
+  pageId: string | undefined,
+): ReactionSummary[] {
+  const folded = new Map<string, { count: number; byPage: boolean }>();
+  for (const row of edgeRows(edge)) {
+    const reaction = readText(row.reaction);
+    if (reaction === undefined) continue;
+    const users = reactionUsers(row.users);
+    const entry = folded.get(reaction) ?? { count: 0, byPage: false };
+    entry.count += Math.max(users.length, 1);
+    if (pageId !== undefined && users.some((u) => graphId(u.id) === pageId)) {
+      entry.byPage = true;
+    }
+    folded.set(reaction, entry);
+  }
+  return [...folded].map(([reaction, entry]) => ({ reaction, ...entry }));
+}
+
+export function shapeMessage(raw: RawMessage, pageId?: string): MessageRecord {
   const createdAtMs = parseGraphTime(raw.created_time);
   const id = graphId(raw.id);
   const createdTime = readString(raw.created_time);
+  const replyTo = isRecord(raw.reply_to) ? raw.reply_to : undefined;
+  const replyToMessageId = graphId(replyTo?.mid);
+  const reactions = foldReactions(raw.reactions, pageId);
   return {
     ...(id !== undefined ? { id } : {}),
     ...(createdTime !== undefined ? { createdTime } : {}),
@@ -496,6 +573,11 @@ export function shapeMessage(raw: RawMessage): MessageRecord {
     ...(raw.message !== undefined ? { body: raw.message } : {}),
     attachments: summariseAttachments(raw),
     attachmentNames: attachmentNames(raw),
+    ...(replyToMessageId !== undefined ? { replyToMessageId } : {}),
+    ...(typeof replyTo?.is_self_reply === 'boolean'
+      ? { isSelfReply: replyTo.is_self_reply }
+      : {}),
+    ...(reactions.length > 0 ? { reactions } : {}),
   };
 }
 
@@ -721,6 +803,21 @@ function recipientUnavailableAction(): ErrorAction {
   };
 }
 
+/** Graph's generic invalid-parameter code, which an unknown reply_to mid returns. */
+const INVALID_PARAMETER_CODE = 100;
+
+function replyTargetAction(): ErrorAction {
+  return {
+    category: 'validation',
+    retryable: false,
+    nextTool: 'facebook_get_conversation',
+    operatorText:
+      'Facebook rejected the reply target, so nothing was delivered. Take the mid ' +
+      'from facebook_get_conversation of this same thread, or send without ' +
+      'reply_to_message_id.',
+  };
+}
+
 /** Rebuild a Graph error keeping its machine-readable fields, swapping guidance. */
 function reclassify(
   err: GraphApiError,
@@ -789,7 +886,10 @@ export function messagingWindowClosedError(window: MessagingWindow): GraphApiErr
  * CC-MSG-2) but names the conversation as the place to verify, and everything
  * else is returned unchanged so no information is invented.
  */
-export function explainSendFailure(err: unknown): Error {
+export function explainSendFailure(
+  err: unknown,
+  options: { readonly replyTo?: boolean } = {},
+): Error {
   if (!(err instanceof GraphApiError)) {
     return err instanceof Error
       ? err
@@ -808,6 +908,13 @@ export function explainSendFailure(err: unknown): Error {
       err,
       `Message NOT sent — the recipient is unavailable. ${err.message}`,
       recipientUnavailableAction(),
+    );
+  }
+  if (options.replyTo === true && err.code === INVALID_PARAMETER_CODE) {
+    return reclassify(
+      err,
+      `Message NOT sent — the reply_to mid was not found in this conversation. ${err.message}`,
+      replyTargetAction(),
     );
   }
   return err;
@@ -834,6 +941,8 @@ export function classifySendOutcome(err: unknown): Exclude<JournalOutcome, 'appl
 
 export interface ListConversationsInput {
   readonly pageId: string;
+  /** Only the conversation with this person (their PSID). */
+  readonly userId?: string;
   readonly token?: string;
   readonly signal?: AbortSignal;
   readonly page?: PageRequest;
@@ -850,7 +959,11 @@ export async function listConversations(
   const edge: EdgeRequest = {
     host: 'graph',
     path: `/${input.pageId}/conversations`,
-    params: { fields: CONVERSATION_FIELDS, platform: PLATFORM_MESSENGER },
+    params: {
+      fields: CONVERSATION_FIELDS,
+      platform: PLATFORM_MESSENGER,
+      ...(input.userId !== undefined ? { user_id: input.userId } : {}),
+    },
     pageId: input.pageId,
     ...(input.token !== undefined ? { token: input.token } : {}),
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
@@ -884,7 +997,7 @@ export async function getConversationMessages(
     ...(input.signal !== undefined ? { signal: input.signal } : {}),
   };
   const page = await fetchPage<RawMessage>(fbRequest, edge, input.page ?? {});
-  return mapPage(page, shapeMessage);
+  return mapPage(page, (raw) => shapeMessage(raw, input.pageId));
 }
 
 export interface SendMessageInput {
@@ -892,6 +1005,8 @@ export interface SendMessageInput {
   /** The recipient's page-scoped ID (PSID). */
   readonly recipientId: string;
   readonly text: string;
+  /** The mid this message quotes (`reply_to`); same conversation only. */
+  readonly replyToMessageId?: string;
   readonly token?: string;
   readonly signal?: AbortSignal;
 }
@@ -937,6 +1052,9 @@ export async function sendMessage(
       recipient: { id: input.recipientId },
       message: { text: input.text },
       messaging_type: MESSAGING_TYPE_RESPONSE,
+      ...(input.replyToMessageId !== undefined
+        ? { reply_to: { mid: input.replyToMessageId } }
+        : {}),
     },
     pageId: input.pageId,
     ...(input.token !== undefined ? { token: input.token } : {}),
@@ -956,6 +1074,6 @@ export async function sendMessage(
       ...(recipientId !== undefined ? { recipientId } : {}),
     };
   } catch (err) {
-    throw explainSendFailure(err);
+    throw explainSendFailure(err, { replyTo: input.replyToMessageId !== undefined });
   }
 }

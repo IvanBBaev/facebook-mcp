@@ -34,6 +34,7 @@ import {
   evaluateMessagingWindow,
   explainSendFailure,
   findLastInboundAtMs,
+  foldReactions,
   formatAttachmentPlaceholder,
   getConversationMessages,
   isMessagingWindowError,
@@ -1140,4 +1141,100 @@ test('attachment metadata outside the taint envelope must be well-formed or abse
   for (const p of placeholders) {
     assert.equal(JSON.stringify(p).includes(INJECTION), false);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Reply threading, reactions and PSID lookup (v2 messaging F1 / F13)
+// ---------------------------------------------------------------------------
+
+test('sendMessage adds reply_to only when a reply target is given', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbOk({ message_id: 'mid.2' }));
+
+  await sendMessage(fb.fn, {
+    pageId: PAGE_ID,
+    recipientId: PSID,
+    text: 'Quoted answer',
+    replyToMessageId: 'm_abc',
+  });
+
+  assert.deepEqual(jsonOf(fb.lastRequest()).body, {
+    recipient: { id: PSID },
+    message: { text: 'Quoted answer' },
+    messaging_type: MESSAGING_TYPE_RESPONSE,
+    reply_to: { mid: 'm_abc' },
+  });
+});
+
+test('a code-100 rejection of a reply names the reply target, and only for a reply', async () => {
+  const invalid = (): GraphApiError =>
+    new GraphApiError('(#100) Invalid parameter', { code: 100, httpStatus: 400 });
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbErr(invalid()));
+
+  await assert.rejects(
+    sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      text: 'x',
+      replyToMessageId: 'm_gone',
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /reply_to mid was not found in this conversation/);
+      assert.equal(err.action?.category, 'validation');
+      assert.equal(err.action?.retryable, false);
+      assert.equal(classifySendOutcome(err), 'failed');
+      return true;
+    },
+  );
+
+  const plain = explainSendFailure(invalid());
+  assert.doesNotMatch(plain.message, /reply_to/);
+});
+
+test('MESSAGE_FIELDS reads reactions and holds reply_to back until it is verified', () => {
+  assert.ok(MESSAGE_FIELDS.includes('reactions{reaction,users{id}}'));
+  assert.ok(!MESSAGE_FIELDS.includes('reply_to'));
+});
+
+test('foldReactions counts reactors per emoji and never keeps their ids', () => {
+  const folded = foldReactions(
+    {
+      data: [
+        { reaction: 'A', users: [{ id: PSID }, { id: PAGE_ID }] },
+        { reaction: 'A', users: { data: [{ id: '3000' }] } },
+        { reaction: 'B' },
+        { users: [{ id: PSID }] },
+        { reaction: '' },
+      ],
+    },
+    PAGE_ID,
+  );
+  assert.deepEqual(folded, [
+    { reaction: 'A', count: 3, byPage: true },
+    { reaction: 'B', count: 1, byPage: false },
+  ]);
+  assert.deepEqual(foldReactions(undefined, PAGE_ID), []);
+});
+
+test('shapeMessage carries reply_to when Graph sends it and omits empty reactions', () => {
+  const shaped = shapeMessage(
+    { id: 'm_2', reply_to: { mid: 'm_1', is_self_reply: false } },
+    PAGE_ID,
+  );
+  assert.equal(shaped.replyToMessageId, 'm_1');
+  assert.equal(shaped.isSelfReply, false);
+  assert.equal(shaped.reactions, undefined);
+});
+
+test('listConversations sends user_id only when asked', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'GET', fbOk({ data: [] }));
+
+  await listConversations(fb.fn, { pageId: PAGE_ID, userId: PSID });
+  assert.equal(jsonOf(fb.lastRequest()).params?.user_id, PSID);
+
+  await listConversations(fb.fn, { pageId: PAGE_ID });
+  assert.equal(jsonOf(fb.lastRequest()).params?.user_id, undefined);
 });

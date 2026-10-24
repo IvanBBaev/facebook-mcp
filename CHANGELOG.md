@@ -37,6 +37,21 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Messenger replies can quote a message, threads show reactions, and a
+  conversation can be found by PSID (messaging F1 send side, F13).**
+  `facebook_send_message` takes an optional `reply_to_message_id` (a mid from
+  `facebook_get_conversation`), sent as `reply_to.mid`. The mid is part of the
+  plan identity, so changing it invalidates the plan. The preview warns, without
+  refusing, when the mid is not among the 10 probed messages. A Graph code-100
+  rejection of a reply is reported as a bad reply target and journalled
+  `failed`. The journal records only `replyTo: true|false`, and the mid is not
+  logged. `facebook_get_conversation` now reads `reactions` and folds them per
+  emoji to `{count, byPage}`. The emoji travels inside the taint envelope and
+  reactor PSIDs are never echoed. Reading `reply_to` is built but stays off
+  (`READ_REPLY_TO`) until probe P-1 verifies the field. `facebook_list_conversations`
+  takes an optional `user_id` (a PSID, digits only, not logged) and returns only
+  the conversation with that person.
+
 - **`facebook_comment_on_post` posts a top-level comment as the Page
   (organic F6).** A new `moderation` tool (tier `reversible`) for
   `POST /{post-id}/comments` with `message`, an https `attachment_url` photo,
