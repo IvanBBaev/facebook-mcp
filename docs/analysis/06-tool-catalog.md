@@ -45,7 +45,7 @@ therefore includes publishing, so a fresh install can post on day one; ads
 |---|---|---|---|---|---|
 | `facebook_whoami` | true | false | true | true | `debug_token` + `/me` + permission/task matrix check (doctor). Output includes a `version` field — server version + pinned default `FB_API_VERSION` + SDK version (G-TOOL-5) — needed for usable bug reports once non-author users exist |
 | `facebook_list_pages` | true | false | true | true | `/me/accounts` — pages, tasks, token presence |
-| `facebook_get_page` | true | false | true | true | Page metadata incl. `has_transitioned_to_new_page_experience` and follower count; Graph v25 rejects the legacy `video_upload_limits` Page field |
+| `facebook_get_page` | true | false | true | true | Page metadata incl. `has_transitioned_to_new_page_experience` and follower count; Graph v25 rejects the legacy `video_upload_limits` Page field; `field_set:"profile"` adds the public business fields (hours as `[{day, open, close}]`), retried without `emails` if Graph refuses it |
 | `facebook_usage` | true | false | true | true | Last-seen rate-limit headers per host/business |
 
 ## Package `posts` (publishing; profile `publisher`)
@@ -183,5 +183,5 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story
-publishing, Events, Live video, album / photo uploads, Page profile management, organic post targeting, and post boosting are out of
+publishing, Events, Live video, album / photo uploads, Page profile updates (reads ship via `facebook_get_page`), organic post targeting, and post boosting are out of
 scope for 1.0 (see 01's out-of-scope list and the README scope enumeration).

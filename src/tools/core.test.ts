@@ -597,6 +597,104 @@ test('get_page with no profile resolves the default Page and echoes profile null
   assert.equal(lastJson(fb).token, 'EAA-DEF');
 });
 
+test('get_page field_set profile reads the business fields once each and reshapes hours', async () => {
+  const pages = createFakePageResolver({
+    default: { pageId: '100', name: 'Default', token: 'EAA-DEF' },
+  });
+  const { fb, ctx } = makeCtx({ pages });
+  fb.on(
+    (req) => req.path === '/100',
+    fbOk({
+      id: '100',
+      website: 'https://example.com',
+      emails: ['hello@example.com'],
+      hours: { mon_1_open: '09:00', mon_1_close: '18:00' },
+    }),
+  );
+
+  const parsed = body(
+    await tool('facebook_get_page').handler({ field_set: 'profile' }, ctx),
+  );
+  assert.equal(parsed.fieldSet, 'profile');
+  assert.equal(parsed.note, undefined);
+  const page = parsed.page as Record<string, unknown>;
+  assert.deepEqual(page.hours, [{ day: 'mon', open: '09:00', close: '18:00' }]);
+  assert.deepEqual(page.emails, ['hello@example.com']);
+  const fields = String(lastJson(fb).params?.fields).split(',');
+  for (const f of ['followers_count', 'website', 'hours', 'temporary_status', 'emails']) {
+    assert.ok(fields.includes(f), `expected ${f} in the profile read`);
+  }
+  assert.equal(fields.filter((f) => f === 'about').length, 1, 'about is requested once');
+});
+
+/** A resolver with only a default Page, for the field-set tests. */
+function defaultPages(): FakePageResolver {
+  return createFakePageResolver({
+    default: { pageId: '100', name: 'Default', token: 'EAA-DEF' },
+  });
+}
+
+test('get_page summary (the default) requests no profile fields', async () => {
+  const { fb, ctx } = makeCtx({ pages: defaultPages() });
+  fb.on(() => true, fbOk({ id: '100' }));
+  const parsed = body(
+    await tool('facebook_get_page').handler({ field_set: 'summary' }, ctx),
+  );
+  assert.equal(parsed.fieldSet, undefined);
+  const fields = String(lastJson(fb).params?.fields);
+  assert.equal(fields.includes('hours'), false);
+  assert.equal(fields.includes('emails'), false);
+});
+
+test('get_page profile retries without emails when Graph refuses the field', async () => {
+  const { fb, ctx } = makeCtx({ pages: defaultPages() });
+  fb.on(
+    (req) => req.protocol === 'json' && String(req.params?.fields).includes('emails'),
+    fbErr(
+      new GraphApiError('(#200) Requires pages_manage_metadata', {
+        code: 200,
+        httpStatus: 403,
+        action: { category: 'permission', retryable: false, operatorText: 'grant it' },
+      }),
+    ),
+  );
+  fb.on(() => true, fbOk({ id: '100', website: 'https://example.com' }));
+
+  const parsed = body(
+    await tool('facebook_get_page').handler({ field_set: 'profile' }, ctx),
+  );
+  assert.equal((parsed.page as Record<string, unknown>).website, 'https://example.com');
+  assert.match(String(parsed.note), /emails/);
+  assert.equal(String(lastJson(fb).params?.fields).includes('emails'), false);
+});
+
+test('get_page profile propagates a refusal that is not about a field', async () => {
+  const { fb, ctx } = makeCtx({ pages: defaultPages() });
+  fb.on(
+    () => true,
+    fbErr(
+      new GraphApiError('Session expired', {
+        code: 190,
+        httpStatus: 401,
+        action: { category: 'auth', retryable: false, operatorText: 'refresh' },
+      }),
+    ),
+  );
+  await assert.rejects(
+    tool('facebook_get_page').handler({ field_set: 'profile' }, ctx),
+    /Session expired/,
+  );
+});
+
+test('get_page rejects an unknown field_set', async () => {
+  const { fb, ctx } = makeCtx({ pages: defaultPages() });
+  await assert.rejects(
+    tool('facebook_get_page').handler({ field_set: 'everything' }, ctx),
+    /field_set/,
+  );
+  assert.equal(fb.calls.length, 0, 'an invalid field_set never reaches Graph');
+});
+
 // ---------------------------------------------------------------------------
 // facebook_usage
 // ---------------------------------------------------------------------------

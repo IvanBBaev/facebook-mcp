@@ -1,0 +1,25 @@
+{
+  "id": "100000000000001",
+  "name": "Example Page",
+  "about": "Synthetic Page for the unit suite.",
+  "description": "Longer synthetic description.",
+  "website": "https://example.com",
+  "phone": "+1 555 0100",
+  "emails": ["hello@example.com"],
+  "hours": {
+    "tue_1_open": "09:00",
+    "tue_1_close": "18:00",
+    "mon_2_open": "14:00",
+    "mon_2_close": "18:00",
+    "mon_1_open": "09:00",
+    "mon_1_close": "12:00"
+  },
+  "is_always_open": false,
+  "temporary_status": "OPERATING_AS_USUAL",
+  "single_line_address": "1 Example Street, Example City",
+  "location": {
+    "street": "1 Example Street",
+    "city": "Example City",
+    "country": "Exampleland"
+  }
+}

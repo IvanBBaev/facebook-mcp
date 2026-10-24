@@ -9,7 +9,9 @@
 //                           CC-MCP-7).
 //   * facebook_list_pages — the Pages the operator administers (`/me/accounts`):
 //                           id, name, category, tasks, and token presence.
-//   * facebook_get_page   — metadata for one resolved Page (profile-scoped).
+//   * facebook_get_page   — metadata for one resolved Page (profile-scoped);
+//                           `field_set:'profile'` adds the public business
+//                           fields (hours, website, phone, …).
 //   * facebook_usage      — rate-limit headers from a fresh `/me` probe (or from
 //                           the response that refused it) as a UsageSnapshot.
 //                           Server-owned envelope (structuredContent, CC-MCP-7).
@@ -38,6 +40,11 @@ import {
   type ToolAnnotations,
   type UsageSnapshot,
 } from '../core/index.js';
+import {
+  EMAILS_DROPPED_NOTE,
+  profileFields,
+  withReadableHours,
+} from '../api/page-profile.js';
 import { defineTool, shapeEnvelope, shapeResult } from '../mcp/index.js';
 import { graphErrorFields } from './shared.js';
 
@@ -340,6 +347,26 @@ const GET_PAGE_FIELDS =
   'has_transitioned_to_new_page_experience,is_published,' +
   'verification_status';
 
+/** The `facebook_get_page` field sets (organic F9). */
+const PAGE_FIELD_SETS = ['summary', 'profile'] as const;
+
+/**
+ * True when a profile read refused because of `emails` is worth one retry
+ * without it: a permission refusal, or a field Graph would not accept.
+ */
+function isEmailsRefusal(err: unknown): boolean {
+  if (!(err instanceof GraphApiError)) return false;
+  const category = err.action?.category;
+  return category === 'permission' || category === 'validation';
+}
+
+/** The summary fields plus the profile set, each field once (`about` is in both). */
+function profileReadFields(withEmails: boolean): string {
+  return [
+    ...new Set([...GET_PAGE_FIELDS.split(','), ...profileFields(withEmails).split(',')]),
+  ].join(',');
+}
+
 // ---------------------------------------------------------------------------
 // usage — server-owned rate-limit envelope
 // ---------------------------------------------------------------------------
@@ -619,8 +646,8 @@ export function createCorePackage(
 ): PackageSpec {
   // No tool in this package declares `logFields` (04 §"Log hygiene"). Three of
   // the four take no arguments at all, and facebook_get_page takes only the
-  // profile selector, so a per-call line could say nothing beyond "a Page was
-  // read". The identity and quota answers these tools exist to give belong in
+  // profile selector and a field-set switch, so a per-call line could say
+  // nothing beyond "a Page was read". The identity and quota answers these tools exist to give belong in
   // their results; naming an argument that does not exist would read like a
   // control while logging nothing.
   const whoami = defineTool({
@@ -744,7 +771,10 @@ export function createCorePackage(
     title: 'Get Page',
     description:
       'Fetch metadata for one Page — name, category, follower/fan counts, publish ' +
-      'state and new-Page-experience flag. Accepts ' +
+      'state and new-Page-experience flag. `field_set:"profile"` also returns the ' +
+      'public business fields: about, description, website, phone, emails, hours ' +
+      '(as [{day, open, close}] ranges), is_always_open, temporary_status, ' +
+      'single_line_address and location. Accepts ' +
       'an optional profile key or Page ID; omitted ⇒ the default Page.',
     inputSchema: z.object({
       profile: z
@@ -754,25 +784,51 @@ export function createCorePackage(
         .describe(
           'Page profile key (e.g. "brand-a") or a raw Page ID. Omitted ⇒ the default Page (FB_PAGE_ID).',
         ),
+      field_set: z
+        .enum(PAGE_FIELD_SETS)
+        .optional()
+        .describe(
+          '"summary" (default): identity, counts and publish state. "profile": the summary plus the public business fields (hours, website, phone, address, …).',
+        ),
     }),
     annotations: READ_ONLY,
     handler: async (input, ctx) => {
       const resolved = await ctx.pages.resolvePage(input.profile);
-      const res = await ctx.fbRequest<Record<string, unknown>>({
-        protocol: 'json',
-        method: 'GET',
-        host: 'graph',
-        path: `/${resolved.pageId}`,
-        params: { fields: GET_PAGE_FIELDS },
-        token: resolved.token,
-        signal: ctx.signal,
-      });
+      const profile = input.field_set === 'profile';
+      const read = (fields: string) =>
+        ctx.fbRequest<Record<string, unknown>>({
+          protocol: 'json',
+          method: 'GET',
+          host: 'graph',
+          path: `/${resolved.pageId}`,
+          params: { fields },
+          token: resolved.token,
+          signal: ctx.signal,
+        });
+      let page: Record<string, unknown>;
+      let note: string | undefined;
+      if (!profile) {
+        page = (await read(GET_PAGE_FIELDS)).data;
+      } else {
+        // `emails` is the one profile field the docs do not clear for this read;
+        // a refusal drops it rather than failing the whole profile (F9).
+        try {
+          page = (await read(profileReadFields(true))).data;
+        } catch (err) {
+          if (!isEmailsRefusal(err)) throw err;
+          page = (await read(profileReadFields(false))).data;
+          note = EMAILS_DROPPED_NOTE;
+        }
+        page = withReadableHours(page);
+      }
       return shapeResult(
         {
           profile: input.profile ?? null,
           pageId: resolved.pageId,
           name: resolved.name,
-          page: res.data,
+          ...(profile ? { fieldSet: 'profile' } : {}),
+          page,
+          ...(note !== undefined ? { note } : {}),
         },
         { maxResultChars: ctx.settings.maxResultChars, redactor: ctx.redactor },
       );

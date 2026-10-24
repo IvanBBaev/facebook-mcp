@@ -15,7 +15,8 @@ here as published.
 - Synthetic bodies are fine too — a fixture does not have to come from the wire.
   What matters is that a fixture never claims to be a recording it is not.
   `graph-stories.json` (`/{page-id}/stories`), `graph-albums.json`
-  (`/{page-id}/albums`) and `graph-photos.json` (`/{album-id}/photos`) are
+  (`/{page-id}/albums`), `graph-photos.json` (`/{album-id}/photos`) and
+  `graph-page-profile.json` (`/{page-id}` with the profile fields) are
   synthetic: hand-written to the documented field sets, with placeholder ids.
 
 ## What does not

@@ -37,6 +37,14 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_get_page` reads the Page's business profile (organic F9).**
+  `field_set: "profile"` adds about, description, website, phone, emails,
+  hours, is_always_open, temporary_status, single_line_address and location.
+  `hours` comes back as `[{day, open, close}]` ranges instead of Graph's flat
+  `mon_1_open` dict. If Graph refuses `emails`, the profile is read again
+  without it and a `note` says so. The default (`summary`) is unchanged. Not
+  yet verified against live Graph.
+
 - **Page Stories, albums and photos are readable (organic F2, F3).** Three
   new `reader` tools: `facebook_list_stories` reads `/{page-id}/stories`
   (`since`/`until` as Unix seconds or ISO 8601, a client-side `status` filter
