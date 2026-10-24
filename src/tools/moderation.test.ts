@@ -333,6 +333,7 @@ const TOOL_TABLE: readonly (readonly [
   ['facebook_comment_on_post', false, false, false, 'reversible'],
   ['facebook_edit_comment', false, false, true, 'reversible'],
   ['facebook_hide_comment', false, false, true, 'reversible'],
+  ['facebook_reply_and_hide_comment', false, false, false, 'reversible'],
   ['facebook_like_comment', false, false, true, 'reversible'],
   ['facebook_delete_comment', false, true, true, 'irreversible'],
   ['facebook_private_reply', false, true, false, 'irreversible'],
@@ -416,6 +417,7 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     facebook_comment_on_post: ['profile', 'apply', 'plan_id', 'post_id'],
     facebook_edit_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_hide_comment: ['profile', 'apply', 'plan_id', 'hidden'],
+    facebook_reply_and_hide_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_like_comment: ['profile', 'apply', 'plan_id', 'unlike'],
     facebook_delete_comment: ['profile', 'apply', 'plan_id'],
     facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
@@ -2975,4 +2977,146 @@ test('facebook_triage_comments rejects a since without a timezone offset', () =>
   assert.equal(schema.safeParse({ since: '2026-07-01T10:00:00' }).success, false);
   assert.equal(schema.safeParse({ since: '2026-07-01T10:00:00+03:00' }).success, true);
   assert.equal(schema.safeParse({ keywords: [''] }).success, false);
+});
+
+// ---------------------------------------------------------------------------
+// facebook_reply_and_hide_comment (v2 F7)
+// ---------------------------------------------------------------------------
+
+const REPLY_AND_HIDE = 'facebook_reply_and_hide_comment';
+const REPLY_AND_HIDE_ARGS = { comment_id: 'c1', message: 'We have sent you a DM.' };
+
+function isReplyPost(r: FbRequest): boolean {
+  return r.method === 'POST' && r.path === '/c1/comments';
+}
+
+function isHidePost(r: FbRequest): boolean {
+  return r.method === 'POST' && r.path === '/c1';
+}
+
+/** Preview, then apply the plan the preview handed back. */
+async function replyAndHide(
+  ctx: WriteToolContext,
+  args: Record<string, unknown> = REPLY_AND_HIDE_ARGS,
+): Promise<{ preview: Record<string, unknown>; applied: Record<string, unknown> }> {
+  const preview = body(await tool(REPLY_AND_HIDE).handler(args, ctx));
+  const applied = body(
+    await tool(REPLY_AND_HIDE).handler(
+      { ...args, apply: true, plan_id: preview.planId },
+      ctx,
+    ),
+  );
+  return { preview, applied };
+}
+
+test('reply_and_hide previews first and posts the reply before the hide', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'spam', is_hidden: false }));
+  fb.on(isReplyPost, fbOk({ id: 'c1_r1' }));
+  fb.on(isHidePost, fbOk({ success: true }));
+
+  // The package default is apply, but this verb is plan-bound: apply:true alone
+  // is still a preview.
+  const unbound = body(
+    await tool(REPLY_AND_HIDE).handler({ ...REPLY_AND_HIDE_ARGS, apply: true }, ctx),
+  );
+  assert.equal(unbound.status, 'preview');
+  assert.ok(!anyCall(fb, 'POST'));
+
+  const { preview, applied } = await replyAndHide(ctx);
+  assert.equal(preview.status, 'preview');
+  assert.ok(
+    str(preview.summary).startsWith(
+      'Reply publicly to comment c1 (22 chars), then hide comment c1',
+    ),
+    str(preview.summary),
+  );
+  assert.equal(applied.status, 'applied');
+  assert.equal(applied.applied, true);
+  assert.deepEqual(applied.result, {
+    commentId: 'c1',
+    outcome: 'applied',
+    reply: { outcome: 'applied', replyId: 'c1_r1' },
+    hide: { outcome: 'applied' },
+  });
+
+  const writes = jsonCalls(fb).filter((r) => r.method === 'POST');
+  assert.deepEqual(
+    writes.map((r) => r.path),
+    ['/c1/comments', '/c1'],
+    'the reply goes first, the hide second',
+  );
+  assert.deepEqual(bodyOf(writes[1] as JsonRequest), { is_hidden: true });
+  assert.equal(journal.entries.at(-1)?.outcome, 'applied');
+});
+
+test('reply_and_hide on an already-hidden comment warns and only replies', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'spam', is_hidden: true }));
+  fb.on(isReplyPost, fbOk({ id: 'c1_r1' }));
+  fb.on(isHidePost, fbOk({ success: true }));
+
+  const { preview, applied } = await replyAndHide(ctx);
+  assert.ok(arr(preview.warnings).some((w) => str(w).includes('already hidden')));
+  assert.equal(applied.status, 'applied');
+  const result = obj(applied.result);
+  assert.equal(obj(result.hide).outcome, 'skipped');
+  assert.equal(result.nextStep, undefined);
+  assert.ok(!anyCall(fb, 'POST', '/c1'), 'no hide is sent for a hidden comment');
+});
+
+test('reply_and_hide reports a failed hide as attempted with the follow-up call', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'spam', is_hidden: false }));
+  fb.on(isReplyPost, fbOk({ id: 'c1_r1' }));
+  fb.on(isHidePost, fbErr(permissionError()));
+
+  const { applied } = await replyAndHide(ctx);
+  assert.equal(applied.applied, false);
+  const result = obj(applied.result);
+  assert.equal(result.outcome, 'attempted');
+  assert.deepEqual(result.reply, { outcome: 'applied', replyId: 'c1_r1' });
+  assert.equal(obj(result.hide).outcome, 'failed');
+  assert.equal(
+    result.nextStep,
+    'facebook_hide_comment {"comment_ids":["c1"],"hidden":true}',
+  );
+  assert.equal(journal.entries.at(-1)?.outcome, 'attempted');
+});
+
+test('reply_and_hide hides nothing when the reply fails', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'spam', is_hidden: false }));
+  fb.on(isReplyPost, fbErr(permissionError()));
+  fb.on(isHidePost, fbOk({ success: true }));
+
+  const preview = body(await tool(REPLY_AND_HIDE).handler(REPLY_AND_HIDE_ARGS, ctx));
+  await assert.rejects(
+    () =>
+      tool(REPLY_AND_HIDE).handler(
+        { ...REPLY_AND_HIDE_ARGS, apply: true, plan_id: preview.planId },
+        ctx,
+      ),
+    (err: unknown) => err instanceof GraphApiError && err.code === 200,
+  );
+  assert.ok(!anyCall(fb, 'POST', '/c1'), 'step 2 is never attempted');
+  assert.equal(journal.entries.at(-1)?.outcome, 'failed');
+});
+
+test('reply_and_hide diverges when the comment changed after the preview', async () => {
+  const { fb, ctx } = makeHarness();
+  // The preview reads the original; every later read sees the edit.
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'spam', is_hidden: false }), 1);
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'edited', is_hidden: false }));
+  fb.on(isReplyPost, fbOk({ id: 'c1_r1' }));
+
+  const preview = body(await tool(REPLY_AND_HIDE).handler(REPLY_AND_HIDE_ARGS, ctx));
+  const applied = body(
+    await tool(REPLY_AND_HIDE).handler(
+      { ...REPLY_AND_HIDE_ARGS, apply: true, plan_id: preview.planId },
+      ctx,
+    ),
+  );
+  assert.equal(applied.status, 'diverged');
+  assert.ok(!anyCall(fb, 'POST'));
 });

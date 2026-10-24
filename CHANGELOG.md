@@ -73,6 +73,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_reply_and_hide_comment` answers and hides a comment in one
+  approved step** (moderation, reversible). It posts a public reply (text and an
+  optional attachment, as `facebook_reply_to_comment`) and then hides the
+  parent comment. Apply is bound to the preview's `plan_id`, and the comment's
+  text fingerprint and hidden flag are part of the plan, so a comment edited or
+  hidden in between makes the apply diverge. A failed reply hides nothing; an
+  already-hidden comment gets a preview warning and only the reply. The result
+  reports each step (`reply`, `hide`) and is `applied` only when both landed;
+  a hide that did not land returns `attempted` with a `nextStep` naming the
+  `facebook_hide_comment` call. Neither step is retried. Needs
+  `pages_manage_engagement` and `pages_read_engagement`.
+
 - **`facebook_triage_comments` builds a moderation queue in one call**
   (moderation, read-only). It scans the comments on the most recent published
   posts (`posts`, default 10, max 25), newest first, and filters them by

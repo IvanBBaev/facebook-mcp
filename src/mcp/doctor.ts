@@ -147,6 +147,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_comment_on_post: ['pages_manage_engagement'],
   facebook_edit_comment: ['pages_manage_engagement'],
   facebook_hide_comment: ['pages_manage_engagement'],
+  facebook_reply_and_hide_comment: ['pages_manage_engagement', 'pages_read_engagement'],
   facebook_like_comment: ['pages_manage_engagement'],
   facebook_delete_comment: ['pages_manage_engagement', 'pages_read_user_content'],
   // Meta's Private Replies doc: sending needs pages_messaging (+ MESSAGING task),

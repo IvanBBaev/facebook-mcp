@@ -196,6 +196,7 @@ const TIERS = {
   facebook_comment_on_post: 'reversible',
   facebook_edit_comment: 'reversible',
   facebook_hide_comment: 'reversible',
+  facebook_reply_and_hide_comment: 'reversible',
   facebook_like_comment: 'reversible',
   facebook_delete_comment: 'irreversible',
   facebook_private_reply: 'irreversible',
@@ -675,6 +676,78 @@ function scopeOf(
     token: resolved.token,
     ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
   };
+}
+
+/**
+ * Post one public reply: the text, the attachment, or both. A local photo is
+ * read here, at apply time, and its hash is checked on the very buffer that is
+ * uploaded. An acknowledgement without an id is reported, never assumed.
+ */
+async function postReply(
+  fbRequest: FbRequestFn,
+  scope: CommentScope,
+  opts: LocalMediaOptions,
+  input: {
+    readonly commentId: string;
+    readonly message?: string;
+    readonly attachment?: ReplyAttachment;
+  },
+): Promise<ReplyOutcome> {
+  const { attachment } = input;
+  let photo: Awaited<ReturnType<typeof readLocalPhoto>> | undefined;
+  if (attachment?.kind === 'photo_path') {
+    try {
+      photo = await readLocalPhoto(attachment.path, opts, attachment.sha256);
+    } catch (err) {
+      throw mediaRefusal(err);
+    }
+  }
+  const ack = await replyToComment(fbRequest, {
+    ...scope,
+    commentId: input.commentId,
+    ...(input.message !== undefined ? { message: input.message } : {}),
+    ...(attachment?.kind === 'image_url' ? { attachmentUrl: attachment.url } : {}),
+    ...(attachment?.kind === 'gif_url' ? { attachmentShareUrl: attachment.url } : {}),
+    ...(photo !== undefined
+      ? {
+          photo: {
+            data: photo.data,
+            filename: photo.filename,
+            contentType: photo.contentType,
+          },
+        }
+      : {}),
+  });
+  return ack.id !== undefined ? { id: ack.id } : { note: REPLY_UNCONFIRMED_NOTE };
+}
+
+/** One step of facebook_reply_and_hide_comment, as the result reports it. */
+interface ReplyAndHideStep {
+  readonly outcome: 'applied' | 'attempted' | 'failed' | 'skipped';
+  readonly replyId?: string;
+  readonly note?: string;
+  readonly error?: string;
+}
+
+/** What facebook_reply_and_hide_comment returns (v2 F7, per-step as CC-MOD-5). */
+interface ReplyAndHideOutcome {
+  readonly commentId: string;
+  /** `applied` when every step that ran was confirmed, `attempted` otherwise. */
+  readonly outcome: 'applied' | 'attempted';
+  readonly reply: ReplyAndHideStep;
+  readonly hide: ReplyAndHideStep;
+  /** The follow-up that finishes the job when the hide did not land. */
+  readonly nextStep?: string;
+}
+
+const ALREADY_HIDDEN_WARNING =
+  'The comment is already hidden; only the reply will be posted.';
+
+const ALREADY_HIDDEN_NOTE = 'already hidden when the plan was applied — no hide was sent';
+
+/** A partial reply-and-hide is unconfirmed as a whole, never `applied`. */
+function replyAndHideVerdict(outcome: ReplyAndHideOutcome) {
+  return outcome.outcome === 'applied' ? APPLIED_VERDICT : ATTEMPTED_VERDICT;
 }
 
 /**
@@ -1389,38 +1462,12 @@ export function createModerationPackage(): PackageSpec {
         notPerformedNotice: 'This was a dry run — no reply was posted.',
         // Additive: there is no prior state to diverge from. A comment deleted in
         // the meantime is a hard error, not a no-op — there is nothing to reply to.
-        perform: async (): Promise<ReplyOutcome> => {
-          let photo: Awaited<ReturnType<typeof readLocalPhoto>> | undefined;
-          if (attachment?.kind === 'photo_path') {
-            try {
-              // The hash is checked on the very buffer that is uploaded.
-              photo = await readLocalPhoto(attachment.path, opts, attachment.sha256);
-            } catch (err) {
-              throw mediaRefusal(err);
-            }
-          }
-          const ack = await replyToComment(ctx.fbRequest, {
-            ...scope,
+        perform: () =>
+          postReply(ctx.fbRequest, scope, opts, {
             commentId: input.comment_id,
             ...(input.message !== undefined ? { message: input.message } : {}),
-            ...(attachment?.kind === 'image_url'
-              ? { attachmentUrl: attachment.url }
-              : {}),
-            ...(attachment?.kind === 'gif_url'
-              ? { attachmentShareUrl: attachment.url }
-              : {}),
-            ...(photo !== undefined
-              ? {
-                  photo: {
-                    data: photo.data,
-                    filename: photo.filename,
-                    contentType: photo.contentType,
-                  },
-                }
-              : {}),
-          });
-          return ack.id !== undefined ? { id: ack.id } : { note: REPLY_UNCONFIRMED_NOTE };
-        },
+            ...(attachment !== undefined ? { attachment } : {}),
+          }),
         // A lost answer may have left the reply public: `attempted`, not `failed`.
         classifyOutcome: classifyWriteFailure,
         // A 200 without a reply id is the wire saying "maybe": the reply may be
@@ -1684,6 +1731,160 @@ export function createModerationPackage(): PackageSpec {
         },
         classifyResult: bulkVerdict,
         metadata: { commentIds: input.comment_ids, hidden: input.hidden },
+      });
+    },
+  });
+
+  // -------------------------------------------------------------------------
+  // facebook_reply_and_hide_comment (reversible, two steps)
+  // -------------------------------------------------------------------------
+  const replyAndHideTool = defineTool({
+    name: 'facebook_reply_and_hide_comment',
+    title: 'Reply to and hide a comment',
+    description:
+      'Post a PUBLIC reply under a comment and then hide that comment, in one ' +
+      'approved step — e.g. "We have sent you a DM" under spam or abuse. The reply ' +
+      'goes first, so a failed reply hides nothing; a comment that is already ' +
+      'hidden only gets the reply. Always previews first: apply needs the ' +
+      '`plan_id` of that preview, and a comment edited or hidden in between makes ' +
+      'the apply diverge. Each step reports its own outcome; if the hide fails, ' +
+      'finish with facebook_hide_comment. Both steps are reversible (delete the ' +
+      'reply, unhide the comment), but the reply is NOT idempotent — never retry ' +
+      'blindly. Needs a PAGE token with pages_manage_engagement and the MODERATE task.',
+    inputSchema: z.object({
+      ...writeArgs,
+      comment_id: commentIdArg,
+      message: messageArg,
+      attachment: replyAttachmentArg.optional(),
+    }),
+    annotations: REPLY_ANNOTATIONS,
+    writeTier: TIERS.facebook_reply_and_hide_comment,
+    // The same record as a plain reply: which comment, armed how. The text stays
+    // off the log for the reasons given on facebook_reply_to_comment.
+    logFields: ['profile', 'apply', 'plan_id', 'comment_id'],
+    handler: async (input, ctx) => {
+      const opts = localMediaOptions(ctx.settings.mediaDir);
+      const attachment =
+        input.attachment !== undefined
+          ? await prepareReplyAttachment(input.attachment, opts)
+          : undefined;
+      const resolved = await ctx.pages.resolvePage(input.profile);
+      const scope = scopeOf(ctx, resolved);
+      const commentId = input.comment_id;
+      const states = trackedCommentStates(ctx.fbRequest, scope, [commentId]);
+      return executeWrite(ctx, {
+        tool: 'facebook_reply_and_hide_comment',
+        tier: TIERS.facebook_reply_and_hide_comment,
+        // The reply is public under the Page's name, so the package's apply
+        // default must not post it unseen: apply is bound to a previewed plan.
+        requirePlanId: true,
+        pageId: resolved.pageId,
+        resolvedPage: resolved,
+        params: {
+          comment_id: commentId,
+          message: input.message,
+          ...(attachment !== undefined ? { attachment } : {}),
+        },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          `Reply publicly to comment ${commentId} (${String(input.message.length)} chars` +
+          (attachment !== undefined ? `, with ${attachmentLabel(attachment)}` : '') +
+          `), then hide comment ${commentId}, as Page ${resolved.pageId}: ` +
+          `"${truncate(input.message, 300)}"`,
+        warnings: [
+          'The reply is PUBLIC — everyone who can see the comment can see it.',
+          'The reply is posted first and the hide second; neither step is retried, and ' +
+            'a failed hide is reported with the follow-up call.',
+        ],
+        notPerformedNotice:
+          'This was a dry run — no reply was posted and nothing was hidden.',
+        // The fingerprint and the hidden flag bind the plan: an edit or a hide in
+        // between makes the apply diverge instead of acting on an unseen comment.
+        readState: states.readState,
+        stateWarnings: (before) => {
+          const state = (before as Record<string, CommentState> | undefined)?.[commentId];
+          if (state?.gone === true) {
+            return [
+              'The comment no longer exists (or this token cannot see it); the reply will fail.',
+            ];
+          }
+          return [
+            ...unreadableWarnings(before),
+            ...(state?.hidden === true ? [ALREADY_HIDDEN_WARNING] : []),
+          ];
+        },
+        perform: async (): Promise<ReplyAndHideOutcome> => {
+          // Step 1. A throw here is the whole call's failure: nothing was hidden.
+          const reply = await postReply(ctx.fbRequest, scope, opts, {
+            commentId,
+            message: input.message,
+            ...(attachment !== undefined ? { attachment } : {}),
+          });
+          const replyStep: ReplyAndHideStep =
+            reply.id !== undefined
+              ? { outcome: 'applied', replyId: reply.id }
+              : { outcome: 'attempted', note: reply.note };
+
+          // Step 2, against the state the apply was cleared on.
+          let hideStep: ReplyAndHideStep;
+          if (states.stateOf(commentId)?.hidden === true) {
+            hideStep = { outcome: 'skipped', note: ALREADY_HIDDEN_NOTE };
+          } else {
+            const fenced = pageTokenFence(
+              sweepFbRequest(ctx.fbRequest, ctx.signal),
+              ctx,
+              resolved.pageId,
+            );
+            try {
+              const step = await moderateCommentStep(fenced, {
+                ...scope,
+                op: 'hide',
+                commentId,
+                hidden: true,
+              });
+              hideStep = step.ok
+                ? {
+                    outcome: 'applied',
+                    ...(step.note !== undefined ? { note: step.note } : {}),
+                  }
+                : {
+                    outcome: 'failed',
+                    error: step.error ?? 'the hide was not confirmed',
+                  };
+            } catch (err) {
+              if (ctx.signal?.aborted === true && !(err instanceof GraphApiError))
+                throw err;
+              hideStep = {
+                outcome: classifyWriteFailure(err),
+                error: errorMessageOf(err),
+              };
+            }
+          }
+
+          const hideDone =
+            hideStep.outcome === 'applied' || hideStep.outcome === 'skipped';
+          return {
+            commentId,
+            outcome:
+              replyStep.outcome === 'applied' && hideDone ? 'applied' : 'attempted',
+            reply: replyStep,
+            hide: hideStep,
+            ...(hideDone
+              ? {}
+              : {
+                  nextStep: `facebook_hide_comment {"comment_ids":["${commentId}"],"hidden":true}`,
+                }),
+          };
+        },
+        // A failed reply with a lost answer may still be public: `attempted`.
+        classifyOutcome: classifyWriteFailure,
+        classifyResult: replyAndHideVerdict,
+        metadata: {
+          commentId,
+          messageChars: input.message.length,
+          ...(attachment !== undefined ? { attachmentKind: attachment.kind } : {}),
+        },
       });
     },
   });
@@ -2038,6 +2239,7 @@ export function createModerationPackage(): PackageSpec {
       commentOnPostTool,
       editCommentTool,
       hideTool,
+      replyAndHideTool,
       likeTool,
       deleteTool,
       privateReplyTool,

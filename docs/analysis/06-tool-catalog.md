@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 31 read tools. The published counts (48 tools / 7 packages, 40 in the default
-> profile, 31 read / 17 write) are asserted there too. `src/metadata.test.ts`
+> the 31 read tools. The published counts (49 tools / 7 packages, 41 in the default
+> profile, 31 read / 18 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (40 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (41 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -112,6 +112,7 @@ reversible verbs so client prompting stays proportionate. The irreversible
 | `facebook_comment_on_post` | false | false | false | true | `POST /{post-id}/comments` with `message` and/or an https `attachment_url` — a top-level public comment as the Page (organic F6). The plan-mode preview reads the post (`id,message,from,created_time`), quotes it, and warns when the Page did not write it; a foreign post's text is quoted only inside a taint envelope. Reversible via `facebook_delete_comment`; not idempotent, so a lost answer is `attempted` |
 | `facebook_edit_comment` | false | false | true | true | `POST /{comment-id}` with `message` — rewrite a comment the Page itself wrote (messaging F8b). A pre-flight `GET /{comment-id}?fields=id,from{id},message` runs on every call and refuses locally when `from.id` is not the Page (or is unreadable). The plan-mode preview quotes the current and the new text inside taint envelopes, and the plan binds to the comment's fingerprint, so an edit by someone else in between diverges. Reversible by a second edit back; the journal keeps only fingerprints. Same text twice lands on the same state → `idempotentHint:true` |
 | `facebook_hide_comment` | false | false | true | true | `is_hidden` true/false — reversible by design → `destructiveHint:false`, `idempotentHint:true` (hide-or-unhide) |
+| `facebook_reply_and_hide_comment` | false | false | false | true | Public reply, then hide the parent, in one approved step (v2 F7). Plan-bound (`requirePlanId`), so `apply:true` alone is always a preview; the comment's fingerprint and hidden flag bind the plan, so an edit or hide in between diverges. A failed reply hides nothing; an already-hidden comment only gets the reply. Per-step outcomes (`reply`, `hide`) — `applied` only when both landed, otherwise `attempted`, with `nextStep` naming the `facebook_hide_comment` call when the hide did not land. No retries; reply not idempotent → `idempotentHint:false` |
 | `facebook_like_comment` | false | false | true | true | `POST` / `DELETE /{comment-id}/likes` — like or unlike up to 50 comments as the Page (messaging F9; `unlike` defaults to false). Bulk with per-id outcomes like `facebook_hide_comment`; the snapshot adds `user_likes`, so an id already in the target state is skipped without a write and a changed like state diverges a plan. Reversible with the opposite flag → `destructiveHint:false`, `idempotentHint:true` |
 | `facebook_delete_comment` | false | true | true | true | Permanent → `destructiveHint:true`; repeat delete has no further effect → `idempotentHint:true` |
 | `facebook_private_reply` | false | true | false | true | One private reply per comment, 7-day window (both enforced client-side with clear errors). Externally visible with no unsend → `destructiveHint:true`; a lost-response retry can double-send → `idempotentHint:false` (unknown-outcome errors instruct "do NOT retry — verify first"; see the error→action matrix in 05) |
@@ -184,10 +185,10 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 40 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 7 + insights 5 + moderation 12 + messages 4), with the opt-in
-`ads` package adding 8 more — **48 across all 7 packages**, split 31 read
-/ 17 write (13 reversible, 3 irreversible, 1 spend — the single `spend` tool is
+**Total as shipped: 41 model-facing tools in the default `core` profile** (core 4
++ posts 8 + reader 7 + insights 5 + moderation 13 + messages 4), with the opt-in
+`ads` package adding 8 more — **49 across all 7 packages**, split 31 read
+/ 18 write (14 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story
