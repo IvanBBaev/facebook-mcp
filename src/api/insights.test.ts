@@ -182,8 +182,8 @@ test('reshapeInsights never sums overlapping windows: a rolling or lifetime tota
         [end('2026-07-02'), 6],
         [end('2026-07-03'), 7],
       ]),
-      // A lifetime breakdown: the latest day's keys still add up (fans by
-      // country on the last day ARE the fan count), earlier days do not.
+      // A lifetime breakdown: category values may overlap, so there is no
+      // declared scalar total even though the latest day is selected.
       series('page_fans_country', 'lifetime', [
         [end('2026-07-01'), { BG: 40, DE: 10 }],
         [end('2026-07-02'), { BG: 41, DE: 10 }],
@@ -201,9 +201,14 @@ test('reshapeInsights never sums overlapping windows: a rolling or lifetime tota
     [
       ['page_media_view', 'days_28', 30, 100, true],
       ['page_follows', 'week', 3, 7, true],
-      ['page_fans_country', 'lifetime', 4, 51, true],
+      ['page_fans_country', 'lifetime', 4, undefined, undefined],
       ['page_media_view', 'month', 2, 500, undefined],
     ],
+  );
+  const country = out.metrics.find((metric) => metric.metric === 'page_fans_country');
+  assert.equal(
+    country?.aggregationNote,
+    'No scalar total: breakdown categories are not declared additive and may overlap.',
   );
 });
 
@@ -250,6 +255,52 @@ test('a stock metric takes the latest count in a daily series, never the sum of 
   assert.equal(flow?.totalIsLatest, undefined);
 });
 
+test('an unknown multi-point daily metric does not claim an unverified sum', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('future_daily_metric', 'day', [
+        [end('2026-07-01'), 10],
+        [end('2026-07-02'), 20],
+      ]),
+    ),
+  );
+
+  assert.equal(out.metrics[0]?.total, undefined);
+  assert.equal(out.metrics[0]?.totalIsLatest, undefined);
+  assert.equal(
+    out.metrics[0]?.aggregationNote,
+    'No scalar total: additivity across multiple observations is not verified for this metric.',
+  );
+});
+
+test('unknown rolling and lifetime scalar series retain latest-date totals', () => {
+  const out = reshapeInsights(
+    insightsBody(
+      series('future_rolling_metric', 'week', [
+        [end('2026-07-01'), 10],
+        [end('2026-07-02'), 20],
+      ]),
+      series('future_lifetime_metric', 'lifetime', [
+        [end('2026-07-01'), 30],
+        [end('2026-07-02'), 40],
+      ]),
+    ),
+  );
+
+  assert.deepEqual(
+    out.metrics.map((metric) => [
+      metric.metric,
+      metric.total,
+      metric.totalIsLatest,
+      metric.aggregationNote,
+    ]),
+    [
+      ['future_rolling_metric', 20, true, undefined],
+      ['future_lifetime_metric', 40, true, undefined],
+    ],
+  );
+});
+
 test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
   const out = reshapeInsights(
     insightsBody(
@@ -280,8 +331,12 @@ test('reshapeInsights flattens breakdown maps into breakdown paths', () => {
     },
   ]);
   assert.equal(out.metrics[0]?.breakdowns, 3);
-  assert.equal(out.metrics[0]?.total, 8);
+  assert.equal(out.metrics[0]?.total, undefined);
   assert.equal(out.metrics[0]?.points, 3);
+  assert.equal(
+    out.metrics[0]?.aggregationNote,
+    'No scalar total: breakdown categories are not declared additive and may overlap.',
+  );
 });
 
 test('reshapeInsights joins nested breakdown keys and guards excessive depth', () => {
@@ -303,8 +358,16 @@ test('reshapeInsights joins nested breakdown keys and guards excessive depth', (
     out.rows.find((row) => row.breakdown === 'deep/a/b')?.value,
     '[nested breakdown omitted]',
   );
-  assert.equal(out.metrics[0]?.total, 7, 'the placeholder stays out of the total');
+  assert.equal(
+    out.metrics[0]?.total,
+    undefined,
+    'breakdown rows do not produce a scalar total',
+  );
   assert.equal(out.metrics[0]?.nonNumeric, true);
+  assert.equal(
+    out.metrics[0]?.aggregationNote,
+    'No scalar total: breakdown categories are not declared additive and may overlap.',
+  );
 });
 
 test('reshapeInsights omits null values instead of zero-filling absent days', () => {
@@ -1556,6 +1619,7 @@ test('an overlapping total whose newest point is an empty breakdown map is 0, no
   );
   assert.equal(out.metrics[0]?.total, 0);
   assert.equal(out.metrics[0]?.totalIsLatest, true);
+  assert.equal(out.metrics[0]?.aggregationNote, undefined);
   assert.equal(out.metrics[0]?.lastEnd, end('2026-07-02'));
   assert.equal(out.metrics[0]?.points, 1, 'the empty map adds no row');
 });
