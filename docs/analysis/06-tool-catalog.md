@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 30 read tools. The published counts (47 tools / 7 packages, 39 in the default
-> profile, 30 read / 17 write) are asserted there too. `src/metadata.test.ts`
+> the 31 read tools. The published counts (48 tools / 7 packages, 40 in the default
+> profile, 31 read / 17 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (39 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (40 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -107,6 +107,7 @@ reversible verbs so client prompting stays proportionate. The irreversible
 |---|---|---|---|---|---|
 | `facebook_list_comments` | true | false | true | true | `toplevel`/`stream` filter, ordering, `summary=true`; Page-token requirement documented. **Shipped behaviour differs from this proposal:** an up-front refusal on token type was rejected (CC-AUTH-2) — with the per-Page resolver, a configured USER token is the normal setup and the token on the wire is a derived Page token, so a refusal would reject the working configuration. Instead an empty result carries a note naming the Page-token requirement, attached in `src/api/comments.ts` so every caller of the edge gets it |
 | `facebook_get_comment` | true | false | true | true | Single-comment read by ID (G-TOOL-1). Lets the model act on a comment ID from a prior turn without re-listing the whole thread; also backs moderation previews that must re-fetch current comment text (CC-MOD-6) |
+| `facebook_triage_comments` | true | false | true | true | Moderation queue in one call (v2 F6): comments on the N most recent published posts, newest first, filtered by `status` (`unanswered` default — no Page reply in the thread; `hidden`; `all`), `since` and NFKC case-insensitive `keywords`. The Page's own comments are skipped; `pageReplied: null` when the reply check was over budget or incomplete; a failed post becomes a note and sets `truncated`. Comment text and author names are tainted |
 | `facebook_reply_to_comment` | false | false | false | true | `POST /{comment-id}/comments` — public reply visible to everyone; for a private DM to the commenter use `facebook_private_reply`. Additive |
 | `facebook_comment_on_post` | false | false | false | true | `POST /{post-id}/comments` with `message` and/or an https `attachment_url` — a top-level public comment as the Page (organic F6). The plan-mode preview reads the post (`id,message,from,created_time`), quotes it, and warns when the Page did not write it; a foreign post's text is quoted only inside a taint envelope. Reversible via `facebook_delete_comment`; not idempotent, so a lost answer is `attempted` |
 | `facebook_edit_comment` | false | false | true | true | `POST /{comment-id}` with `message` — rewrite a comment the Page itself wrote (messaging F8b). A pre-flight `GET /{comment-id}?fields=id,from{id},message` runs on every call and refuses locally when `from.id` is not the Page (or is unreadable). The plan-mode preview quotes the current and the new text inside taint envelopes, and the plan binds to the comment's fingerprint, so an edit by someone else in between diverges. Reversible by a second edit back; the journal keeps only fingerprints. Same text twice lands on the same state → `idempotentHint:true` |
@@ -183,9 +184,9 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 39 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 7 + insights 5 + moderation 11 + messages 4), with the opt-in
-`ads` package adding 8 more — **47 across all 7 packages**, split 30 read
+**Total as shipped: 40 model-facing tools in the default `core` profile** (core 4
++ posts 8 + reader 7 + insights 5 + moderation 12 + messages 4), with the opt-in
+`ads` package adding 8 more — **48 across all 7 packages**, split 31 read
 / 17 write (13 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than

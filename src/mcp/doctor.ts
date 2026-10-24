@@ -142,6 +142,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   // Same read as the listing: pages_read_engagement, plus pages_read_user_content
   // for a visitor's comment (the tool's description).
   facebook_get_comment: ['pages_read_engagement', 'pages_read_user_content'],
+  facebook_triage_comments: ['pages_read_engagement', 'pages_read_user_content'],
   facebook_reply_to_comment: ['pages_manage_engagement'],
   facebook_comment_on_post: ['pages_manage_engagement'],
   facebook_edit_comment: ['pages_manage_engagement'],

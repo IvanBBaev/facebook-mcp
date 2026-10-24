@@ -73,6 +73,21 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_triage_comments` builds a moderation queue in one call**
+  (moderation, read-only). It scans the comments on the most recent published
+  posts (`posts`, default 10, max 25), newest first, and filters them by
+  `status` (`unanswered` by default — no Page reply in the thread; `hidden`;
+  `all`), an optional `since` and up to 20 `keywords` (plain-text,
+  case-insensitive, Unicode-normalised substring match; `matchedKeywords` says
+  which hit). `include_replies` adds reply-level comments. The Page's own
+  comments are never listed. `pageReplied` is `null` when the reply check ran
+  out of budget or the thread page was incomplete, so "unknown" is never
+  reported as "unanswered". A post that cannot be read becomes a note and sets
+  `truncated`, a rate limit stops the scan with partial results, and a missing
+  permission fails the call. Comment text (first 280 characters) and author
+  names stay inside the taint envelope. Needs `pages_read_engagement` and
+  `pages_read_user_content`.
+
 - **`facebook_get_posts_insights` compares posts in one call** (insights,
   read-only). Pass up to 25 `post_ids` or `latest` N (1–25) published posts
   and up to 10 `metrics` (default `post_media_view`,

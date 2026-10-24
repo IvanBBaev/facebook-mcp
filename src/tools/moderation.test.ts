@@ -328,6 +328,7 @@ const TOOL_TABLE: readonly (readonly [
 ])[] = [
   ['facebook_list_comments', true, false, true, undefined],
   ['facebook_get_comment', true, false, true, undefined],
+  ['facebook_triage_comments', true, false, true, undefined],
   ['facebook_reply_to_comment', false, false, false, 'reversible'],
   ['facebook_comment_on_post', false, false, false, 'reversible'],
   ['facebook_edit_comment', false, false, true, 'reversible'],
@@ -395,6 +396,9 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'order',
   'hidden',
   'unlike',
+  'posts',
+  'status',
+  'include_replies',
 ]);
 
 test('every moderation log allowlist names real, non-content arguments', () => {
@@ -407,6 +411,7 @@ test('every moderation log allowlist names real, non-content arguments', () => {
   const expected: Record<string, readonly string[]> = {
     facebook_list_comments: ['profile', 'object_id', 'filter', 'order'],
     facebook_get_comment: ['profile', 'comment_id'],
+    facebook_triage_comments: ['profile', 'posts', 'status', 'include_replies'],
     facebook_reply_to_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_comment_on_post: ['profile', 'apply', 'plan_id', 'post_id'],
     facebook_edit_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
@@ -2830,4 +2835,144 @@ test('facebook_list_comments keeps the comments when the summary read answers 10
   assert.equal(payload.count, 1, 'the comments already read are returned');
   assert.equal(payload.summary, undefined, 'no count is invented');
   assert.match(str(payload.note), /summary could not be read/);
+});
+
+// ---------------------------------------------------------------------------
+// facebook_triage_comments
+// ---------------------------------------------------------------------------
+
+const TRIAGE_POST = '900_1';
+const TRIAGE_POST_2 = '900_2';
+
+/** Serve `published_posts`; the per-post comment reads are stubbed per test. */
+function serveTriagePosts(fb: FakeFbRequest, ids: readonly string[]): void {
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${PAGE.pageId}/published_posts`,
+    fbOk({ data: ids.map((id) => ({ id, created_time: CREATED })) }),
+  );
+}
+
+/** The thread read the unanswered check makes (`fields=from{id}`). */
+function isReplyRead(r: FbRequest, commentId: string): boolean {
+  return (
+    r.method === 'GET' &&
+    r.path === `/${commentId}/comments` &&
+    r.protocol === 'json' &&
+    r.params?.fields === 'from{id}'
+  );
+}
+
+test('facebook_triage_comments lists only threads the Page has not answered', async () => {
+  const { fb, ctx } = makeHarness();
+  serveTriagePosts(fb, [TRIAGE_POST]);
+  fb.on(
+    (r) => isReplyRead(r, 'c1'),
+    fbOk({ data: [{ id: 'c1_r1', from: { id: PAGE.pageId } }] }),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${TRIAGE_POST}/comments`,
+    fbOk({
+      data: [
+        rawComment({ id: 'c1', comment_count: 1 }),
+        rawComment({ id: 'c2', comment_count: 0, message: INJECTION }),
+        rawComment({ id: 'c3', from: { id: PAGE.pageId, name: 'Test Page' } }),
+      ],
+    }),
+  );
+
+  const result = await tool('facebook_triage_comments').handler({}, ctx);
+  const payload = body(result);
+
+  assert.equal(payload.pageId, PAGE.pageId);
+  assert.equal(payload.scannedPosts, 1);
+  assert.equal(payload.truncated, false);
+  const items = arr(payload.items).map(obj);
+  assert.deepEqual(
+    items.map((i) => i.commentId),
+    ['c2'],
+    'c1 has a Page reply and c3 is the Page itself',
+  );
+  assert.equal(items[0]?.pageReplied, false);
+  assert.equal(items[0]?.postId, TRIAGE_POST);
+  assert.equal(items[0]?.authorId, 'u1');
+
+  // The comment text exists only inside the taint envelope.
+  const content = str(items[0]?.content);
+  assert.ok(content.startsWith(TAINT_WARNING));
+  assert.ok(content.indexOf(TAINT_BEGIN) < content.indexOf(INJECTION));
+  assert.ok(content.indexOf(INJECTION) < content.indexOf(TAINT_END));
+  assert.equal(text(result).split(INJECTION).length - 1, 1);
+  assert.ok(!text(result).includes(PAGE.token));
+
+  for (const call of fb.calls) assert.equal(call.token, PAGE.token);
+});
+
+test('facebook_triage_comments matches keywords case- and width-insensitively', async () => {
+  const { fb, ctx } = makeHarness();
+  serveTriagePosts(fb, [TRIAGE_POST]);
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${TRIAGE_POST}/comments`,
+    fbOk({
+      data: [
+        rawComment({ id: 'c1', message: 'What is the ＰＲＩＣＥ?' }),
+        rawComment({ id: 'c2', message: 'lovely' }),
+      ],
+    }),
+  );
+
+  const payload = body(
+    await tool('facebook_triage_comments').handler(
+      { status: 'all', keywords: ['price', 'refund'] },
+      ctx,
+    ),
+  );
+
+  const items = arr(payload.items).map(obj);
+  assert.deepEqual(
+    items.map((i) => i.commentId),
+    ['c1'],
+  );
+  assert.deepEqual(items[0]?.matchedKeywords, ['price']);
+});
+
+test('facebook_triage_comments turns one unreadable post into a note, not a failure', async () => {
+  const { fb, ctx } = makeHarness();
+  serveTriagePosts(fb, [TRIAGE_POST, TRIAGE_POST_2]);
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${TRIAGE_POST}/comments`,
+    fbErr(goneError()),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${TRIAGE_POST_2}/comments`,
+    fbOk({ data: [rawComment({ id: 'c9' })] }),
+  );
+
+  const payload = body(await tool('facebook_triage_comments').handler({}, ctx));
+
+  assert.equal(payload.truncated, true);
+  assert.deepEqual(
+    arr(payload.items).map((i) => obj(i).commentId),
+    ['c9'],
+  );
+  assert.ok(
+    arr(payload.notes).some((n) => str(n).includes(`post ${TRIAGE_POST}`)),
+    'the failed post is named in a note',
+  );
+});
+
+test('facebook_triage_comments explains a Page with no published posts', async () => {
+  const { fb, ctx } = makeHarness();
+  serveTriagePosts(fb, []);
+
+  const payload = body(await tool('facebook_triage_comments').handler({}, ctx));
+
+  assert.equal(payload.count, 0);
+  assert.ok(arr(payload.notes).some((n) => str(n).includes(EMPTY_PAGE_TOKEN_HINT)));
+});
+
+test('facebook_triage_comments rejects a since without a timezone offset', () => {
+  const schema = tool('facebook_triage_comments').inputSchema;
+  assert.equal(schema.safeParse({ since: '2026-07-01T10:00:00' }).success, false);
+  assert.equal(schema.safeParse({ since: '2026-07-01T10:00:00+03:00' }).success, true);
+  assert.equal(schema.safeParse({ keywords: [''] }).success, false);
 });

@@ -154,6 +154,10 @@
       "description": "Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window)."
     },
     {
+      "name": "facebook_triage_comments",
+      "description": "A moderation queue in one call: the comments on the Page's most recent published posts, newest first, filtered by `status` (default \"unanswered\" — no Page reply in the…"
+    },
+    {
       "name": "facebook_reply_to_comment",
       "description": "Post a PUBLIC reply under a comment — visible to everyone who can see the thread."
     },
