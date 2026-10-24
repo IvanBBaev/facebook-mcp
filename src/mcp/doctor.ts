@@ -119,6 +119,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_create_photo_post: ['pages_manage_posts'],
   facebook_create_video_post: ['pages_manage_posts'],
   facebook_create_reel: ['pages_manage_posts'],
+  facebook_create_story: ['pages_manage_posts'],
   facebook_update_post: ['pages_manage_posts'],
   facebook_delete_post: ['pages_manage_posts'],
   facebook_list_scheduled_posts: ['pages_read_engagement'],

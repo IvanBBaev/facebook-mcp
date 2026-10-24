@@ -285,6 +285,27 @@ test('startReelUpload reserves a video id and derives the rupload path from uplo
   assert.equal(req.pageId, PAGE_ID);
 });
 
+test('startReelUpload can start on another edge and names its own label on failure', async () => {
+  const { fb, deps } = harness();
+  fb.on(isStartCall, fbOk({ video_id: VIDEO_ID, upload_url: UPLOAD_URL }), 1);
+  await startReelUpload(deps, {
+    pageId: PAGE_ID,
+    edge: 'video_stories',
+    label: 'Video story',
+  });
+  assert.equal(jsonOf(fb.lastRequest()).path, `/${PAGE_ID}/video_stories`);
+
+  fb.on(isStartCall, fbErr(graphError('boom')));
+  await assert.rejects(
+    startReelUpload(deps, {
+      pageId: PAGE_ID,
+      edge: 'video_stories',
+      label: 'Video story',
+    }),
+    /^.*Video story start phase failed/,
+  );
+});
+
 test('startReelUpload keeps the documented rupload layout when upload_url is absent', async () => {
   const { fb, deps } = harness();
   fb.on(isStartCall, fbOk({ video_id: VIDEO_ID }));

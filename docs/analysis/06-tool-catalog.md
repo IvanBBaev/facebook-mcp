@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 32 read tools. The published counts (52 tools / 7 packages, 44 in the default
-> profile, 32 read / 20 write) are asserted there too. `src/metadata.test.ts`
+> the 32 read tools. The published counts (53 tools / 7 packages, 45 in the default
+> profile, 32 read / 21 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (44 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (45 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -54,7 +54,7 @@ Write-mode default: **plan-first** — publishing is the most consequential acti
 the server performs; the irreversible/spend tiers are never bypassed by
 `FB_WRITE_MODE=apply`. The highest-consequence writes (`facebook_create_post` with
 `published:true`, `facebook_create_reel` with `PUBLISHED`, `facebook_update_post`
-with `action:"publish_now"`, `facebook_delete_post`) bind `apply:true` to a
+with `action:"publish_now"`, `facebook_create_story`, `facebook_delete_post`) bind `apply:true` to a
 short-lived `plan_id` returned by their validating-dry-run preview, so an eager
 model cannot self-approve (A6). The rule is "reaches a live audience", not "is a
 create": publishing a scheduled post early collects impressions that deleting it
@@ -67,6 +67,7 @@ stays ungated.
 | `facebook_create_photo_post` | false | false | false | true | 1–N photos (`caption`; multi-photo via unpublished photos + `attached_media`) |
 | `facebook_create_video_post` | false | false | false | true | Resumable upload; `file_url` or local path; progress reporting |
 | `facebook_create_reel` | false | false | false | true | 3-phase flow; PUBLISHED/SCHEDULED/DRAFT; validates 3–90 s / 9:16 / 30-per-24h budget |
+| `facebook_create_story` | false | false | false | true | v2 F1, tier **irreversible** (a story is public at once and no tool deletes it). `media_type` `photo` (local or URL, jpeg/bmp/png/gif/tiff, at most 10 MB: unpublished `/photos` upload, then `/photo_stories`; a clean refusal deletes the photo) or `video` (local `.mp4` only: `video_stories` start → rupload → finish, optional `is_ai_generated`). A local file is bound to the plan by its SHA-256. A 5xx or unconfirmed story step is `attempted`, never retried; verify with `facebook_list_stories` |
 | `facebook_update_post` | false | true | true | true | Own-app posts only; message, `is_hidden`, `is_pinned`; also the **scheduled-post lifecycle** verb — publish-now / reschedule / cancel (A13). Overwrites prior content → `destructiveHint:true`; setting a field to a fixed value repeats to the same state → `idempotentHint:true` |
 | `facebook_delete_post` | false | true | true | true | Permanent; may fail for posts not created by this app (documented caveat). Repeat delete has no further effect → `idempotentHint:true` |
 | `facebook_list_scheduled_posts` | true | false | true | true | `/scheduled_posts`; a read-only tool living inside the write-gated `posts` package (a `reader`-profile install does not see the scheduled queue) |
@@ -193,10 +194,10 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 44 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 7 + insights 5 + moderation 13 + messages 7), with the opt-in
-`ads` package adding 8 more — **52 across all 7 packages**, split 32 read
-/ 20 write (16 reversible, 3 irreversible, 1 spend — the single `spend` tool is
+**Total as shipped: 45 model-facing tools in the default `core` profile** (core 4
++ posts 9 + reader 7 + insights 5 + moderation 13 + messages 7), with the opt-in
+`ads` package adding 8 more — **53 across all 7 packages**, split 32 read
+/ 21 write (16 reversible, 4 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story

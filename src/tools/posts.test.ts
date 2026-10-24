@@ -259,7 +259,7 @@ function stubReelPhases(fb: FakeFbRequest, finish: Record<string, unknown>): voi
 // Package invariants
 // ---------------------------------------------------------------------------
 
-test('createPostsPackage builds the plan-first posts package with eight tools', () => {
+test('createPostsPackage builds the plan-first posts package with nine tools', () => {
   const pkg = createPostsPackage();
   assert.equal(pkg.name, 'posts');
   assert.equal(pkg.enabledByDefault, true);
@@ -271,6 +271,7 @@ test('createPostsPackage builds the plan-first posts package with eight tools', 
       'facebook_create_photo_post',
       'facebook_create_video_post',
       'facebook_create_reel',
+      'facebook_create_story',
       'facebook_update_post',
       'facebook_delete_post',
       'facebook_list_scheduled_posts',
@@ -328,6 +329,16 @@ test('every posts tool carries the exact doc-06 annotation quadruple and tier', 
         idempotentHint: false,
         openWorldHint: true,
         writeTier: 'reversible',
+      },
+    ],
+    [
+      'facebook_create_story',
+      {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+        writeTier: 'irreversible',
       },
     ],
     [
@@ -418,6 +429,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'video_state',
   'is_hidden',
   'is_pinned',
+  'media_type',
 ]);
 
 test('every posts log allowlist names real, non-content arguments', () => {
@@ -438,6 +450,7 @@ test('every posts log allowlist names real, non-content arguments', () => {
       'video_state',
       'scheduled_publish_time',
     ],
+    facebook_create_story: ['profile', 'apply', 'plan_id', 'media_type'],
     facebook_update_post: [
       'profile',
       'apply',
@@ -2006,6 +2019,143 @@ test('an unchanged local video still applies under the plan its preview bound', 
 
   assert.notEqual(result.isError, true, JSON.stringify(body(result)));
   assert.ok(fb.calls.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// facebook_create_story
+// ---------------------------------------------------------------------------
+
+const isPagePost =
+  (edge: string) =>
+  (req: FbRequest): boolean =>
+    req.method === 'POST' && req.path === `/${PAGE_ID}/${edge}`;
+
+test('create_story previews with no mutation and applies the photo flow on its plan', async (t) => {
+  const media = await mediaFixture(t, 'story.jpg', 256);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  fb.on(isPagePost('photos'), fbOk({ id: 'ph-1' }));
+  fb.on(isPagePost('photo_stories'), fbOk({ success: true, post_id: '100_story' }));
+
+  const preview = body(
+    await tool('facebook_create_story').handler(
+      { media_type: 'photo', media: media.name },
+      ctx,
+    ),
+  );
+  assert.equal(preview['status'], 'preview');
+  assert.equal(preview['tier'], 'irreversible');
+  assert.equal(fb.calls.filter(isWrite).length, 0, 'a preview never uploads');
+  assert.ok(strings(preview['warnings']).some((w) => /24 hours/.test(w)));
+
+  const refused = body(
+    await tool('facebook_create_story').handler(
+      { media_type: 'photo', media: media.name, apply: true },
+      ctx,
+    ),
+  );
+  assert.equal(refused['status'], 'preview', 'an irreversible apply needs its plan_id');
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+
+  const applied = body(
+    await tool('facebook_create_story').handler(
+      { media_type: 'photo', media: media.name, apply: true, plan_id: 'plan-1' },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied', JSON.stringify(applied));
+  const result = record(applied['result']);
+  assert.equal(result['storyPostId'], '100_story');
+  assert.equal(result['mediaId'], 'ph-1');
+  assert.equal(result['verifyTool'], 'facebook_list_stories');
+  const story = findJson(fb, (req) => req.path === `/${PAGE_ID}/photo_stories`);
+  assert.deepEqual(story.params, { photo_id: 'ph-1' });
+});
+
+test('create_story refuses a path outside FB_MEDIA_DIR and AI labelling on a photo', async (t) => {
+  const media = await mediaFixture(t, 'story.jpg', 256);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+
+  const outside = await tool('facebook_create_story').handler(
+    { media_type: 'photo', media: '../../etc/passwd.jpg' },
+    ctx,
+  );
+  assert.equal(outside.isError, true);
+
+  const labelled = await tool('facebook_create_story').handler(
+    { media_type: 'photo', media: media.name, is_ai_generated: true },
+    ctx,
+  );
+  assert.equal(labelled.isError, true);
+  assert.match(JSON.stringify(body(labelled)), /is_ai_generated/);
+
+  const hosted = await tool('facebook_create_story').handler(
+    { media_type: 'video', media: 'https://cdn.example.invalid/v.mp4' },
+    ctx,
+  );
+  assert.equal(hosted.isError, true);
+  assert.equal(fb.calls.length, 0);
+});
+
+test('create_story publishes a video story through start, transfer and finish', async (t) => {
+  const media = await mediaFixture(t, 'story.mp4', 1024);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  const phase = (name: string) => (req: FbRequest) =>
+    req.protocol === 'json' &&
+    req.path === `/${PAGE_ID}/video_stories` &&
+    record(req.params)['upload_phase'] === name;
+  fb.on(
+    phase('start'),
+    fbOk({ video_id: 'vs-1', upload_url: 'https://rupload.facebook.com/x/vs-1' }),
+  );
+  fb.on((req) => req.protocol === 'rupload', fbOk({ success: true }));
+  fb.on(phase('finish'), fbOk({ success: true, post_id: '100_vs' }));
+
+  await tool('facebook_create_story').handler(
+    { media_type: 'video', media: media.name, is_ai_generated: false },
+    ctx,
+  );
+  const applied = body(
+    await tool('facebook_create_story').handler(
+      {
+        media_type: 'video',
+        media: media.name,
+        is_ai_generated: false,
+        apply: true,
+        plan_id: 'plan-1',
+      },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied', JSON.stringify(applied));
+  assert.equal(record(applied['result'])['mediaId'], 'vs-1');
+  const finish = findJson(fb, phase('finish'));
+  assert.equal(record(finish.params)['is_ai_generated'], false);
+});
+
+test('create_story reports an unconfirmed story step as attempted, never applied', async (t) => {
+  const media = await mediaFixture(t, 'story.jpg', 256);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  fb.on(isPagePost('photos'), fbOk({ id: 'ph-1' }));
+  fb.on(isPagePost('photo_stories'), fbOk({}));
+
+  await tool('facebook_create_story').handler(
+    { media_type: 'photo', media: media.name },
+    ctx,
+  );
+  const result = await tool('facebook_create_story').handler(
+    { media_type: 'photo', media: media.name, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+  assert.equal(result.isError, true);
+  const parsed = body(result);
+  assert.equal(parsed['outcome'], 'attempted');
+  assert.equal(parsed['reason'], 'story_unconfirmed');
+  assert.equal(parsed['mediaId'], 'ph-1');
+  assert.equal(
+    fb.calls.filter((req) => req.method === 'DELETE').length,
+    0,
+    'a story that may have landed keeps its photo',
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -110,6 +110,10 @@
       "description": "Publish a Facebook Reel through the three-phase upload (start → transfer → finish) with an explicit video_state: PUBLISHED, DRAFT or SCHEDULED."
     },
     {
+      "name": "facebook_create_story",
+      "description": "Publish a photo or video story on the Page."
+    },
+    {
       "name": "facebook_update_post",
       "description": "Edit a Page post the app itself created, or move it through the scheduled-post lifecycle."
     },

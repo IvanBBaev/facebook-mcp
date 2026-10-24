@@ -73,6 +73,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_create_story` publishes a Page story** (posts, irreversible). A
+  photo story (local file inside `FB_MEDIA_DIR` or a URL; jpeg, bmp, png, gif or
+  tiff, at most 10 MB) is uploaded unpublished and then posted to
+  `/{page-id}/photo_stories`; if Graph refuses that step cleanly, the
+  unpublished photo is deleted. A video story is a local `.mp4` sent through
+  the `video_stories` start → upload → finish flow, with an optional
+  `is_ai_generated` label. Apply is bound to the preview's `plan_id`, and a
+  local file is bound by its SHA-256. The preview warns that a story is public
+  for 24 hours, cannot be scheduled and has no delete tool here. A timeout, 5xx
+  or unconfirmed story step returns `attempted` with the media id and is never
+  retried: check `facebook_list_stories` first.
+
 - **Local saved replies** (messages). `facebook_list_saved_replies`,
   `facebook_save_reply` and `facebook_delete_saved_reply` keep operator-approved
   reply templates in `saved-replies.json` in the config directory (mode 0600,

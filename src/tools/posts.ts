@@ -8,6 +8,8 @@
 //                                      `file_url` Meta fetches itself.
 //   * facebook_create_reel           — the three-phase Reels flow, with the
 //                                      video_state lifecycle and the 24 h cap.
+//   * facebook_create_story          — a photo or video Page story (irreversible:
+//                                      public at once, no delete tool).
 //   * facebook_update_post           — content edits PLUS the scheduled-post
 //                                      lifecycle verbs (destructive, idempotent).
 //   * facebook_delete_post           — permanent removal (irreversible).
@@ -115,6 +117,16 @@ import {
   type UpdatePostAction,
 } from '../api/posts-write.js';
 import { fetchPage } from '../api/shared.js';
+import {
+  MAX_STORY_PHOTO_BYTES,
+  STORY_MEDIA_TYPES,
+  STORY_VERIFY_TOOL,
+  StoryPublishError,
+  publishPhotoStory,
+  publishVideoStory,
+  storyPlanWarnings,
+  validateStoryMedia,
+} from '../api/stories.js';
 import {
   APPLIED_VERDICT,
   ATTEMPTED_VERDICT,
@@ -376,6 +388,25 @@ function errorRecord(err: unknown): Record<string, unknown> | undefined {
       reason: 'carousel_post_unconfirmed',
       photoIds: err.photoIds,
       hint: `The carousel post may have been created and may reference these photos, so none was deleted. ${carouselVerifyStep(err.publishState)} before doing anything: if the post exists, leave the photos alone; if it does not, the ids under photoIds are unpublished orphans in the Page photo library to delete by hand. Never re-send the post blindly — it can publish twice (CC-PUB-1).`,
+    };
+  }
+  if (err instanceof StoryPublishError) {
+    const graph = err.cause instanceof GraphApiError ? err.cause : undefined;
+    return {
+      applied: false,
+      ...(err.outcome === 'attempted' ? { outcome: 'attempted' } : {}),
+      error: err.message,
+      ...(graph !== undefined ? graphErrorFields(graph) : {}),
+      reason: err.outcome === 'attempted' ? 'story_unconfirmed' : 'story_rejected',
+      mediaType: err.mediaType,
+      mediaId: err.mediaId,
+      ...(err.cleanup !== undefined ? { cleanup: cleanupPayload(err.cleanup) } : {}),
+      hint:
+        err.outcome === 'attempted'
+          ? `The story may be live. Check ${STORY_VERIFY_TOOL} before doing anything else, and never re-send it blindly — it can publish twice.`
+          : err.mediaType === 'photo'
+            ? 'No story was published. The unpublished photo was deleted unless it is listed under `cleanup.orphans`. If Graph says the media was used before, use a fresh photo.'
+            : `No story was published. Video ${err.mediaId} stays unpublished on Meta's side. If Graph says the media was used before, use a fresh video.`,
     };
   }
   if (isReelPublishError(err)) {
@@ -852,6 +883,8 @@ function classifyPublishFailure(err: unknown): 'attempted' | 'failed' {
       ? 'attempted'
       : 'failed';
   }
+  // The story layer already decided: a clean refusal or a story that may be live.
+  if (err instanceof StoryPublishError) return err.outcome;
   // Raised precisely because the carousel post may have landed.
   if (err instanceof CarouselPostUnconfirmedError) return 'attempted';
   // A carousel wraps the underlying feed failure; classify what actually failed.
@@ -1646,6 +1679,165 @@ function buildCreateReel() {
 }
 
 // ---------------------------------------------------------------------------
+// 10b. facebook_create_story
+// ---------------------------------------------------------------------------
+
+function buildCreateStory() {
+  return defineTool({
+    name: 'facebook_create_story',
+    title: 'Create Story',
+    description:
+      'Publish a photo or video story on the Page. A story is public at once for ' +
+      '24 hours, cannot be scheduled, and this server cannot delete it, so it is ' +
+      'irreversible: applying needs apply:true and the plan_id of a preceding dry ' +
+      'run, whatever FB_WRITE_MODE says. Verify with facebook_list_stories. Dry run ' +
+      'by default.',
+    inputSchema: z.object({
+      ...confirmableWriteArgs,
+      media_type: z
+        .enum(STORY_MEDIA_TYPES)
+        .describe('photo ⇒ jpeg/bmp/png/gif/tiff, at most 10 MB. video ⇒ a local .mp4.'),
+      media: z
+        .string()
+        .min(1)
+        .describe(
+          'A photo: an https:// URL Meta fetches itself, or a local file inside FB_MEDIA_DIR. A video: a local .mp4 inside FB_MEDIA_DIR (its bytes are uploaded from this server; a URL is refused).',
+        ),
+      is_ai_generated: z
+        .boolean()
+        .optional()
+        .describe('Video stories only: label the video as AI-generated.'),
+    }),
+    annotations: CREATE_ANNOTATIONS,
+    writeTier: 'irreversible',
+    logFields: ['profile', 'apply', 'plan_id', 'media_type'],
+    handler: (input, ctx) =>
+      guarded(ctx, async () => {
+        const base = await prepareBase(ctx, input, { needTimezone: false });
+        const source = toMediaSource(input.media);
+        const problem = validateStoryMedia({
+          mediaType: input.media_type,
+          source,
+          ...(input.is_ai_generated !== undefined
+            ? { isAiGenerated: input.is_ai_generated }
+            : {}),
+        });
+        if (problem !== undefined) {
+          throw new ToolInputError(
+            problem.field,
+            problem.message,
+            'Fix the argument and run the preview again. Nothing was uploaded.',
+          );
+        }
+
+        const opts: LocalMediaOptions = {
+          ...localMediaOptions(ctx),
+          maxBytes:
+            input.media_type === 'photo' ? MAX_STORY_PHOTO_BYTES : MAX_LOCAL_VIDEO_BYTES,
+        };
+        // The dry run proves the source usable and binds a local file's content.
+        let bound:
+          | { readonly path: string; readonly bytes: number; readonly sha256: string }
+          | undefined;
+        let from: string;
+        if (source.kind === 'local') {
+          const resolved = await resolveLocalMediaPath(source.path, opts);
+          const digest = await digestLocalMedia(resolved, source.path, opts);
+          bound = { path: resolved.path, bytes: resolved.bytes, sha256: digest.sha256 };
+          from = `${resolved.filename}, ${String(resolved.bytes)} bytes, sha256 ${digest.sha256.slice(0, 12)}`;
+        } else {
+          from = resolveRemoteMediaUrl(source.url);
+        }
+
+        return executeWrite(ctx, {
+          tool: 'facebook_create_story',
+          tier: 'irreversible',
+          requirePlanId: true,
+          pageId: base.page.pageId,
+          params: {
+            media_type: input.media_type,
+            media: bound?.path ?? input.media,
+            ...(bound !== undefined
+              ? { byte_length: bound.bytes, sha256: bound.sha256 }
+              : {}),
+            ...(input.is_ai_generated !== undefined
+              ? { is_ai_generated: input.is_ai_generated }
+              : {}),
+          },
+          ...gateArgs(input),
+          summary: `Publish a ${input.media_type} story on ${base.page.name} (${base.page.pageId}) from ${from}`,
+          warnings: storyPlanWarnings(input.media_type, source.kind),
+          resolvedPage: base.page,
+          notPerformedNotice:
+            'This was a dry run — nothing was uploaded and no story was published.',
+          classifyOutcome: classifyPublishFailure,
+          metadata: {
+            mediaType: input.media_type,
+            sourceKind: source.kind,
+            ...(bound !== undefined
+              ? { byteLength: bound.bytes, sha256: bound.sha256 }
+              : {}),
+          },
+          perform: async (): Promise<Record<string, unknown>> => {
+            if (input.media_type === 'photo') {
+              const story = await publishPhotoStory(
+                { ...mediaDeps(ctx), maxBytes: MAX_STORY_PHOTO_BYTES },
+                {
+                  pageId: base.page.pageId,
+                  source:
+                    source.kind === 'local' && bound !== undefined
+                      ? { kind: 'local', path: source.path, sha256: bound.sha256 }
+                      : source,
+                  token: base.page.token,
+                  ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+                },
+              );
+              return {
+                ...story,
+                storyPostId: story.storyPostId ?? null,
+                verifyTool: STORY_VERIFY_TOOL,
+              };
+            }
+            if (source.kind !== 'local' || bound === undefined) {
+              throw new Error('A video story needs a bound local file.');
+            }
+            const file = await readBoundLocalMedia(source.path, opts, bound);
+            const deps: ReelsDeps = {
+              fbRequest: ctx.fbRequest,
+              logger: ctx.logger,
+              clock: ctx.clock,
+              settings: {
+                apiVersion: ctx.settings.apiVersion,
+                hosts: ctx.settings.hosts,
+              },
+              ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+              ...(ctx.reportProgress !== undefined
+                ? { onProgress: ctx.reportProgress }
+                : {}),
+            };
+            const story = await publishVideoStory(deps, {
+              pageId: base.page.pageId,
+              data: file.data,
+              contentType: videoContentType(file.filename),
+              ...(input.is_ai_generated !== undefined
+                ? { isAiGenerated: input.is_ai_generated }
+                : {}),
+              token: base.page.token,
+            });
+            return {
+              ...story,
+              storyPostId: story.storyPostId ?? null,
+              verifyTool: STORY_VERIFY_TOOL,
+              processingNote:
+                'The story is accepted; Meta may still be encoding the video, so it can take a moment to show.',
+            };
+          },
+        });
+      }),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 11. facebook_update_post
 // ---------------------------------------------------------------------------
 
@@ -2202,13 +2394,14 @@ export function createPostsPackage(): PackageSpec {
     name: 'posts',
     title: 'Posts',
     description:
-      'Publish, schedule, edit and delete Page posts, photos, videos and Reels ' +
-      '(plan-first: every write previews before it applies).',
+      'Publish, schedule, edit and delete Page posts, photos, videos, Reels and ' +
+      'stories (plan-first: every write previews before it applies).',
     tools: [
       buildCreatePost(),
       buildCreatePhotoPost(),
       buildCreateVideoPost(),
       buildCreateReel(),
+      buildCreateStory(),
       buildUpdatePost(),
       buildDeletePost(),
       buildListScheduledPosts(),

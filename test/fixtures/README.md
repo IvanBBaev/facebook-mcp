@@ -20,7 +20,10 @@ here as published.
   synthetic: hand-written to the documented field sets, with placeholder ids.
   `graph-comment-create.json` is the synthetic `{id}` acknowledgement of
   `POST /{post-id}/comments` — hand-written, not a recording, so it does not
-  break the no-write-recordings rule below.
+  break the no-write-recordings rule below. `graph-photo-stories.json`
+  (`POST /{page-id}/photo_stories`) and `graph-video-stories-start.json`
+  (`POST /{page-id}/video_stories`, `upload_phase=start`) are synthetic too,
+  hand-written from Meta's Page Stories docs (`source: docs`).
 
 ## What does not
 

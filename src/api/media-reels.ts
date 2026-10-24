@@ -591,11 +591,15 @@ function actionFor(failure: ReelFailure): ErrorAction {
  * original code/subcode/type/fbtrace id and keeping it as `cause`. Mapping, not
  * swallowing: nothing about Graph's answer is discarded.
  */
-export function wrapReelError(err: unknown, phase: ReelPhase): ReelPublishError {
+export function wrapReelError(
+  err: unknown,
+  phase: ReelPhase,
+  label = 'Reels',
+): ReelPublishError {
   if (err instanceof ReelPublishError) return err;
   const failure = classifyReelFailure(err, phase);
   const base = err instanceof GraphApiError ? err : undefined;
-  return new ReelPublishError(`Reels ${phase} phase failed: ${messageOf(err)}`, {
+  return new ReelPublishError(`${label} ${phase} phase failed: ${messageOf(err)}`, {
     code: base?.code ?? 0,
     ...(base?.subcode !== undefined ? { subcode: base.subcode } : {}),
     ...(base?.type !== undefined ? { type: base.type } : {}),
@@ -1067,6 +1071,13 @@ export function ruploadPathForReel(
 
 export interface StartReelInput {
   readonly pageId: string;
+  /**
+   * The upload edge. Defaults to {@link REEL_EDGE}; Page video stories run the
+   * same start/transfer protocol on `video_stories`.
+   */
+  readonly edge?: string;
+  /** The flow named in a phase error; defaults to `Reels`. */
+  readonly label?: string;
   /** Explicit Page token; omitted ⇒ the client resolves one from `pageId`. */
   readonly token?: string;
 }
@@ -1124,14 +1135,14 @@ export async function startReelUpload(
       protocol: 'json',
       method: 'POST',
       host: 'graph',
-      path: `/${input.pageId}/${REEL_EDGE}`,
+      path: `/${input.pageId}/${input.edge ?? REEL_EDGE}`,
       params: { upload_phase: 'start' },
       pageId: input.pageId,
       ...(input.token !== undefined ? { token: input.token } : {}),
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
     });
   } catch (err) {
-    throw wrapReelError(err, 'start');
+    throw wrapReelError(err, 'start', input.label);
   }
 
   const rec = asRecord(res.data);
