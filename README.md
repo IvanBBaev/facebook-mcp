@@ -367,7 +367,7 @@ is a setup-only permission that should never ride on a runtime token.
 | Package      | Required Graph permissions                                                                             |
 | ------------ | ------------------------------------------------------------------------------------------------------ |
 | `core`       | `pages_show_list`<br>`pages_read_engagement`                                                           |
-| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`                                                   |
+| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_show_list`                              |
 | `posts`      | `pages_manage_posts`<br>`pages_read_engagement`                                                        |
 | `insights`   | `read_insights`                                                                                        |
 | `moderation` | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_manage_engagement`<br>`pages_messaging` |
@@ -387,6 +387,9 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_get_post`             | `pages_read_engagement`                                               |
 | `facebook_list_reels`           | `pages_read_engagement`                                               |
 | `facebook_get_reactions`        | `pages_read_engagement`                                               |
+| `facebook_list_stories`         | `pages_read_engagement`, `pages_show_list`                            |
+| `facebook_list_albums`          | `pages_read_engagement`                                               |
+| `facebook_list_photos`          | `pages_read_engagement`, `pages_show_list`                            |
 | `facebook_create_post`          | `pages_manage_posts`                                                  |
 | `facebook_create_photo_post`    | `pages_manage_posts`                                                  |
 | `facebook_create_video_post`    | `pages_manage_posts`                                                  |
@@ -440,7 +443,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | Package      |  On by default  | Tools            | Default write mode | What it covers                                                                                                                                                                                          |
 | ------------ | :-------------: | ---------------- | :----------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                              |
-| `reader`     |       yes       | 4 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels and reaction totals.                                                                                                  |
+| `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                         |
 | `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                           |
 | `insights`   |       yes       | 3 read           |         —          | Page, post and Reel insights: compact reshaped metric series, aggregate totals and post-2025 metric-rename guidance (read-only).                                                                        |
 | `moderation` |       yes       | 2 read + 6 write |      `apply`       | Read and moderate comments on Page content (list, reply, hide, delete, private reply) and maintain the blocked-users list.                                                                              |
@@ -451,7 +454,7 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: tools -->
 
-**37 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**40 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                            |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -463,6 +466,9 @@ A name none of them recognize fails at startup rather than being ignored.
 | `reader`     | `facebook_get_post`             |     `read`     | Fetch ONE post by its composite id ("{page-id}_{post-id}" as returned by facebook_list_posts).                                                                             |
 | `reader`     | `facebook_list_reels`           |     `read`     | List a Page's Reels via the /video_reels edge — the ONLY place Reels are readable.                                                                                         |
 | `reader`     | `facebook_get_reactions`        |     `read`     | Read the reactions on one post: a `totals` map per reaction type (LIKE / LOVE / CARE / HAHA / WOW / SAD / ANGRY), the overall `total`, and the list of reacting users.     |
+| `reader`     | `facebook_list_stories`         |     `read`     | List a Page's Stories via the /stories edge, one cursor page at a time: each item has `postId`, `status` (PUBLISHED / ARCHIVED), `createdTime` (ISO 8601), `mediaType`…    |
+| `reader`     | `facebook_list_albums`          |     `read`     | List a Page's photo albums, one cursor page at a time: `id`, `name`, `description`, `type` (normal / profile / cover / …), photo `count`, `canUpload`, `coverPhotoId`…     |
+| `reader`     | `facebook_list_photos`          |     `read`     | List photos, one cursor page at a time: an album's photos when `album_id` (from facebook_list_albums) is given, otherwise a Page photo listing chosen by `type`.           |
 | `posts`      | `facebook_create_post`          |  `reversible`  | Create a Page post: plain text, a link, a multi-link card carousel, or a multi-photo carousel.                                                                             |
 | `posts`      | `facebook_create_photo_post`    |  `reversible`  | Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled.                                                                                          |
 | `posts`      | `facebook_create_video_post`    |  `reversible`  | Upload a video to a Page.                                                                                                                                                  |

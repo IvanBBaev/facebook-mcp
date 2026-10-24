@@ -37,6 +37,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Page Stories, albums and photos are readable (organic F2, F3).** Three
+  new `reader` tools: `facebook_list_stories` reads `/{page-id}/stories`
+  (`since`/`until` as Unix seconds or ISO 8601, a client-side `status` filter
+  that reports `filteredOut`, and an archive hint on an empty listing);
+  `facebook_list_albums` reads `/{page-id}/albums`; `facebook_list_photos`
+  reads an album's photos (`album_id`) or a Page listing (`type`, defaulting
+  to `uploaded` rather than Graph's `profile`). An unknown album id points at
+  `facebook_list_albums`; `tagged` photos come back tainted as visitor content.
+  The default profile grows to 33 tools (40 across all packages). Not yet
+  verified against live Graph.
+
 - **Read notes come as an array (backlog F5).** `facebook_list_comments`,
   `facebook_list_conversations` and `facebook_get_conversation` now return
   `notes: string[]`, one advisory per element, so a caller can branch on one

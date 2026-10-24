@@ -2456,7 +2456,7 @@ test('an unreachable debug_token leaves the package matrix unverified, not block
   assert.doesNotMatch(text, /\[BLOCKED\]|\[PARTIAL\]/);
   assert.match(
     text,
-    /\[NOT CHECKED\] reader\s+required: pages_read_engagement, pages_read_user_content — not checked \(the token's scopes were never learned; see Token above\)/,
+    /\[NOT CHECKED\] reader\s+required: pages_read_engagement, pages_read_user_content, pages_show_list — not checked \(the token's scopes were never learned; see Token above\)/,
   );
   // The token finding already says nothing was established; the packages must
   // not add a second, invented layer of "missing" warnings under it.

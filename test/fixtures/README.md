@@ -11,9 +11,12 @@ here as published.
 
 - A response body from a **read** edge, recorded once and pruned to what a test
   needs. `graph-me.json` (`/me`) and `graph-feed.json` (`/{page-id}/feed`) are
-  the current set.
+  the original set.
 - Synthetic bodies are fine too — a fixture does not have to come from the wire.
   What matters is that a fixture never claims to be a recording it is not.
+  `graph-stories.json` (`/{page-id}/stories`), `graph-albums.json`
+  (`/{page-id}/albums`) and `graph-photos.json` (`/{album-id}/photos`) are
+  synthetic: hand-written to the documented field sets, with placeholder ids.
 
 ## What does not
 

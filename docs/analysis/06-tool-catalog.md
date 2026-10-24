@@ -20,21 +20,21 @@ per-package write-mode defaults stated in each section below.
 > package in `src/tools/*.test.ts`, and **`src/mcp/annotations.test.ts` freezes all
 > four booleans for all seven packages in one place** — it expands the full surface
 > through the real registry (`all` profile) and holds it against an in-file table
-> of 37 rows, so any hint or write-tier change fails until the row is edited
+> of 40 rows, so any hint or write-tier change fails until the row is edited
 > deliberately. The same file asserts that the table and the registry list exactly
 > the same tools in both directions, that no tool leaves a hint `undefined` (a
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 23 read tools. The published counts (37 tools / 7 packages, 30 in the default
-> profile, 23 read / 14 write) are asserted there too. `src/metadata.test.ts`
+> the 26 read tools. The published counts (40 tools / 7 packages, 33 in the default
+> profile, 26 read / 14 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (30 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (33 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -80,6 +80,9 @@ stays ungated.
 | `facebook_get_post` | true | false | true | true | Full field set incl. `permalink_url`, `attachments`, `shares`, reactions summary |
 | `facebook_list_reels` | true | false | true | true | `/video_reels` (Reels invisible on post endpoints) |
 | `facebook_get_reactions` | true | false | true | true | Per-type totals via field expansion |
+| `facebook_list_stories` | true | false | true | true | `/stories`; `since`/`until` (Unix seconds or ISO 8601); `status` filtered client-side with `filteredOut`; empty-listing archive hint in `notes` |
+| `facebook_list_albums` | true | false | true | true | `/albums`; the album `id` feeds `facebook_list_photos` |
+| `facebook_list_photos` | true | false | true | true | `/{album-id}/photos`, or `/{page-id}/photos` with `type` defaulted to `uploaded` (Graph's default is `profile`); `album_id` and `type` mutually exclusive; `tagged` photos come back tainted |
 
 ## Package `insights`
 
@@ -173,13 +176,12 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 30 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 4 + insights 3 + moderation 8 + messages 3), with the opt-in
-`ads` package adding 7 more in 1.1 — **37 across all 7 packages**, split 23 read
+**Total as shipped: 33 model-facing tools in the default `core` profile** (core 4
++ posts 8 + reader 7 + insights 3 + moderation 8 + messages 3), with the opt-in
+`ads` package adding 7 more in 1.1 — **40 across all 7 packages**, split 26 read
 / 14 write (10 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
-mirroring every Graph edge. This is **not** the full Pages surface: Stories
-(pending Phase 2 verification), Events, Live video, albums / photo-library reads,
-Page profile management, organic post targeting, and post boosting are out of
+mirroring every Graph edge. This is **not** the full Pages surface: Story
+publishing, Events, Live video, album / photo uploads, Page profile management, organic post targeting, and post boosting are out of
 scope for 1.0 (see 01's out-of-scope list and the README scope enumeration).

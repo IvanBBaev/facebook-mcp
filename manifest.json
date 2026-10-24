@@ -82,6 +82,18 @@
       "description": "Read the reactions on one post: a `totals` map per reaction type (LIKE / LOVE / CARE / HAHA / WOW / SAD / ANGRY), the overall `total`, and the list of reacting users."
     },
     {
+      "name": "facebook_list_stories",
+      "description": "List a Page's Stories via the /stories edge, one cursor page at a time: each item has `postId`, `status` (PUBLISHED / ARCHIVED), `createdTime` (ISO 8601), `mediaType`…"
+    },
+    {
+      "name": "facebook_list_albums",
+      "description": "List a Page's photo albums, one cursor page at a time: `id`, `name`, `description`, `type` (normal / profile / cover / …), photo `count`, `canUpload`, `coverPhotoId`…"
+    },
+    {
+      "name": "facebook_list_photos",
+      "description": "List photos, one cursor page at a time: an album's photos when `album_id` (from facebook_list_albums) is given, otherwise a Page photo listing chosen by `type`."
+    },
+    {
       "name": "facebook_create_post",
       "description": "Create a Page post: plain text, a link, a multi-link card carousel, or a multi-photo carousel."
     },

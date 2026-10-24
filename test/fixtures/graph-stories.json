@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "post_id": "100000000000001_300000000000001",
+      "status": "PUBLISHED",
+      "creation_time": "1768471200",
+      "media_type": "photo",
+      "media_id": "300000000000011",
+      "url": "https://www.facebook.com/stories/100000000000001/example-1/"
+    },
+    {
+      "post_id": "100000000000001_300000000000002",
+      "status": "ARCHIVED",
+      "creation_time": "1768384800",
+      "media_type": "video",
+      "media_id": "300000000000012",
+      "url": "https://www.facebook.com/stories/100000000000001/example-2/"
+    }
+  ],
+  "paging": {
+    "cursors": {
+      "before": "U1RPUllfYmVmb3Jl",
+      "after": "U1RPUllfYWZ0ZXI"
+    },
+    "next": "https://graph.facebook.com/v21.0/100000000000001/stories?after=U1RPUllfYWZ0ZXI&limit=25"
+  }
+}

@@ -66,7 +66,7 @@ import { DEFAULT_LAUNCH_COMMAND, subcommandHint } from './launch-command.js';
  */
 export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>> = {
   core: ['pages_show_list', 'pages_read_engagement'],
-  reader: ['pages_read_engagement', 'pages_read_user_content'],
+  reader: ['pages_read_engagement', 'pages_read_user_content', 'pages_show_list'],
   posts: ['pages_manage_posts', 'pages_read_engagement'],
   insights: ['read_insights'],
   // pages_read_engagement is facebook_list_comments' own requirement and
@@ -102,6 +102,9 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_get_post: ['pages_read_engagement'],
   facebook_list_reels: ['pages_read_engagement'],
   facebook_get_reactions: ['pages_read_engagement'],
+  facebook_list_stories: ['pages_read_engagement', 'pages_show_list'],
+  facebook_list_albums: ['pages_read_engagement'],
+  facebook_list_photos: ['pages_read_engagement', 'pages_show_list'],
 
   // posts (V03/V04)
   facebook_create_post: ['pages_manage_posts'],
