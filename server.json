@@ -120,6 +120,12 @@
           "format": "filepath"
         },
         {
+          "name": "FB_ACTIVITY_STATE_PATH",
+          "description": "Path to the small JSON file where facebook_get_activity_since keeps, per Page, the horizon of the last complete read. Defaults to the XDG/%APPDATA% state path next to the journal; the file holds Page ids and timestamps only and is written atomically, owner-only (0600).",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
           "name": "FB_TOOL_PACKAGES",
           "description": "Comma-separated tool packages or profiles to expose (e.g. core,posts,reader, or the profiles core|all|reader|publisher|moderator|ads). Omit for the default profile, which excludes ads.",
           "isRequired": false,

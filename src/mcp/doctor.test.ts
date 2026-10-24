@@ -923,6 +923,40 @@ test('the doctor reports the OBSERVED mode of a credential file', async (t) => {
   assert.ok(!haystack.includes('EAA-runtime'), 'the configured token stays out too');
 });
 
+test('the doctor reports the activity state file next to the credential file', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('POSIX permission bits are not enforced on win32');
+    return;
+  }
+  const dir = await mkdtemp(join(tmpdir(), 'facebook-mcp-doctor-state-'));
+  const statePath = join(dir, 'activity-state.json');
+  const { fb, deps } = makeDeps({
+    settings: makeSettings({ accessToken: 'EAA-runtime', activityStatePath: statePath }),
+  });
+  withDebugToken(fb, { type: 'USER', is_valid: true, scopes: [], expires_at: 0 });
+
+  // Absent is the normal state before the first call — reported, not a finding.
+  const absent = await runDoctor(deps);
+  assert.equal(absent.activityStateFile?.exists, false);
+  assert.equal(absent.activityStateFile?.unreadable, undefined);
+  assert.match(renderDoctorReport(absent), /state file:\s+.*activity-state\.json/);
+  assert.ok(!absent.summary.findings.some((f) => f.area === 'activity state file'));
+
+  await writeFile(statePath, '{"version":1,"pages":{}}\n', { mode: 0o644 });
+  await chmod(statePath, 0o644);
+  const loose = await runDoctor(deps);
+  assert.equal(loose.activityStateFile?.ownerOnly, false);
+  const finding = loose.summary.findings.find((f) => f.area === 'activity state file');
+  assert.match(String(finding?.detail), /chmod 600/);
+
+  // No path in the settings ⇒ no row at all.
+  const { fb: fb2, deps: bare } = makeDeps();
+  withDebugToken(fb2, { type: 'USER', is_valid: true, scopes: [], expires_at: 0 });
+  const none = await runDoctor(bare);
+  assert.equal(none.activityStateFile, undefined);
+  assert.doesNotMatch(renderDoctorReport(none), /state file:/);
+});
+
 test('a credential file on win32 is reported as unenforceable, not as safe', async (t) => {
   if (process.platform === 'win32') {
     t.skip('this asserts the win32 branch as observed from a POSIX host');

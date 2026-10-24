@@ -374,6 +374,7 @@ const LITERAL_DEFAULTS: readonly {
  */
 const PROSE_DEFAULTS: ReadonlySet<string> = new Set([
   'FB_JOURNAL_PATH',
+  'FB_ACTIVITY_STATE_PATH',
   'FB_TOOL_PACKAGES',
 ]);
 

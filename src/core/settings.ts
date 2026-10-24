@@ -22,6 +22,7 @@ import type {
   WriteMode,
 } from './types.js';
 import {
+  defaultActivityStatePath,
   defaultJournalPath,
   envFilePath,
   loadEnvFile,
@@ -160,6 +161,7 @@ const SETTING_NAMES: readonly string[] = [
   'FB_PACKAGES_DENY',
   'FB_PACKAGES_READONLY',
   'FB_JOURNAL_PATH',
+  'FB_ACTIVITY_STATE_PATH',
   'FB_LOG_LEVEL',
   'FB_AD_ACCOUNT_ID',
   'FB_ADS_BUDGET_CEILING',
@@ -417,6 +419,27 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
         key,
       ),
     ) ?? defaultJournal();
+  const defaultActivityState = (): string =>
+    defaultActivityStatePath({
+      platform: options.platform,
+      env,
+      homeDir: options.homeDir,
+    });
+  const activityStatePath =
+    resolveOperatorPath(
+      'FB_ACTIVITY_STATE_PATH',
+      str('FB_ACTIVITY_STATE_PATH'),
+      pathOpts,
+      (key, raw) =>
+        warn(
+          'relative-activity-state-path',
+          `${key} must be an absolute path; got ${JSON.stringify(raw)}. A relative path resolves ` +
+            'against whatever working directory the MCP client spawned the server in, so the ' +
+            `activity marks would land somewhere unpredictable. Using the default ${defaultActivityState()} ` +
+            'instead (a leading ~ is expanded to the home directory).',
+          key,
+        ),
+    ) ?? defaultActivityState();
   const logLevel = enumOf<LogLevel>(
     'FB_LOG_LEVEL',
     ['debug', 'info', 'warn', 'error'],
@@ -464,6 +487,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     packagesDeny,
     packagesReadonly,
     journalPath,
+    activityStatePath,
     logLevel,
     adAccountId,
     adsBudgetCeiling,
@@ -721,7 +745,8 @@ function resolveProfileToken(
 }
 
 /**
- * An operator-supplied filesystem path (`FB_JOURNAL_PATH`, `FB_MEDIA_DIR`), made
+ * An operator-supplied filesystem path (`FB_JOURNAL_PATH`, `FB_ACTIVITY_STATE_PATH`,
+ * `FB_MEDIA_DIR`), made
  * absolute or refused.
  *
  * No shell ever sees these values: an MCP client's JSON `env` block and the env

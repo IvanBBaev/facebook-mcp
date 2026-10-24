@@ -198,6 +198,10 @@
       "description": "Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE)."
     },
     {
+      "name": "facebook_get_activity_since",
+      "description": "What is new on a Page since a point in time, in one call: new comments (and replies) on the most recent published posts, and Messenger conversations updated since then…"
+    },
+    {
       "name": "facebook_list_campaigns",
       "description": "List campaigns under one ad account, a cursor page at a time."
     },

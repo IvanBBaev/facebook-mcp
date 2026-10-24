@@ -321,6 +321,19 @@ export const env = Object.freeze([
       'Path to the append-only write journal. Defaults to the XDG/%APPDATA% state path; the file is created owner-only (0600) and rotates by size.',
     example: '',
   },
+  {
+    name: 'FB_ACTIVITY_STATE_PATH',
+    group: 'Write safety',
+    required: 'no',
+    secret: false,
+    default: 'XDG / %APPDATA% state path',
+    defaultIsProse: true,
+    format: 'filepath',
+    summary: 'Path to the local high-water marks of facebook_get_activity_since (0600).',
+    description:
+      'Path to the small JSON file where facebook_get_activity_since keeps, per Page, the horizon of the last complete read. Defaults to the XDG/%APPDATA% state path next to the journal; the file holds Page ids and timestamps only and is written atomically, owner-only (0600).',
+    example: '',
+  },
 
   // --- Tool surface --------------------------------------------------------
   {

@@ -9,6 +9,7 @@ import { withEnv } from '../testing/index.js';
 import {
   atomicWriteFile,
   configDir,
+  defaultActivityStatePath,
   defaultJournalPath,
   describeFileProtection,
   envFilePath,
@@ -56,6 +57,10 @@ test('envFilePath and defaultJournalPath compose off the config/state dirs', () 
     defaultJournalPath(opts),
     '/home/t/.local/state/facebook-mcp/journal.ndjson',
   );
+  assert.equal(
+    defaultActivityStatePath(opts),
+    '/home/t/.local/state/facebook-mcp/activity-state.json',
+  );
 });
 
 // --- CC-CFG-4: Windows path resolution ---
@@ -81,6 +86,14 @@ test('CC-CFG-4: stateDir prefers %LOCALAPPDATA% on Windows, falls back to AppDat
   assert.equal(
     stateDir({ platform: 'win32', env: {}, homeDir: 'C:\\Users\\Test' }),
     'C:\\Users\\Test\\AppData\\Local\\facebook-mcp',
+  );
+  assert.equal(
+    defaultActivityStatePath({
+      platform: 'win32',
+      env: { LOCALAPPDATA: 'C:\\Users\\Test\\AppData\\Local' },
+      homeDir: 'C:\\Users\\Test',
+    }),
+    'C:\\Users\\Test\\AppData\\Local\\facebook-mcp\\activity-state.json',
   );
 });
 

@@ -51,6 +51,7 @@ import {
   createHostSemaphores,
   createUploadHandler,
   createVersionDriftMonitor,
+  defaultActivityStatePath,
   usageOfGraphError,
   createLogger,
   createPagesRegistry,
@@ -60,6 +61,7 @@ import {
   isPageTokenDead,
   loadSettings,
   setHintLaunchCommand,
+  type ActivityCursorStore,
   type Clock,
   type ConfirmationRequest,
   type Confirmer,
@@ -82,6 +84,7 @@ import {
   type WriteMode,
 } from './core/index.js';
 import {
+  createActivityStateStore,
   createConfirmer,
   createJournal,
   createRegistry,
@@ -155,6 +158,8 @@ export interface BuildServerDeps {
   readonly logger: Logger;
   readonly redactor: Redactor;
   readonly journal: Journal;
+  /** High-water marks for facebook_get_activity_since; absent ⇒ no persistence. */
+  readonly activityState?: ActivityCursorStore;
   readonly fbRequest: FbRequestFn;
   readonly pages: PageResolver;
   /**
@@ -281,6 +286,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       redactor,
       clock: deps.clock,
       journal: deps.journal,
+      ...(deps.activityState !== undefined ? { activityState: deps.activityState } : {}),
       signal: extra.signal,
       ...(profile !== undefined ? { profile } : {}),
       ...(reportProgress !== undefined ? { reportProgress } : {}),
@@ -1440,6 +1446,9 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     versionDrift,
   });
   const journal = createJournal({ clock, redactor, journalPath: settings.journalPath });
+  const activityState = createActivityStateStore({
+    statePath: settings.activityStatePath ?? defaultActivityStatePath(),
+  });
   const pages = createPagesRegistry({ settings, fbRequest, clock, redactor, logger });
 
   // --- Package assembly -----------------------------------------------------
@@ -1523,6 +1532,7 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     logger,
     redactor,
     journal,
+    activityState,
     fbRequest,
     pages,
   });

@@ -79,7 +79,14 @@ export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>
     'pages_manage_engagement',
     'pages_messaging',
   ],
-  messages: ['pages_messaging', 'pages_manage_metadata'],
+  // pages_read_engagement + pages_read_user_content are
+  // facebook_get_activity_since's comment scan.
+  messages: [
+    'pages_messaging',
+    'pages_manage_metadata',
+    'pages_read_engagement',
+    'pages_read_user_content',
+  ],
   ads: ['ads_read', 'ads_management'],
 };
 
@@ -156,6 +163,12 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_list_conversations: ['pages_messaging', 'pages_manage_metadata'],
   facebook_get_conversation: ['pages_messaging', 'pages_manage_metadata'],
   facebook_send_message: ['pages_messaging'],
+  // Comments on the recent posts plus the Messenger inbox.
+  facebook_get_activity_since: [
+    'pages_read_engagement',
+    'pages_read_user_content',
+    'pages_messaging',
+  ],
 
   // ads (V08/V09/V10)
   facebook_list_campaigns: ['ads_read'],
@@ -595,6 +608,11 @@ export interface DoctorReport {
   /** Observed permissions of the credential file on disk (CC-CFG-4). */
   readonly credentialFile: CredentialFileReport;
   /**
+   * Observed permissions of facebook_get_activity_since's local state file
+   * (`FB_ACTIVITY_STATE_PATH`). Absent when the settings carry no path.
+   */
+  readonly activityStateFile?: CredentialFileReport;
+  /**
    * API-version drift the doctor's own Graph calls saw (redacted): an
    * `X-Ad-Api-Version-Warning` from the Marketing API, or a served
    * `facebook-api-version` that differs from the pin. Absent when no monitor
@@ -935,7 +953,35 @@ function describePageBinding(binding: PageTokenBinding): string | undefined {
  */
 async function inspectCredentialFile(deps: DoctorDeps): Promise<CredentialFileReport> {
   const platform = deps.platform ?? process.platform;
-  const filePath = deps.credentialFilePath ?? envFilePath({ platform });
+  return inspectFileProtection(
+    deps,
+    deps.credentialFilePath ?? envFilePath({ platform }),
+    'No credential file — credentials come from the environment only.',
+  );
+}
+
+/**
+ * The activity state file holds Page ids and timestamps only, but it is kept
+ * 0600 like the credential file; an absent file just means no mark is stored.
+ */
+async function inspectActivityStateFile(
+  deps: DoctorDeps,
+): Promise<CredentialFileReport | undefined> {
+  const filePath = deps.settings.activityStatePath;
+  if (filePath === undefined) return undefined;
+  return inspectFileProtection(
+    deps,
+    filePath,
+    'No activity state file yet — written on the first facebook_get_activity_since call.',
+  );
+}
+
+async function inspectFileProtection(
+  deps: DoctorDeps,
+  filePath: string,
+  absentNote: string,
+): Promise<CredentialFileReport> {
+  const platform = deps.platform ?? process.platform;
   try {
     const protection = await statFileProtection(filePath, platform);
     return {
@@ -954,7 +1000,7 @@ async function inspectCredentialFile(deps: DoctorDeps): Promise<CredentialFileRe
         path: filePath,
         exists: false,
         posixPermissions,
-        note: 'No credential file — credentials come from the environment only.',
+        note: absentNote,
       };
     }
     const message = errorMessageOf(err);
@@ -1692,15 +1738,19 @@ function matrixFindings(matrix: readonly PackageMatrixRow[]): DoctorFinding[] {
  * operator could run to make it verifiable. A finding no action can clear is
  * noise that would make `--strict` permanently red on Windows.
  */
-function credentialFileFindings(file: CredentialFileReport): DoctorFinding[] {
+function credentialFileFindings(
+  file: CredentialFileReport | undefined,
+  area = 'credential file',
+): DoctorFinding[] {
+  if (file === undefined) return [];
   if (file.unreadable === true) {
-    return [{ severity: 'warn', area: 'credential file', detail: file.note }];
+    return [{ severity: 'warn', area, detail: file.note }];
   }
   if (file.exists && file.posixPermissions && file.ownerOnly === false) {
     return [
       {
         severity: 'warn',
-        area: 'credential file',
+        area,
         detail: `${file.path}: group/other can read this file — run chmod 600 on it.`,
       },
     ];
@@ -1862,6 +1912,7 @@ export function summarizeDoctor(
     ...tokenFindings(report.token, launchCommand),
     ...matrixFindings(report.matrix),
     ...credentialFileFindings(report.credentialFile),
+    ...credentialFileFindings(report.activityStateFile, 'activity state file'),
     ...metricSetFindings(report.metricSet),
     ...probeFindings(report.metricProbe, 'metric probe'),
     ...probeFindings(report.adAccount, 'ad account'),
@@ -1908,6 +1959,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const granted = new Set(token.scopes);
   const checkUnanswered = token.diagnosis === 'token_check_failed';
 
+  const activityStateFile = await inspectActivityStateFile(deps);
   const report: Omit<DoctorReport, 'summary'> = {
     serverVersion: deps.serverVersion,
     apiVersion: deps.settings.apiVersion,
@@ -1984,6 +2036,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             'ad account: not checked (the ads package is off — enable it and set FB_AD_ACCOUNT_ID to diagnose ad-account health).',
           ),
     credentialFile: await inspectCredentialFile(deps),
+    ...(activityStateFile !== undefined ? { activityStateFile } : {}),
     // Last on purpose: every Graph call above has been made, so the monitor
     // holds whatever version headers they carried.
     ...(deps.versionDrift !== undefined
@@ -2289,6 +2342,12 @@ export function renderDoctorReport(report: DoctorReport): string {
     `  data access:  ${describeDataAccess(t)}`,
     `  cred file:    ${report.credentialFile.path}`,
     `  protection:   ${describeCredentialFile(report.credentialFile)}`,
+    ...(report.activityStateFile !== undefined
+      ? [
+          `  state file:   ${report.activityStateFile.path}`,
+          `  protection:   ${describeCredentialFile(report.activityStateFile)}`,
+        ]
+      : []),
     '',
     'Permission x package matrix',
   );

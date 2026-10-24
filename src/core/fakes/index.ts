@@ -8,6 +8,10 @@ export { createFakeClock, type FakeClock } from './fakeClock.js';
 export { createFakeRedactor, type FakeRedactor } from './fakeRedactor.js';
 export { createMemoryJournal, type MemoryJournal } from './memoryJournal.js';
 export {
+  createMemoryActivityState,
+  type MemoryActivityState,
+} from './memoryActivityState.js';
+export {
   createFakePageResolver,
   type FakePageResolver,
   type FakePageResolverConfig,

@@ -335,6 +335,7 @@ Provide at least one token; everything else is optional tuning. Variables marked
 | `FB_CONFIRM_TOKEN`              |    no    |                    —                     | **Secret.** Out-of-band confirmation token authorizing gated write / spend actions, for clients that cannot prompt. At least 16 characters.                                       |
 | `FB_MEDIA_DIR`                  |    no    |                    —                     | Directory permitted as a source for local media uploads. Unset ⇒ URL-only, local file access disabled.                                                                            |
 | `FB_JOURNAL_PATH`               |    no    |        XDG / %APPDATA% state path        | Path to the append-only, rotating write journal (0600).                                                                                                                           |
+| `FB_ACTIVITY_STATE_PATH`        |    no    |        XDG / %APPDATA% state path        | Path to the local high-water marks of facebook_get_activity_since (0600).                                                                                                         |
 | `FB_TOOL_PACKAGES`              |    no    | core profile (all packages except `ads`) | Comma-separated packages or profiles to enable. `core` is always forced on; `ads` is opt-in.                                                                                      |
 | `FB_PACKAGES_DENY`              |    no    |                    —                     | Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.                                                                      |
 | `FB_PACKAGES_READONLY`          |    no    |                    —                     | Packages or profiles whose write tools are not registered; their read tools stay.                                                                                                 |
@@ -371,7 +372,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `posts`      | `pages_manage_posts`<br>`pages_read_engagement`                                                        |
 | `insights`   | `read_insights`<br>`pages_read_engagement`                                                             |
 | `moderation` | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_manage_engagement`<br>`pages_messaging` |
-| `messages`   | `pages_messaging`<br>`pages_manage_metadata`                                                           |
+| `messages`   | `pages_messaging`<br>`pages_manage_metadata`<br>`pages_read_engagement`<br>`pages_read_user_content`   |
 | `ads`        | `ads_read`<br>`ads_management`                                                                         |
 
 <details>
@@ -416,6 +417,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_list_conversations`   | `pages_messaging`, `pages_manage_metadata`                            |
 | `facebook_get_conversation`     | `pages_messaging`, `pages_manage_metadata`                            |
 | `facebook_send_message`         | `pages_messaging`                                                     |
+| `facebook_get_activity_since`   | `pages_read_engagement`, `pages_read_user_content`, `pages_messaging` |
 | `facebook_list_campaigns`       | `ads_read`                                                            |
 | `facebook_list_adsets`          | `ads_read`                                                            |
 | `facebook_list_ads`             | `ads_read`                                                            |
@@ -445,21 +447,21 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: packages -->
 
-| Package      |  On by default  | Tools            | Default write mode | What it covers                                                                                                                                                                                                 |
-| ------------ | :-------------: | ---------------- | :----------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                                     |
-| `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                                |
-| `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                                  |
-| `insights`   |       yes       | 4 read           |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report and post-2025 metric-rename guidance (read-only).                                              |
-| `moderation` |       yes       | 2 read + 9 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                              |
-| `messages`   |       yes       | 2 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window. Plan-first by default.        |
-| `ads`        | **no** (opt-in) | 7 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status and budget control. Off by default. |
+| Package      |  On by default  | Tools            | Default write mode | What it covers                                                                                                                                                                                                                                  |
+| ------------ | :-------------: | ---------------- | :----------------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                                                                      |
+| `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                                                                 |
+| `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                                                                   |
+| `insights`   |       yes       | 4 read           |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report and post-2025 metric-rename guidance (read-only).                                                                               |
+| `moderation` |       yes       | 2 read + 9 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                               |
+| `messages`   |       yes       | 3 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window; or ask what is new since the last look. Plan-first by default. |
+| `ads`        | **no** (opt-in) | 7 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status and budget control. Off by default.                                  |
 
 <!-- END GENERATED -->
 
 <!-- BEGIN GENERATED: tools -->
 
-**45 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**46 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                            |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -500,6 +502,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `messages`   | `facebook_list_conversations`   |     `read`     | List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet. |
 | `messages`   | `facebook_get_conversation`     |     `read`     | Read one Messenger thread newest-message-first: sender, timestamp, direction and body, plus typed placeholders for images, stickers, files and shared links (attachments…  |
 | `messages`   | `facebook_send_message`         |  `reversible`  | Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE).                              |
+| `messages`   | `facebook_get_activity_since`   |     `read`     | What is new on a Page since a point in time, in one call: new comments (and replies) on the most recent published posts, and Messenger conversations updated since then…   |
 | `ads`        | `facebook_list_campaigns`       |     `read`     | List campaigns under one ad account, a cursor page at a time.                                                                                                              |
 | `ads`        | `facebook_list_adsets`          |     `read`     | List ad sets under one ad account, a cursor page at a time.                                                                                                                |
 | `ads`        | `facebook_list_ads`             |     `read`     | List individual ads under one ad account, a cursor page at a time.                                                                                                         |

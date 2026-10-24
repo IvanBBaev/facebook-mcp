@@ -127,6 +127,8 @@ export interface Settings {
 
   // Journal & logging
   readonly journalPath: string;
+  /** `FB_ACTIVITY_STATE_PATH`; absent ⇒ `defaultActivityStatePath()` (config.ts). */
+  readonly activityStatePath?: string;
   readonly logLevel: LogLevel;
 
   // Ads (opt-in, 1.1)
@@ -555,6 +557,8 @@ export interface ToolContext {
   readonly redactor: Redactor;
   readonly clock: Clock;
   readonly journal: Journal;
+  /** Local high-water marks for facebook_get_activity_since (absent ⇒ no persistence). */
+  readonly activityState?: ActivityCursorStore;
   /** Abort seam for this call (shutdown / cancellation). */
   readonly signal?: AbortSignal;
   /** Progress reporter, present only when the client supplied a progressToken. */
@@ -768,6 +772,28 @@ export interface JournalEntry extends JournalEntryInput {
  */
 export interface Journal {
   append(entry: JournalEntryInput): Promise<JournalStatus>;
+}
+
+/**
+ * Per-Page high-water marks of `facebook_get_activity_since` (ISO instants).
+ * One mark per section, so a truncated or failed section can stay behind while
+ * the healthy one advances. Holds Page ids and timestamps only — no tokens, no UGC.
+ */
+export interface ActivityMarks {
+  readonly commentsSeenAt?: string;
+  readonly conversationsSeenAt?: string;
+  readonly updatedAt?: string;
+}
+
+/**
+ * Local store of {@link ActivityMarks}. Like the {@link Journal} it NEVER
+ * throws: a state failure must not fail a read. `get` answers `undefined` for
+ * "nothing stored" and `'unreadable'` when the file exists but cannot be used;
+ * `set` merges the given marks into the Page's entry.
+ */
+export interface ActivityCursorStore {
+  get(pageId: string): Promise<ActivityMarks | undefined | 'unreadable'>;
+  set(pageId: string, marks: ActivityMarks): Promise<'ok' | 'failed'>;
 }
 
 // ---------------------------------------------------------------------------

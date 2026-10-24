@@ -13,6 +13,8 @@
 //     is not enough on its own — an explicitly-set `FB_WRITE_MODE=apply`
 //     overrides a package default — and a DM lands in a real person's inbox with
 //     no unsend.
+//   * facebook_get_activity_since — new comments and new / unread conversations
+//     since a local high-water mark, in one call (`./activity.ts`).
 //
 // Two design commitments run through the whole module.
 //
@@ -74,6 +76,7 @@ import {
   taint,
 } from '../mcp/index.js';
 import { malformedRowsNote } from '../api/shared.js';
+import { createActivitySinceTool } from './activity.js';
 import { executeWrite, graphNodeIdArg, listArgs, shapeFor, writeArgs } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -946,8 +949,14 @@ export function createMessagesPackage(): PackageSpec {
     description:
       'Messenger conversations for a Page: poll the inbox, read a thread (untrusted ' +
       'content wrapped, attachments as placeholders) and send one private reply ' +
-      'inside the 24-hour window. Plan-first by default.',
-    tools: [listConversationsTool, getConversationTool, sendMessageTool],
+      'inside the 24-hour window; or ask what is new since the last look. ' +
+      'Plan-first by default.',
+    tools: [
+      listConversationsTool,
+      getConversationTool,
+      sendMessageTool,
+      createActivitySinceTool(),
+    ],
     enabledByDefault: true,
     writeModeDefault: 'plan',
   };

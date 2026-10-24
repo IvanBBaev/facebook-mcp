@@ -73,6 +73,21 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_get_activity_since` answers "what is new since I last looked?"**
+  (messages, read-only). One call returns the new comments and replies on the
+  most recent published posts (`posts`, default 10, max 25) and the Messenger
+  conversations updated since `since` or still unread, each capped by
+  `max_comments` (default 50, max 100). Omit `since` to continue from a local
+  per-Page high-water mark kept separately for comments and conversations in
+  `FB_ACTIVITY_STATE_PATH` (0600, atomic writes, Page ids and timestamps only);
+  the first call covers the last 24 hours, and `since` may reach back at most
+  90 days. With `mark_seen` (default `true`) a section's mark moves to the
+  read's horizon only when that section was read completely: a truncated or
+  failed section keeps its mark, so nothing is skipped, and `mark_seen:false`
+  peeks. One section failing is reported in place while the other still
+  returns. Comment authors and bodies, participant names and snippets are in
+  the taint envelope. `facebook_doctor` now reports the state file's
+  protection next to the credential file.
 - **`facebook_get_page_report` answers "how did my Page do?" in one call**
   (insights, read-only). A preset window (`last_7_days`, `last_28_days` —
   default — or `last_90_days`, ending at today 00:00 Pacific, exclusive) or a

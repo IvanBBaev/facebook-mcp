@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 28 read tools. The published counts (45 tools / 7 packages, 37 in the default
-> profile, 28 read / 17 write) are asserted there too. `src/metadata.test.ts`
+> the 29 read tools. The published counts (46 tools / 7 packages, 38 in the default
+> profile, 29 read / 17 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (37 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (38 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -132,6 +132,7 @@ gates as `irreversible`.
 | `facebook_list_conversations` | true | false | true | true | Polling-friendly: `updated_time`, `unread_count`, `snippet` |
 | `facebook_get_conversation` | true | false | true | true | Messages with `from`, `created_time`, attachments. The candidate opt-in `mark_seen` parameter (G-TOOL-4) was **decided against and does not ship**: a read tool must not mutate read receipts on a real person's conversation as a side effect of the model looking at it. A test pins the rejection |
 | `facebook_send_message` | false | true | false | true | RESPONSE type; 24-hour-window errors explained in the error mapping. Externally visible with no unsend → `destructiveHint:true`; a lost-response retry can double-message a real customer → `idempotentHint:false` |
+| `facebook_get_activity_since` | true | false | false | true | v2 F3. New comments on the recent published posts (`posts` 1–25) plus conversations updated since `since` or still unread, in one call. `since` omitted ⇒ the local per-Page, per-section high-water mark (`FB_ACTIVITY_STATE_PATH`, 0600), first call ⇒ now − 24h, at most 90 days back. `mark_seen` (default true) advances the mark to the read's horizon only for a complete section; a truncated or failed section keeps its mark. Not idempotent because of that local mark; no Graph write. Comment and message text inside the taint envelope |
 
 ## Package `ads` (off by default; ships in 1.1 — profile `ads`)
 
@@ -181,9 +182,9 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 37 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 7 + insights 4 + moderation 11 + messages 3), with the opt-in
-`ads` package adding 8 more — **45 across all 7 packages**, split 28 read
+**Total as shipped: 38 model-facing tools in the default `core` profile** (core 4
++ posts 8 + reader 7 + insights 4 + moderation 11 + messages 4), with the opt-in
+`ads` package adding 8 more — **46 across all 7 packages**, split 29 read
 / 17 write (13 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than

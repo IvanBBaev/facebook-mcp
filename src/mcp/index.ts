@@ -42,6 +42,11 @@ export {
   JOURNAL_MAX_BYTES,
   type JournalDeps,
 } from './journal.js';
+export {
+  createActivityStateStore,
+  ACTIVITY_STATE_VERSION,
+  type ActivityStateDeps,
+} from './activity-state.js';
 
 // F14 — stdio + Streamable HTTP transports (stdout purity, loopback fail-closed) (C12).
 export {

@@ -402,7 +402,7 @@ test('createMessagesPackage builds the plan-first messages package', () => {
   assert.equal(pkg.writeModeDefault, 'plan');
   assert.deepEqual(
     pkg.tools.map((t) => t.name),
-    [TOOL_LIST, TOOL_GET, TOOL_SEND],
+    [TOOL_LIST, TOOL_GET, TOOL_SEND, 'facebook_get_activity_since'],
   );
   for (const spec of pkg.tools) {
     assert.ok(spec.description.length > 0, `${spec.name} must be described`);

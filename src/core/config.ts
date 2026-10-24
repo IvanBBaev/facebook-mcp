@@ -23,6 +23,7 @@ export const ENV_FILE_NAME = '.env';
 
 /** Basename of the write journal inside the state dir. */
 export const JOURNAL_FILE_NAME = 'journal.ndjson';
+export const ACTIVITY_STATE_FILE_NAME = 'activity-state.json';
 
 /** Inputs that make path resolution injectable (and cross-platform testable). */
 export interface PathOptions {
@@ -93,7 +94,7 @@ export function configDir(o?: PathOptions): string {
 }
 
 /**
- * The state directory holding the write journal.
+ * The state directory holding the write journal and the activity marks.
  * POSIX: `$XDG_STATE_HOME/facebook-mcp` or `~/.local/state/facebook-mcp`.
  * Windows: `%LOCALAPPDATA%` (or `%APPDATA%`) `\facebook-mcp`.
  */
@@ -121,6 +122,11 @@ export function envFilePath(o?: PathOptions): string {
 /** Absolute default path of the write journal (F13 owns the journal itself). */
 export function defaultJournalPath(o?: PathOptions): string {
   return pathFor(resolvePlatform(o)).join(stateDir(o), JOURNAL_FILE_NAME);
+}
+
+/** Absolute default path of the facebook_get_activity_since high-water marks. */
+export function defaultActivityStatePath(o?: PathOptions): string {
+  return pathFor(resolvePlatform(o)).join(stateDir(o), ACTIVITY_STATE_FILE_NAME);
 }
 
 /** Options for {@link loadEnvFile}. */
