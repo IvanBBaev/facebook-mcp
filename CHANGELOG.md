@@ -73,6 +73,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_archive_ad_object` and `facebook_delete_ad_object` (v2 ads §3).**
+  Retire one campaign, ad set or ad by id. Both are plan-first and tier
+  `irreversible`; the preview names the current status, how many ad sets / ads
+  inherit the change (with `level`), and — for a delete — a warning when the
+  object delivered in the last 28 days. A campaign is deleted with
+  `DELETE /{id}`, an ad set or ad with `status=DELETED`. Already deleted
+  objects (and archiving an archived one) are refused locally; accounts with a
+  payment problem may still retire objects. `facebook_update_ad_object` now
+  points `status:"DELETED"|"ARCHIVED"` at these tools.
+
 - **Campaign `spend_cap_minor` on `facebook_update_ad_object`.** A campaign's
   lifetime spend cap can now be set, raised or lowered in minor units of the ad
   account currency. It needs `level: "campaign"`. A raise is a `spend` write; a

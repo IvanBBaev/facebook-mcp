@@ -26,8 +26,8 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 32 read tools. The published counts (53 tools / 7 packages, 45 in the default
-> profile, 32 read / 21 write) are asserted there too. `src/metadata.test.ts`
+> the 32 read tools. The published counts (55 tools / 7 packages, 45 in the default
+> profile, 32 read / 23 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
@@ -150,8 +150,8 @@ the plan, so editing the template between preview and apply is a `plan_mismatch`
 
 **Rescoped for 1.1 to read + status/budget control only** (A12). The ad
 create-chain (`create_campaign` / `create_adset` / `create_ad_creative` /
-`create_ad`), `delete_ad_object`, and `upload_ad_image` are **deferred beyond
-1.1** — create is a multi-object chain with spend/DSA gating that needs its own
+`create_ad`) and `upload_ad_image` are **deferred beyond
+1.1**; single-object archive/delete landed in 2.0 (v2 ads §3) — create is a multi-object chain with spend/DSA gating that needs its own
 design pass (see 08). Not part of the default `core` profile. Write-mode default:
 **plan-first**; budget/status changes sit in the irreversible/spend tier (never
 env-bypassed) and are gated by `FB_ADS_BUDGET_CEILING`.
@@ -164,6 +164,8 @@ env-bypassed) and are gated by `FB_ADS_BUDGET_CEILING`.
 | `facebook_get_ad_object` | true | false | true | true | Any level by ID with field selection |
 | `facebook_get_ad_preview` | true | false | true | true | Placement preview of an ad, a creative or a Page post as an ad; returns the iframe URL only |
 | `facebook_update_ad_object` | false | true | true | true | Status pause/resume + budget changes (minor units) + campaign `spend_cap_minor` (raise = spend, set/lower = irreversible, bounded by `FB_ADS_CAMPAIGN_SPEND_CAP_MAX`). Budget overwrites lose the prior value → `destructiveHint:true`; setting to a fixed value repeats to the same state → `idempotentHint:true` |
+| `facebook_archive_ad_object` | false | true | true | true | v2 ads §3, tier **irreversible**. `POST /{id}` `status=ARCHIVED`; children inherit (preview counts them with `level`). Archived objects can only be renamed or deleted. Already archived/deleted is refused locally. At-risk accounts allowed (stops delivery) |
+| `facebook_delete_ad_object` | false | true | true | true | v2 ads §3, tier **irreversible**. Campaign: `DELETE /{id}`; ad set / ad / unknown level: `POST /{id}` `status=DELETED`. Never the account bulk DELETE. Deleting an archived object is allowed. 28-day delivery warning (insights `last_28d` spend or `effective_status` ACTIVE); ambiguous answer is `attempted`, never retried |
 | `facebook_ads_insights` | true | false | true | true | Tried **synchronously first**; when Graph refuses the query for being too large, an async report run is started automatically and the result comes back with `mode:"async"`, a `reportRunId` and **no rows** — the caller polls `facebook_ads_report_status` instead of retrying this tool (CC-ADS-5). Window is either a `date_preset` or a since/until pair (both or neither); breakdowns with row caps + `truncated` |
 | `facebook_ads_report_status` | true | false | true | true | Probes one async report run and, with `fetch_results:true`, reads its rows once complete. **One call, one answer** — it never sleeps and never loops; the phase (pending / running / complete / failed / skipped) and a stop-polling hint come back to the model, which owns the wait. A FAILED or SKIPPED run produced nothing and must be replaced by a narrower run, not re-probed (there is no cancel API) |
 
@@ -196,8 +198,8 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
 
 **Total as shipped: 45 model-facing tools in the default `core` profile** (core 4
 + posts 9 + reader 7 + insights 5 + moderation 13 + messages 7), with the opt-in
-`ads` package adding 8 more — **53 across all 7 packages**, split 32 read
-/ 21 write (16 reversible, 4 irreversible, 1 spend — the single `spend` tool is
+`ads` package adding 10 more — **55 across all 7 packages**, split 32 read
+/ 23 write (16 reversible, 6 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story

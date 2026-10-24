@@ -260,6 +260,14 @@
     {
       "name": "facebook_update_ad_object",
       "description": "Pause or resume an ads object, change its budget, or set a campaign spend cap."
+    },
+    {
+      "name": "facebook_archive_ad_object",
+      "description": "Archive one campaign, ad set or ad by id."
+    },
+    {
+      "name": "facebook_delete_ad_object",
+      "description": "Delete one campaign, ad set or ad by id — permanently."
     }
   ],
   "user_config": {

@@ -188,6 +188,8 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_ads_insights: ['ads_read'],
   facebook_ads_report_status: ['ads_read'],
   facebook_update_ad_object: ['ads_management'],
+  facebook_archive_ad_object: ['ads_management'],
+  facebook_delete_ad_object: ['ads_management'],
 };
 
 /** A token within this window of expiry (or already past it) is "expiring soon". */

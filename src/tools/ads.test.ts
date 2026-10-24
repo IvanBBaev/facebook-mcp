@@ -213,6 +213,8 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
     facebook_ads_insights: [true, false, true, true],
     facebook_ads_report_status: [true, false, true, true],
     facebook_update_ad_object: [false, true, true, true],
+    facebook_archive_ad_object: [false, true, true, true],
+    facebook_delete_ad_object: [false, true, true, true],
   };
 
   assert.equal(PACKAGE.tools.length, Object.keys(expected).length);
@@ -239,11 +241,15 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
   }
 });
 
-test('only facebook_update_ad_object can write, and it never claims to be read-only', () => {
+test('only the update and lifecycle tools can write, and none claims to be read-only', () => {
   const writers = PACKAGE.tools.filter((t) => t.writeTier !== undefined);
   assert.deepEqual(
     writers.map((t) => t.name),
-    ['facebook_update_ad_object'],
+    [
+      'facebook_update_ad_object',
+      'facebook_archive_ad_object',
+      'facebook_delete_ad_object',
+    ],
   );
 });
 
@@ -285,6 +291,8 @@ test('every log allowlist in the package names real, non-secret arguments', () =
       'force_async',
     ],
     facebook_update_ad_object: ['object_id', 'level', 'status', 'apply', 'plan_id'],
+    facebook_archive_ad_object: ['object_id', 'level', 'apply', 'plan_id'],
+    facebook_delete_ad_object: ['object_id', 'level', 'apply', 'plan_id'],
   };
 
   for (const spec of PACKAGE.tools) {
@@ -2026,4 +2034,205 @@ test('spend_cap_minor must be a positive integer', () => {
       String(bad),
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Lifecycle tools (v2 ads §3) — archive / delete
+// ---------------------------------------------------------------------------
+
+/** Serve the child counts and the 28-day spend the lifecycle preview reads. */
+function stubLifecycleReads(
+  fb: FakeFbRequest,
+  opts: { readonly adsets?: number; readonly ads?: number; readonly spend?: string } = {},
+): void {
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}/adsets`,
+    fbOk({ data: [], summary: { total_count: opts.adsets ?? 2 } }),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}/ads`,
+    fbOk({ data: [], summary: { total_count: opts.ads ?? 5 } }),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}/insights`,
+    fbOk({ data: opts.spend !== undefined ? [{ spend: opts.spend }] : [] }),
+  );
+}
+
+test('archive and delete are irreversible previews that change nothing', async () => {
+  for (const name of ['facebook_archive_ad_object', 'facebook_delete_ad_object']) {
+    const { fb, ctx, journal } = makeHarness();
+    stubWriteReads(fb);
+    stubLifecycleReads(fb);
+
+    const result = body(
+      await tool(name).handler({ object_id: CAMPAIGN_ID, level: 'campaign' }, ctx),
+    );
+
+    assert.equal(result.status, 'preview', name);
+    assert.equal(result.tier, 'irreversible', name);
+    assert.match(str(result.summary), /children affected: 7/, name);
+    assert.ok(
+      arr(result.warnings).some((w) => str(w).includes('2 ad sets and 5 ads under it')),
+      name,
+    );
+    assert.equal(writes(fb).length, 0, `${name}: a dry run may not write`);
+    assert.equal(journal.entries.length, 0, name);
+  }
+});
+
+test('an applied archive POSTs status=ARCHIVED and journals from/to/childCount', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  stubWriteReads(fb);
+  stubLifecycleReads(fb);
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  const archive = tool('facebook_archive_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign' };
+  const preview = body(await archive.handler(args, ctx));
+  const applied = body(
+    await archive.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+
+  assert.equal(applied.status, 'applied');
+  const result = obj(applied.result);
+  assert.equal(result.toStatus, 'ARCHIVED');
+  assert.equal(result.fromStatus, 'PAUSED');
+  assert.equal(result.childrenAffected, 7);
+  const post = writes(fb)[0];
+  assert.ok(post && isJson(post));
+  assert.equal(post.method, 'POST');
+  assert.deepEqual(post.body, { status: 'ARCHIVED' });
+  const entry = journal.entries.at(-1);
+  assert.equal(entry?.outcome, 'applied');
+  assert.deepEqual(
+    {
+      from: entry?.metadata?.from,
+      to: entry?.metadata?.to,
+      childCount: entry?.metadata?.childCount,
+    },
+    { from: 'PAUSED', to: 'ARCHIVED', childCount: 7 },
+  );
+});
+
+test('an applied campaign delete uses DELETE /{id}; an ad set uses status=DELETED', async () => {
+  const campaign = makeHarness();
+  stubWriteReads(campaign.fb);
+  stubLifecycleReads(campaign.fb);
+  campaign.fb.on((r) => r.method === 'DELETE', fbOk({ success: true }));
+  const del = tool('facebook_delete_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign' };
+  const preview = body(await del.handler(args, campaign.ctx));
+  const applied = body(
+    await del.handler(
+      { ...args, apply: true, plan_id: str(preview.planId) },
+      campaign.ctx,
+    ),
+  );
+  assert.equal(applied.status, 'applied');
+  const sent = writes(campaign.fb);
+  assert.equal(sent.length, 1);
+  const deleted = sent[0];
+  assert.ok(deleted && isJson(deleted));
+  assert.equal(deleted.method, 'DELETE');
+  assert.equal(deleted.path, `/${CAMPAIGN_ID}`);
+
+  const adset = makeHarness();
+  stubWriteReads(adset.fb);
+  adset.fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ADSET_ID}`,
+    fbOk({ id: ADSET_ID, status: 'PAUSED', effective_status: 'PAUSED' }),
+  );
+  adset.fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ADSET_ID}/ads`,
+    fbOk({ data: [], summary: { total_count: 3 } }),
+  );
+  adset.fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ADSET_ID}/insights`,
+    fbOk({ data: [] }),
+  );
+  adset.fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+  const adsetArgs = { object_id: ADSET_ID, level: 'adset' };
+  const adsetPreview = body(await del.handler(adsetArgs, adset.ctx));
+  await del.handler(
+    { ...adsetArgs, apply: true, plan_id: str(adsetPreview.planId) },
+    adset.ctx,
+  );
+  const post = writes(adset.fb)[0];
+  assert.ok(post && isJson(post));
+  assert.equal(post.method, 'POST');
+  assert.deepEqual(post.body, { status: 'DELETED' });
+});
+
+test('delete warns about recent delivery from 28-day spend', async () => {
+  const { fb, ctx } = makeHarness();
+  stubWriteReads(fb);
+  stubLifecycleReads(fb, { spend: '12.50' });
+  const result = body(
+    await tool('facebook_delete_ad_object').handler(
+      { object_id: CAMPAIGN_ID, level: 'campaign' },
+      ctx,
+    ),
+  );
+  assert.ok(
+    arr(result.warnings).some((w) => str(w).includes('delivered in the last 28 days')),
+  );
+});
+
+test('an at-risk ad account may still archive (it stops delivery)', async () => {
+  const { fb, ctx } = makeHarness();
+  stubWriteReads(fb, { accountStatus: 3 });
+  stubLifecycleReads(fb);
+  const result = body(
+    await tool('facebook_archive_ad_object').handler(
+      { object_id: CAMPAIGN_ID, level: 'campaign', ad_account_id: ACCOUNT_ID },
+      ctx,
+    ),
+  );
+  assert.equal(result.status, 'preview');
+});
+
+test('an already deleted object is refused before the wire', async () => {
+  const { fb, ctx } = makeHarness();
+  stubWriteReads(fb, {
+    object: campaignNode({ status: 'DELETED', effective_status: 'DELETED' }),
+  });
+  stubLifecycleReads(fb);
+  await assert.rejects(
+    () =>
+      tool('facebook_delete_ad_object').handler(
+        { object_id: CAMPAIGN_ID, level: 'campaign' },
+        ctx,
+      ),
+    /already deleted/,
+  );
+  assert.equal(writes(fb).length, 0);
+});
+
+test('a status change between archive preview and apply diverges', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ACCOUNT_ID}`,
+    fbOk({ id: ACCOUNT_ID, account_status: 1, currency: 'EUR' }),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`,
+    fbOk(campaignNode()),
+    1,
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`,
+    fbOk(campaignNode({ status: 'ACTIVE', effective_status: 'ACTIVE' })),
+  );
+  stubLifecycleReads(fb);
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  const archive = tool('facebook_archive_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign' };
+  const preview = body(await archive.handler(args, ctx));
+  const result = body(
+    await archive.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+  assert.equal(result.status, 'diverged');
+  assert.equal(writes(fb).length, 0);
 });

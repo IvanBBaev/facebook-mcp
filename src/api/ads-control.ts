@@ -69,7 +69,7 @@ export {
 // 1. Constants
 // ---------------------------------------------------------------------------
 
-/** The only status values this package will SET (delete/archive are out of scope). */
+/** The only status values this tool will SET (archive/delete have their own tools). */
 export const SETTABLE_STATUSES = ['ACTIVE', 'PAUSED'] as const;
 
 export type SettableStatus = (typeof SETTABLE_STATUSES)[number];
@@ -215,7 +215,7 @@ export function resolveSettableStatus(raw: string): SettableStatus {
   }
   if (READ_ONLY_STATUSES.has(upper)) {
     throw validationError(
-      `status="${raw}" is not settable here: this server's ads scope is status and budget control only. Deleting or archiving an ads object is deliberately out of scope — do it in Ads Manager.`,
+      `status="${raw}" is not settable through this tool. To archive or delete an ads object, use facebook_archive_ad_object / facebook_delete_ad_object.`,
     );
   }
   throw validationError(
@@ -769,7 +769,7 @@ export interface AdUpdateOutcome {
  * or a record whose `success` is absent or exactly `true`. Anything else — a
  * bare `false`/`null`/`0`, or a present flag that is not `true` — is a refusal.
  */
-function confirmsAdUpdate(body: unknown): boolean {
+export function confirmsAdUpdate(body: unknown): boolean {
   if (body === undefined || body === true) return true;
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
   const flag: unknown = (body as Record<string, unknown>).success;

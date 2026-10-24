@@ -93,10 +93,10 @@ test('resolveSettableStatus accepts ACTIVE/PAUSED in any case', () => {
   assert.equal(resolveSettableStatus(' Paused '), 'PAUSED');
 });
 
-test('deleting or archiving through the status field is refused as out of scope', () => {
+test('deleting or archiving through the status field points at the lifecycle tools', () => {
   for (const status of ['DELETED', 'ARCHIVED']) {
     const err = throwsGraph(() => resolveSettableStatus(status));
-    assert.match(err.message, /out of scope/);
+    assert.match(err.message, /facebook_archive_ad_object \/ facebook_delete_ad_object/);
   }
   const err = throwsGraph(() => resolveSettableStatus('RUNNING'));
   assert.match(err.message, /ACTIVE to resume or PAUSED to pause/);

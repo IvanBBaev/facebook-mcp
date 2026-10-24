@@ -1,8 +1,9 @@
 // The `ads` tool package (tasks V09 read / V10 control) — Marketing API access,
 // deliberately rescoped for 1.1 to READ plus status/budget CONTROL (doc 06,
-// A12). The ad create-chain, deletion and image upload are out of scope, so
-// nothing here can bring a new spending object into existence: every write
-// targets an object the operator already created in Ads Manager.
+// A12), with single-object archive/delete added in 2.0 (v2 ads §3). The ad
+// create-chain is out of scope, so nothing here can bring a new spending object
+// into existence: every write targets an object the operator already created in
+// Ads Manager.
 //
 //   * facebook_list_campaigns / _adsets / _ads — one cursor page of objects under
 //     an ad account, at the level the tool name names.
@@ -14,6 +15,8 @@
 //   * facebook_get_ad_preview     — how an ad, a creative or a Page post as an
 //     ad renders in one placement; creates nothing.
 //   * facebook_update_ad_object   — pause/resume and budget changes, plan-gated.
+//   * facebook_archive_ad_object / facebook_delete_ad_object — retire one
+//     object (and, by inheritance, its children), plan-gated and irreversible.
 //
 // Division of labour with `../api/ads-read.js` and `../api/ads-control.js`
 // follows the layer rule (core ← api ← mcp ← tools). The api modules own the
@@ -84,6 +87,14 @@ import {
   planAdObjectUpdate,
 } from '../api/ads-control.js';
 import type { AdUpdateOutcome, SettableStatus } from '../api/ads-control.js';
+import {
+  applyLifecycleChange,
+  childrenTotal,
+  planLifecycleChange,
+  readChildCounts,
+  readDelivered28d,
+} from '../api/ads-lifecycle.js';
+import type { LifecycleOutcome, LifecycleTarget } from '../api/ads-lifecycle.js';
 import {
   APPLIED_VERDICT,
   REFUSED_VERDICT,
@@ -549,12 +560,154 @@ function writeIntent(input: {
   return { stopsDelivery };
 }
 
+/** A lifecycle write landed only when Graph confirmed it. */
+function lifecycleVerdict(outcome: LifecycleOutcome): WriteResultVerdict {
+  return outcome.success ? APPLIED_VERDICT : REFUSED_VERDICT;
+}
+
+/**
+ * `facebook_archive_ad_object` / `facebook_delete_ad_object` (v2 ads §3). Two
+ * names rather than one `target` argument, so the irreversibility of each is
+ * explicit to the model. Both stop delivery and cascade to the children; the
+ * API can undo neither, so the tier is always `irreversible`.
+ */
+function lifecycleTool(target: LifecycleTarget) {
+  const archive = target === 'ARCHIVED';
+  const name = archive ? 'facebook_archive_ad_object' : 'facebook_delete_ad_object';
+  return defineTool({
+    name,
+    title: archive ? 'Archive Ad Object' : 'Delete Ad Object',
+    description: archive
+      ? 'Archive one campaign, ad set or ad by id. Its ad sets and ads are archived with it. ' +
+        'Archived objects stop delivering and can only be renamed or deleted afterwards — the API ' +
+        'cannot resume them. Plan-first: without apply:true this returns a preview (current status, ' +
+        'children affected) and changes NOTHING; applying requires apply:true plus the plan_id from ' +
+        'that preview. Pass `level` so the children can be counted. An already archived or deleted ' +
+        'object is refused.'
+      : 'Delete one campaign, ad set or ad by id — permanently. Its ad sets and ads are deleted with ' +
+        'it, and a deleted object cannot be restored or edited. Plan-first: without apply:true this ' +
+        'returns a preview (current status, children affected, a warning when it delivered in the ' +
+        'last 28 days) and changes NOTHING; applying requires apply:true plus the plan_id from that ' +
+        'preview. An archived object can be deleted; an already deleted one is refused. Pass `level` ' +
+        'so the children can be counted. Never deletes more than this one object tree.',
+    inputSchema: z.object({
+      object_id: objectIdArg,
+      level: levelArg,
+      ad_account_id: adAccountIdArg,
+      apply: applyArg,
+      plan_id: planIdArg,
+      confirm_token: confirmTokenArg,
+    }),
+    annotations: UPDATE_ANNOTATIONS,
+    writeTier: 'irreversible',
+    logFields: ['object_id', 'level', 'apply', 'plan_id'],
+    handler: async (input, ctx) => {
+      // Retiring an object stops delivery, so an account in payment trouble is
+      // never locked out of it (CC-ADS-6); a disabled one still refuses.
+      const intent: AdWriteIntent = { stopsDelivery: true };
+      const configured = await accountForWrite(ctx, input.ad_account_id, intent);
+      const current = await getAdObject(ctx.fbRequest, {
+        objectId: input.object_id,
+        ...(input.level !== undefined ? { level: input.level } : {}),
+        ...signalOf(ctx),
+      });
+      assertObjectInAccount(input.object_id, current.object, configured);
+      const account =
+        configured ?? (await ownerAccountForWrite(ctx, current.object, intent));
+
+      const children = await readChildCounts(
+        ctx.fbRequest,
+        input.object_id,
+        input.level,
+        ctx.signal,
+      );
+      const delivered28d = archive
+        ? undefined
+        : await readDelivered28d(ctx.fbRequest, input.object_id, ctx.signal);
+
+      // Pure: an already deleted / already archived object is refused here.
+      const plan = planLifecycleChange({
+        objectId: input.object_id,
+        ...(input.level !== undefined ? { level: input.level } : {}),
+        current: current.object,
+        target,
+        ...(children !== undefined ? { children } : {}),
+        ...(delivered28d !== undefined ? { delivered28d } : {}),
+      });
+
+      // The first readState call is answered from the reads just made; the
+      // apply call re-reads for real.
+      let pending: { record: AdRecord; childCount: number | 'unknown' } | undefined = {
+        record: current.object,
+        childCount: plan.childrenAffected,
+      };
+      const lifecycleState = (record: AdRecord, childCount: number | 'unknown') => ({
+        status: record.status ?? null,
+        effective_status: record.effective_status ?? null,
+        childCount,
+      });
+      const readState = async (): Promise<unknown> => {
+        if (pending !== undefined) {
+          const snapshot = pending;
+          pending = undefined;
+          return lifecycleState(snapshot.record, snapshot.childCount);
+        }
+        const fresh = await getAdObject(ctx.fbRequest, {
+          objectId: input.object_id,
+          ...(input.level !== undefined ? { level: input.level } : {}),
+          ...signalOf(ctx),
+        });
+        const freshChildren = await readChildCounts(
+          ctx.fbRequest,
+          input.object_id,
+          input.level,
+          ctx.signal,
+        );
+        const childCount = childrenTotal(input.level, freshChildren);
+        return lifecycleState(fresh.object, childCount);
+      };
+
+      let cancelledBeforeSend = false;
+
+      return executeWrite(ctx, {
+        tool: name,
+        tier: 'irreversible',
+        params: {
+          ...(account !== undefined ? { ad_account_id: account.id } : {}),
+          object_id: input.object_id,
+          ...(input.level !== undefined ? { level: input.level } : {}),
+          to_status: target,
+        },
+        ...gateArgs(input),
+        summary: plan.summary,
+        warnings: [...plan.warnings, ADS_RATE_LIMIT_NOTE],
+        notPerformedNotice: `This was a dry run — nothing was ${archive ? 'archived' : 'deleted'}.`,
+        readState,
+        perform: () => {
+          cancelledBeforeSend = ctx.signal?.aborted === true;
+          return applyLifecycleChange(ctx.fbRequest, plan, ctx.signal);
+        },
+        classifyResult: lifecycleVerdict,
+        classifyOutcome: (err) =>
+          cancelledBeforeSend ? 'failed' : classifyUpdateFailure(err),
+        metadata: {
+          objectId: input.object_id,
+          ...(input.level !== undefined ? { level: input.level } : {}),
+          from: plan.fromStatus ?? null,
+          to: target,
+          childCount: plan.childrenAffected,
+        },
+      });
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 5. Package factory
 // ---------------------------------------------------------------------------
 
 /**
- * Build the `ads` package: six read tools and one write tool. OFF by default
+ * Build the `ads` package: seven read tools and three write tools. OFF by default
  * (doc 06 — `ads` is excluded from the `core` profile and reached through the
  * `ads`/`all` profiles or an explicit `FB_TOOL_PACKAGES`), because a server that
  * can move money should be opted into rather than out of.
@@ -860,8 +1013,8 @@ export function createAdsPackage(): PackageSpec {
       'budgets; archived and deleted objects are read-only and are refused before ' +
       'the request. Setting status:"ACTIVE" sets the CONFIGURATION — check ' +
       '`effective_status` afterwards to learn whether the object actually ' +
-      'delivers. Creating and deleting ads objects is out of scope for this ' +
-      'server; do that in Ads Manager.',
+      'delivers. Creating ads objects is out of scope for this server; to archive or ' +
+      'delete one, use facebook_archive_ad_object / facebook_delete_ad_object.',
     inputSchema: z.object({
       object_id: objectIdArg,
       level: levelArg,
@@ -1024,8 +1177,8 @@ export function createAdsPackage(): PackageSpec {
     title: 'Ads',
     description:
       'Marketing API access: campaign / ad-set / ad listings with delivery truth, ' +
-      'single-object reads, placement previews, insights with async report runs, and plan-gated ' +
-      'status, budget and campaign spend-cap control. Off by default.',
+      'single-object reads, placement previews, insights with async report runs, plan-gated ' +
+      'status, budget and campaign spend-cap control, and single-object archive/delete. Off by default.',
     tools: [
       listCampaigns,
       listAdsets,
@@ -1035,6 +1188,8 @@ export function createAdsPackage(): PackageSpec {
       adsInsights,
       reportStatus,
       updateAdObject,
+      lifecycleTool('ARCHIVED'),
+      lifecycleTool('DELETED'),
     ],
     enabledByDefault: false,
     // `writeModeDefault: 'plan'` is only the default for a server that did not

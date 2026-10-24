@@ -209,6 +209,8 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_ads_insights', true, false, true, true, undefined],
   ['facebook_ads_report_status', true, false, true, true, undefined],
   ['facebook_update_ad_object', false, true, true, true, 'spend'],
+  ['facebook_archive_ad_object', false, true, true, true, 'irreversible'],
+  ['facebook_delete_ad_object', false, true, true, true, 'irreversible'],
 ];
 
 /** The four hints doc 06 requires every tool to spell out. */
@@ -415,7 +417,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 53 tools across 7 packages', () => {
+test('the full surface is 55 tools across 7 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -428,12 +430,12 @@ test('the full surface is 53 tools across 7 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    53,
+    55,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    53,
+    55,
     'the frozen manifest lost or gained a row',
   );
 });
@@ -458,17 +460,17 @@ test('the default `core` profile ships 45 tools — everything except `ads`', ()
   );
   assert.equal(
     REGISTRY.tools.length - byDefault.tools.length,
-    8,
-    'the `ads` package no longer accounts for the 8-tool gap between all and default',
+    10,
+    'the `ads` package no longer accounts for the 10-tool gap between all and default',
   );
 });
 
-test('the surface splits 32 read / 21 write (16 reversible, 4 irreversible, 1 spend)', () => {
+test('the surface splits 32 read / 23 write (16 reversible, 6 irreversible, 1 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
   assert.equal(read.length, 32, 'the read-only tool count changed (doc 06 quotes 32)');
-  assert.equal(write.length, 21, 'the write tool count changed (doc 06 quotes 21)');
+  assert.equal(write.length, 23, 'the write tool count changed (doc 06 quotes 23)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 
   const byTier: Record<string, number> = {};
@@ -478,7 +480,7 @@ test('the surface splits 32 read / 21 write (16 reversible, 4 irreversible, 1 sp
   }
   assert.deepEqual(
     byTier,
-    { reversible: 16, irreversible: 4, spend: 1 },
+    { reversible: 16, irreversible: 6, spend: 1 },
     'the write-tier distribution changed. The single `spend` is ' +
       '`facebook_update_ad_object`, which is the only tool in this server that can ' +
       'cost money — resuming delivery or raising a budget. `safe` stays deliberately ' +
