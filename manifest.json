@@ -142,6 +142,10 @@
       "description": "One-call Page performance report over a window (default last 28 days, [since, until) in Pacific Time) compared with the preceding window of equal length: followers…"
     },
     {
+      "name": "facebook_get_posts_insights",
+      "description": "Lifetime insights for several posts in one call, as a compact table: one row per post with `values` (one scalar per metric) and unaggregated `breakdowns` (e.g. reactions…"
+    },
+    {
       "name": "facebook_list_comments",
       "description": "List the comments on a post, photo, video or another comment, newest-first by default."
     },

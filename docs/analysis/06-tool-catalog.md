@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 29 read tools. The published counts (46 tools / 7 packages, 38 in the default
-> profile, 29 read / 17 write) are asserted there too. `src/metadata.test.ts`
+> the 30 read tools. The published counts (47 tools / 7 packages, 39 in the default
+> profile, 30 read / 17 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (38 tools as shipped) — the `ads` package is
++ insights + moderation + messages** (39 tools as shipped) — the `ads` package is
 **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -92,6 +92,7 @@ stays ungated.
 | `facebook_post_insights` | true | false | true | true | `post_media_view`, `post_clicks`, reactions totals, video metrics. **Reels metrics are NOT reachable here** — they live on `/{video-id}/video_insights`, off the post-insights edge (G-TOOL-2); the description redirects to `facebook_reel_insights` |
 | `facebook_reel_insights` | true | false | true | true | `/{video-id}/video_insights` — the Reel edge (G-TOOL-2). Takes the **video ID** (digits only), not a `{page-id}_{post-id}` composite, which the schema rejects before any Graph call. Default period `lifetime`; same reshape/cap/aggregate contract (v2 `kind`/`aggregation`/`value`, `[since, until)` in UTC) as the other two. Metric vocabulary is its own — unknown names are reported, never silently dropped | |
 | `facebook_get_page_report` | true | false | true | true | v2 F2. One-call Page report: a preset (`last_7/28/90_days`, ending today 00:00 PT, exclusive) or `custom` window vs the preceding equal window — followers (reconciled), reach, views, engagement, Page views with `method` + `delta {abs, pct}`, plus top posts published in the window with lifetime insights. Reach only from the rolling `week`/`days_28` window, never summed; other spans report it unavailable. ≤18 Graph calls; only the current-window read is load-bearing, every other section degrades to a note/error |
+| `facebook_get_posts_insights` | true | false | true | true | v2 F4. Lifetime insights for up to 25 posts in one table: `post_ids` (composite `{page}_{post}`, own Page only) or `latest` N published posts, ≤10 `metrics` (default views, unique viewers, clicks, reactions by type). The metric list is vetted once on the first post that answers (renamed/rejected names dropped for the rest); 3 reads in flight; a failing post is a row `error`, only all rows failing throws. Breakdown maps stay unaggregated |
 
 ## Package `moderation` (profile `moderator`)
 
@@ -182,9 +183,9 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 38 model-facing tools in the default `core` profile** (core 4
-+ posts 8 + reader 7 + insights 4 + moderation 11 + messages 4), with the opt-in
-`ads` package adding 8 more — **46 across all 7 packages**, split 29 read
+**Total as shipped: 39 model-facing tools in the default `core` profile** (core 4
++ posts 8 + reader 7 + insights 5 + moderation 11 + messages 4), with the opt-in
+`ads` package adding 8 more — **47 across all 7 packages**, split 30 read
 / 17 write (13 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than

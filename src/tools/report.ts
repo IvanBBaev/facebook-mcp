@@ -9,8 +9,17 @@
 
 import { z } from 'zod';
 
+import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type { ToolAnnotations, ToolSpec } from '../core/index.js';
 import { INSIGHTS_CONTRACT_VERSION } from '../api/insights.js';
+import {
+  DEFAULT_POSTS_INSIGHTS_METRICS,
+  POSTS_INSIGHTS_MAX,
+  POSTS_INSIGHTS_MAX_METRICS,
+  fetchPostsInsights,
+  latestPostTargets,
+  type PostTarget,
+} from '../api/insights-batch.js';
 import {
   DEFAULT_REPORT_WINDOW,
   DEFAULT_TOP_POSTS,
@@ -114,6 +123,110 @@ export function createPageReportTool(): ToolSpec {
         pageId: resolved.pageId,
         contractVersion: INSIGHTS_CONTRACT_VERSION,
         ...report,
+      });
+    },
+  });
+}
+
+const postsInsightsArgs = {
+  profile: profileArg,
+  post_ids: z
+    .array(z.string().regex(/^\d+_\d+$/, 'Use a {page-id}_{post-id} post ID.'))
+    .min(1)
+    .max(POSTS_INSIGHTS_MAX)
+    .optional()
+    .describe(
+      `Post IDs ({page-id}_{post-id}) to compare, 1-${String(POSTS_INSIGHTS_MAX)}. Exactly one of post_ids or latest.`,
+    ),
+  latest: z
+    .number()
+    .int()
+    .min(1)
+    .max(POSTS_INSIGHTS_MAX)
+    .optional()
+    .describe('Instead of post_ids: the N most recent published posts.'),
+  metrics: z
+    .array(
+      z
+        .string()
+        .trim()
+        .toLowerCase()
+        .min(1)
+        .regex(/^[^,]+$/, 'Pass one metric name per array entry.'),
+    )
+    .min(1)
+    .max(POSTS_INSIGHTS_MAX_METRICS)
+    .default([...DEFAULT_POSTS_INSIGHTS_METRICS])
+    .describe(
+      'Lifetime post metric names (the table columns). Vetted once, on the first post: a dead or rejected name is dropped for the rest.',
+    ),
+};
+
+function exactlyOneSourceError(): GraphApiError {
+  const message =
+    'Pass exactly one of `post_ids` (the posts to compare) or `latest` (the N most recent published posts).';
+  return new GraphApiError(message, {
+    code: 100,
+    httpStatus: 400,
+    action: classifyGraphError({ code: 100, message }),
+  });
+}
+
+/** Build the facebook_get_posts_insights tool (added to the `insights` package). */
+export function createPostsInsightsTool(): ToolSpec {
+  return defineTool({
+    name: 'facebook_get_posts_insights',
+    title: 'Posts Insights',
+    description:
+      'Lifetime insights for several posts in one call, as a compact table: one ' +
+      'row per post with `values` (one scalar per metric) and unaggregated ' +
+      '`breakdowns` (e.g. reactions by type). Pass `post_ids` or `latest` (the N ' +
+      'most recent published posts). Defaults to views, unique viewers, clicks ' +
+      'and reactions by type. A post Graph refuses, or one on another Page, gets ' +
+      'a row `error` instead of failing the call. For one post with full ' +
+      'summaries use facebook_post_insights.',
+    inputSchema: z.object(postsInsightsArgs),
+    annotations: READ_ONLY,
+    handler: async (input, ctx) => {
+      // Before the Page is resolved: a malformed request needs no token.
+      if ((input.post_ids === undefined) === (input.latest === undefined)) {
+        throw exactlyOneSourceError();
+      }
+      const resolved = await ctx.pages.resolvePage(input.profile);
+      const signal = ctx.signal !== undefined ? { signal: ctx.signal } : {};
+      const posts: PostTarget[] =
+        input.post_ids !== undefined
+          ? [...new Set(input.post_ids)].map((postId) => ({ postId }))
+          : await latestPostTargets(ctx.fbRequest, {
+              pageId: resolved.pageId,
+              token: resolved.token,
+              limit: input.latest as number,
+              ...signal,
+            });
+      if (posts.length === 0) {
+        return shapeFor(ctx, {
+          profile: input.profile ?? null,
+          pageId: resolved.pageId,
+          contractVersion: INSIGHTS_CONTRACT_VERSION,
+          period: 'lifetime',
+          columns: [],
+          posts: [],
+          notes: ['The Page has no published posts.'],
+        });
+      }
+      const table = await fetchPostsInsights(ctx.fbRequest, {
+        pageId: resolved.pageId,
+        token: resolved.token,
+        posts,
+        metrics: input.metrics,
+        nowMs: ctx.clock.now(),
+        ...signal,
+      });
+      return shapeFor(ctx, {
+        profile: input.profile ?? null,
+        pageId: resolved.pageId,
+        contractVersion: INSIGHTS_CONTRACT_VERSION,
+        ...table,
       });
     },
   });

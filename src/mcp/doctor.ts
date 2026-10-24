@@ -132,6 +132,8 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_reel_insights: ['read_insights'],
   // v2 F2: Page insights plus the published_posts scan for the top posts.
   facebook_get_page_report: ['read_insights', 'pages_read_engagement'],
+  // v2 F4: post insights, plus the published_posts read behind `latest`.
+  facebook_get_posts_insights: ['read_insights', 'pages_read_engagement'],
 
   // moderation (V05/V06) — the delete/private-reply split (doc 04, CC-AUTH-4)
   // The tool's description: pages_read_engagement, plus pages_read_user_content

@@ -1,4 +1,5 @@
-// Tests for facebook_get_page_report (v2 insights F2) at the tool boundary: the
+// Tests for facebook_get_page_report (v2 insights F2) and
+// facebook_get_posts_insights (F4) at the tool boundary: the
 // schema defaults, the window validation that runs before the Page is resolved,
 // the result envelope and the token / paging hygiene of the serialized output.
 // The report's derivations are covered in `../api/page-report.test.ts`.
@@ -267,4 +268,140 @@ test('get_page_report: the schema bounds top_posts and validates date shape', ()
   assert.equal(parsed.compare, true);
   assert.equal(parsed.top_posts, 5);
   assert.equal(parsed.top_by, 'engagement');
+});
+
+// ---------------------------------------------------------------------------
+// facebook_get_posts_insights
+// ---------------------------------------------------------------------------
+
+function postsTool(): ToolSpec {
+  const spec = createInsightsPackage().tools.find(
+    (t) => t.name === 'facebook_get_posts_insights',
+  );
+  assert.ok(spec, 'expected facebook_get_posts_insights in the insights package');
+  return spec;
+}
+
+function servePostInsights(fb: FakeFbRequest, postId: string, views: number): void {
+  fb.on(
+    (req) => req.path === `/${postId}/insights`,
+    fbOk({
+      data: [{ name: 'post_media_view', period: 'lifetime', values: [{ value: views }] }],
+    }),
+  );
+}
+
+test('get_posts_insights: post_ids reads each post once with the Page token', async () => {
+  const { fb, ctx } = makeCtx();
+  const spec = postsTool();
+  servePostInsights(fb, `${PAGE_ID}_1`, 10);
+  servePostInsights(fb, `${PAGE_ID}_2`, 20);
+
+  const parsed = body(
+    await spec.handler(
+      spec.inputSchema.parse({
+        post_ids: [`${PAGE_ID}_1`, `${PAGE_ID}_2`, `${PAGE_ID}_1`],
+        metrics: ['Post_Media_View'],
+      }),
+      ctx,
+    ),
+  );
+
+  assert.equal(parsed.pageId, PAGE_ID);
+  assert.equal(parsed.contractVersion, INSIGHTS_CONTRACT_VERSION);
+  assert.equal(parsed.period, 'lifetime');
+  assert.deepEqual(parsed.columns, ['post_media_view']);
+  const posts = parsed.posts as { postId: string; values: Record<string, number> }[];
+  assert.deepEqual(
+    posts.map((p) => [p.postId, p.values.post_media_view]),
+    [
+      [`${PAGE_ID}_1`, 10],
+      [`${PAGE_ID}_2`, 20],
+    ],
+  );
+  assert.equal(fb.calls.length, 2, 'a repeated id is read once');
+  for (const req of fb.calls) assert.equal(req.token, PAGE_TOKEN);
+  assert.ok(!JSON.stringify(parsed).includes(PAGE_TOKEN));
+});
+
+test('get_posts_insights: latest reads published_posts first', async () => {
+  const { fb, ctx } = makeCtx();
+  const spec = postsTool();
+  fb.on(
+    (req) => req.path === `/${PAGE_ID}/published_posts`,
+    fbOk(
+      withPaging(
+        { data: [{ id: `${PAGE_ID}_3`, created_time: '2026-10-22T09:00:00+0000' }] },
+        `/${PAGE_ID}/published_posts`,
+      ),
+    ),
+  );
+  servePostInsights(fb, `${PAGE_ID}_3`, 33);
+
+  const text =
+    (await spec.handler(spec.inputSchema.parse({ latest: 5 }), ctx)).content[0]?.text ??
+    '';
+  const parsed = JSON.parse(text) as { posts: { postId: string; createdTime: string }[] };
+
+  assert.equal(fb.calls[0]?.path, `/${PAGE_ID}/published_posts`);
+  assert.equal(param(fb.calls[0], 'limit'), 5);
+  assert.deepEqual(parsed.posts[0], {
+    postId: `${PAGE_ID}_3`,
+    createdTime: '2026-10-22T09:00:00+0000',
+    values: { post_media_view: 33 },
+  });
+  assert.ok(!text.includes('paging'));
+  assert.ok(!text.includes(PAGE_TOKEN));
+});
+
+test('get_posts_insights: a Page with no posts is an empty table, not an error', async () => {
+  const { fb, ctx } = makeCtx();
+  const spec = postsTool();
+  fb.on((req) => req.path === `/${PAGE_ID}/published_posts`, fbOk({ data: [] }));
+
+  const parsed = body(await spec.handler(spec.inputSchema.parse({ latest: 3 }), ctx));
+
+  assert.deepEqual(parsed.posts, []);
+  assert.ok((parsed.notes as string[]).includes('The Page has no published posts.'));
+  assert.equal(fb.calls.length, 1);
+});
+
+test('get_posts_insights: exactly one of post_ids / latest, checked before the Page is resolved', async () => {
+  for (const input of [{}, { post_ids: [`${PAGE_ID}_1`], latest: 2 }]) {
+    const { fb, pages, ctx } = makeCtx();
+    const spec = postsTool();
+    await assert.rejects(
+      spec.handler(spec.inputSchema.parse(input), ctx),
+      (err: unknown) => err instanceof GraphApiError && err.code === 100,
+      JSON.stringify(input),
+    );
+    assert.equal(pages.resolveCalls.length, 0);
+    assert.equal(fb.calls.length, 0);
+  }
+});
+
+test('get_posts_insights: the schema bounds ids, latest and metrics', () => {
+  const schema = postsTool().inputSchema;
+  const ids = (n: number): string[] =>
+    Array.from({ length: n }, (_, i) => `${PAGE_ID}_${String(i)}`);
+  assert.equal(schema.safeParse({ post_ids: ids(26) }).success, false);
+  assert.equal(schema.safeParse({ post_ids: ids(25) }).success, true);
+  assert.equal(schema.safeParse({ post_ids: ['not-a-post'] }).success, false);
+  assert.equal(schema.safeParse({ latest: 0 }).success, false);
+  assert.equal(schema.safeParse({ latest: 26 }).success, false);
+  assert.equal(
+    schema.safeParse({
+      latest: 1,
+      metrics: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k'],
+    }).success,
+    false,
+  );
+  assert.equal(schema.safeParse({ latest: 1, metrics: ['a,b'] }).success, false);
+  const parsed = schema.parse({ latest: 1 }) as Record<string, unknown>;
+  assert.deepEqual(parsed.metrics, [
+    'post_media_view',
+    'post_total_media_view_unique',
+    'post_clicks',
+    'post_reactions_by_type_total',
+  ]);
 });

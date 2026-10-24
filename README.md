@@ -403,6 +403,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_post_insights`        | `read_insights`                                                       |
 | `facebook_reel_insights`        | `read_insights`                                                       |
 | `facebook_get_page_report`      | `read_insights`, `pages_read_engagement`                              |
+| `facebook_get_posts_insights`   | `read_insights`, `pages_read_engagement`                              |
 | `facebook_list_comments`        | `pages_read_engagement`, `pages_read_user_content`                    |
 | `facebook_get_comment`          | `pages_read_engagement`, `pages_read_user_content`                    |
 | `facebook_reply_to_comment`     | `pages_manage_engagement`                                             |
@@ -452,7 +453,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                                                                      |
 | `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                                                                 |
 | `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                                                                   |
-| `insights`   |       yes       | 4 read           |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report and post-2025 metric-rename guidance (read-only).                                                                               |
+| `insights`   |       yes       | 5 read           |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                     |
 | `moderation` |       yes       | 2 read + 9 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                               |
 | `messages`   |       yes       | 3 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window; or ask what is new since the last look. Plan-first by default. |
 | `ads`        | **no** (opt-in) | 7 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status and budget control. Off by default.                                  |
@@ -461,7 +462,7 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: tools -->
 
-**46 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**47 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                            |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -488,6 +489,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `insights`   | `facebook_post_insights`        |     `read`     | Read Graph insights for one published post (post_media_view, post_clicks, post_reactions_by_type_total, video metrics, ...) in the same compact flat shape as…             |
 | `insights`   | `facebook_reel_insights`        |     `read`     | Read Graph insights for one Reel from /{video-id}/video_insights — the edge Reel metrics actually live on, which facebook_post_insights cannot reach.                      |
 | `insights`   | `facebook_get_page_report`      |     `read`     | One-call Page performance report over a window (default last 28 days, [since, until) in Pacific Time) compared with the preceding window of equal length: followers…       |
+| `insights`   | `facebook_get_posts_insights`   |     `read`     | Lifetime insights for several posts in one call, as a compact table: one row per post with `values` (one scalar per metric) and unaggregated `breakdowns` (e.g. reactions… |
 | `moderation` | `facebook_list_comments`        |     `read`     | List the comments on a post, photo, video or another comment, newest-first by default.                                                                                     |
 | `moderation` | `facebook_get_comment`          |     `read`     | Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window).                                              |
 | `moderation` | `facebook_reply_to_comment`     |  `reversible`  | Post a PUBLIC reply under a comment — visible to everyone who can see the thread.                                                                                          |

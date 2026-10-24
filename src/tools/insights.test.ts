@@ -236,6 +236,7 @@ test('createInsightsPackage builds the default-on, read-only package with four t
       'facebook_post_insights',
       'facebook_reel_insights',
       'facebook_get_page_report',
+      'facebook_get_posts_insights',
     ],
   );
   for (const t of pkg.tools) {

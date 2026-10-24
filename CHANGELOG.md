@@ -73,6 +73,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_get_posts_insights` compares posts in one call** (insights,
+  read-only). Pass up to 25 `post_ids` or `latest` N (1–25) published posts
+  and up to 10 `metrics` (default `post_media_view`,
+  `post_total_media_view_unique`, `post_clicks`,
+  `post_reactions_by_type_total`); the result is one lifetime table with a row
+  per post — scalar `values` plus unaggregated `breakdowns`. The metric list is
+  vetted once on the first post that answers, so a renamed or rejected name
+  costs one call, not one per post, and is reported in `deprecatedMetrics` /
+  `rejectedMetrics`; `emptyMetrics` names columns no post had data for. Posts
+  are read three at a time. A post on another Page or one Graph refuses becomes
+  a row `error`; the call throws only when every row failed.
 - **`facebook_get_activity_since` answers "what is new since I last looked?"**
   (messages, read-only). One call returns the new comments and replies on the
   most recent published posts (`posts`, default 10, max 25) and the Messenger

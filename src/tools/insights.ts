@@ -56,7 +56,7 @@ import {
   type InsightsScope,
 } from '../api/insights.js';
 import { defineTool } from '../mcp/index.js';
-import { createPageReportTool } from './report.js';
+import { createPageReportTool, createPostsInsightsTool } from './report.js';
 import { profileArg, shapeFor, videoIdArg } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ async function readInsights(
 // ---------------------------------------------------------------------------
 
 /**
- * Build the `insights` package: four read-only tools, on by default (doc 06 —
+ * Build the `insights` package: five read-only tools, on by default (doc 06 —
  * `insights` is part of the default profile expansion).
  */
 export function createInsightsPackage(): PackageSpec {
@@ -461,9 +461,16 @@ export function createInsightsPackage(): PackageSpec {
     title: 'Insights',
     description:
       'Page, post and Reel insights: compact reshaped metric series, ' +
-      'semantics-aware summaries, a one-call Page report and post-2025 ' +
+      'semantics-aware summaries, a one-call Page report, a posts comparison ' +
+      'table and post-2025 ' +
       'metric-rename guidance (read-only).',
-    tools: [pageInsights, postInsights, reelInsights, createPageReportTool()],
+    tools: [
+      pageInsights,
+      postInsights,
+      reelInsights,
+      createPageReportTool(),
+      createPostsInsightsTool(),
+    ],
     enabledByDefault: true,
   };
 }
