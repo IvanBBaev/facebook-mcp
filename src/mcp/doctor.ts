@@ -159,6 +159,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_list_adsets: ['ads_read'],
   facebook_list_ads: ['ads_read'],
   facebook_get_ad_object: ['ads_read'],
+  facebook_get_ad_preview: ['ads_read'],
   facebook_ads_insights: ['ads_read'],
   facebook_ads_report_status: ['ads_read'],
   facebook_update_ad_object: ['ads_management'],

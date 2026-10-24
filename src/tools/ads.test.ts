@@ -209,6 +209,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
     facebook_list_adsets: [true, false, true, true],
     facebook_list_ads: [true, false, true, true],
     facebook_get_ad_object: [true, false, true, true],
+    facebook_get_ad_preview: [true, false, true, true],
     facebook_ads_insights: [true, false, true, true],
     facebook_ads_report_status: [true, false, true, true],
     facebook_update_ad_object: [false, true, true, true],
@@ -485,6 +486,86 @@ test('facebook_get_ad_object reads /{id} and passes the level through', async ()
   assert.equal(req.path, `/${CAMPAIGN_ID}`);
   assert.equal(result.level, 'campaign');
   assert.equal(obj(result.object).id, CAMPAIGN_ID);
+});
+
+// ---------------------------------------------------------------------------
+// 3a. facebook_get_ad_preview
+// ---------------------------------------------------------------------------
+
+const PREVIEW_SRC =
+  'https://www.facebook.com/ads/api/preview_iframe.php?d=AQPLACEHOLDER&t=AQPLACEHOLDERTOKEN';
+
+function previewAnswer(): Record<string, unknown> {
+  return {
+    data: [{ body: `<iframe src="${PREVIEW_SRC.replace(/&/g, '&amp;')}"></iframe>` }],
+  };
+}
+
+test('facebook_get_ad_preview renders an ad in the default placement', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(() => true, fbOk(previewAnswer()));
+
+  const result = body(
+    await tool('facebook_get_ad_preview').handler(
+      { source: { kind: 'ad', id: '120200000000001' } },
+      ctx,
+    ),
+  );
+
+  const req = fb.lastRequest();
+  assert.ok(req && isJson(req));
+  assert.equal(req.method, 'GET');
+  assert.equal(req.path, '/120200000000001/previews');
+  assert.deepEqual(req.params, { ad_format: 'MOBILE_FEED_STANDARD' });
+  assert.equal(result.iframeSrc, PREVIEW_SRC);
+  assert.equal(result.adFormat, 'MOBILE_FEED_STANDARD');
+  assert.equal(result.validUntil, new Date(NOW_MS + 24 * 60 * 60 * 1000).toISOString());
+  assert.ok(
+    !text(
+      await tool('facebook_get_ad_preview').handler(
+        { source: { kind: 'ad', id: '120200000000001' } },
+        ctx,
+      ),
+    ).includes('<iframe'),
+    'the HTML never reaches the model',
+  );
+});
+
+test('facebook_get_ad_preview renders a Page post through the ad account', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(() => true, fbOk(previewAnswer()));
+
+  await tool('facebook_get_ad_preview').handler(
+    { source: { kind: 'post', id: '900_555' }, ad_format: 'INSTAGRAM_REELS' },
+    ctx,
+  );
+
+  const req = fb.lastRequest();
+  assert.ok(req && isJson(req));
+  assert.equal(req.path, `/${ACCOUNT_ID}/generatepreviews`);
+  assert.deepEqual(req.params, {
+    ad_format: 'INSTAGRAM_REELS',
+    creative: '{"object_story_id":"900_555"}',
+  });
+});
+
+test('facebook_get_ad_preview refuses malformed sources before any request', async () => {
+  const { fb, ctx } = makeHarness();
+  const refused: Record<string, unknown>[] = [
+    { source: { kind: 'ad', id: '900_555' } },
+    { source: { kind: 'creative', id: 'act_1' } },
+    { source: { kind: 'post', id: '555' } },
+    { source: { kind: 'ad', id: '..' } },
+    { source: { kind: 'ad', id: '1' }, ad_format: 'BANNER' },
+  ];
+  for (const args of refused) {
+    await assert.rejects(
+      () => tool('facebook_get_ad_preview').handler(args, ctx),
+      Error,
+      JSON.stringify(args),
+    );
+  }
+  assert.equal(fb.calls.length, 0);
 });
 
 test('an Ads Manager URL is rejected by the schema before any request', async () => {

@@ -419,6 +419,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_list_adsets`          | `ads_read`                                                            |
 | `facebook_list_ads`             | `ads_read`                                                            |
 | `facebook_get_ad_object`        | `ads_read`                                                            |
+| `facebook_get_ad_preview`       | `ads_read`                                                            |
 | `facebook_ads_insights`         | `ads_read`                                                            |
 | `facebook_ads_report_status`    | `ads_read`                                                            |
 | `facebook_update_ad_object`     | `ads_management`                                                      |
@@ -443,21 +444,21 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: packages -->
 
-| Package      |  On by default  | Tools            | Default write mode | What it covers                                                                                                                                                                                          |
-| ------------ | :-------------: | ---------------- | :----------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                              |
-| `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                         |
-| `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                           |
-| `insights`   |       yes       | 3 read           |         —          | Page, post and Reel insights: compact reshaped metric series, aggregate totals and post-2025 metric-rename guidance (read-only).                                                                        |
-| `moderation` |       yes       | 2 read + 9 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                       |
-| `messages`   |       yes       | 2 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window. Plan-first by default. |
-| `ads`        | **no** (opt-in) | 6 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, insights with async report runs, and plan-gated status and budget control. Off by default.              |
+| Package      |  On by default  | Tools            | Default write mode | What it covers                                                                                                                                                                                                 |
+| ------------ | :-------------: | ---------------- | :----------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`       |       yes       | 4 read           |         —          | Always-on identity, Page discovery and rate-limit diagnostics (read-only).                                                                                                                                     |
+| `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                                |
+| `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                                  |
+| `insights`   |       yes       | 3 read           |         —          | Page, post and Reel insights: compact reshaped metric series, aggregate totals and post-2025 metric-rename guidance (read-only).                                                                               |
+| `moderation` |       yes       | 2 read + 9 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                              |
+| `messages`   |       yes       | 2 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window. Plan-first by default.        |
+| `ads`        | **no** (opt-in) | 7 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status and budget control. Off by default. |
 
 <!-- END GENERATED -->
 
 <!-- BEGIN GENERATED: tools -->
 
-**43 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**44 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                            |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -501,6 +502,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `ads`        | `facebook_list_adsets`          |     `read`     | List ad sets under one ad account, a cursor page at a time.                                                                                                                |
 | `ads`        | `facebook_list_ads`             |     `read`     | List individual ads under one ad account, a cursor page at a time.                                                                                                         |
 | `ads`        | `facebook_get_ad_object`        |     `read`     | Read one campaign, ad set or ad by id.                                                                                                                                     |
+| `ads`        | `facebook_get_ad_preview`       |     `read`     | Show how an existing ad, an existing ad creative, or a Page post used as an ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD).                  |
 | `ads`        | `facebook_ads_insights`         |     `read`     | Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad.                                                          |
 | `ads`        | `facebook_ads_report_status`    |     `read`     | Probe one async insights report run and, with fetch_results:true, read its rows once it has completed.                                                                     |
 | `ads`        | `facebook_update_ad_object`     |    `spend`     | Pause or resume an ads object, or change its budget.                                                                                                                       |

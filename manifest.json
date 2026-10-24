@@ -210,6 +210,10 @@
       "description": "Read one campaign, ad set or ad by id."
     },
     {
+      "name": "facebook_get_ad_preview",
+      "description": "Show how an existing ad, an existing ad creative, or a Page post used as an ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD)."
+    },
+    {
       "name": "facebook_ads_insights",
       "description": "Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad."
     },

@@ -14,7 +14,7 @@
 // README table and `manifest.json` agree on tool NAMES. Neither freezes all four
 // booleans for the whole surface in one place, which is what this file does:
 //
-//   * ANNOTATION_MANIFEST below is a frozen literal — 43 rows, one per tool.
+//   * ANNOTATION_MANIFEST below is a frozen literal — 44 rows, one per tool.
 //     Changing a hint anywhere in `src/tools/` fails here until the row is
 //     edited too, which is the point: the edit is the review.
 //   * The table and the registry must agree in BOTH directions, so a new tool
@@ -195,6 +195,7 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_list_adsets', true, false, true, true, undefined],
   ['facebook_list_ads', true, false, true, true, undefined],
   ['facebook_get_ad_object', true, false, true, true, undefined],
+  ['facebook_get_ad_preview', true, false, true, true, undefined],
   ['facebook_ads_insights', true, false, true, true, undefined],
   ['facebook_ads_report_status', true, false, true, true, undefined],
   ['facebook_update_ad_object', false, true, true, true, 'spend'],
@@ -394,7 +395,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 43 tools across 7 packages', () => {
+test('the full surface is 44 tools across 7 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -407,12 +408,12 @@ test('the full surface is 43 tools across 7 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    43,
+    44,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    43,
+    44,
     'the frozen manifest lost or gained a row',
   );
 });
@@ -437,16 +438,16 @@ test('the default `core` profile ships 36 tools — everything except `ads`', ()
   );
   assert.equal(
     REGISTRY.tools.length - byDefault.tools.length,
-    7,
-    'the `ads` package no longer accounts for the 7-tool gap between all and default',
+    8,
+    'the `ads` package no longer accounts for the 8-tool gap between all and default',
   );
 });
 
-test('the surface splits 26 read / 17 write (13 reversible, 3 irreversible, 1 spend)', () => {
+test('the surface splits 27 read / 17 write (13 reversible, 3 irreversible, 1 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
-  assert.equal(read.length, 26, 'the read-only tool count changed (doc 06 quotes 26)');
+  assert.equal(read.length, 27, 'the read-only tool count changed (doc 06 quotes 27)');
   assert.equal(write.length, 17, 'the write tool count changed (doc 06 quotes 17)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 

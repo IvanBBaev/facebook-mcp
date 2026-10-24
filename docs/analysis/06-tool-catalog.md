@@ -26,8 +26,8 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` throughout, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 26 read tools. The published counts (43 tools / 7 packages, 36 in the default
-> profile, 26 read / 17 write) are asserted there too. `src/metadata.test.ts`
+> the 27 read tools. The published counts (44 tools / 7 packages, 36 in the default
+> profile, 27 read / 17 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
@@ -148,6 +148,7 @@ env-bypassed) and are gated by `FB_ADS_BUDGET_CEILING`.
 | `facebook_list_adsets` | true | false | true | true | `effective_status` surfaced prominently |
 | `facebook_list_ads` | true | false | true | true | `effective_status` surfaced prominently |
 | `facebook_get_ad_object` | true | false | true | true | Any level by ID with field selection |
+| `facebook_get_ad_preview` | true | false | true | true | Placement preview of an ad, a creative or a Page post as an ad; returns the iframe URL only |
 | `facebook_update_ad_object` | false | true | true | true | Status pause/resume + budget changes (minor units). Budget overwrites lose the prior value → `destructiveHint:true`; setting to a fixed value repeats to the same state → `idempotentHint:true` |
 | `facebook_ads_insights` | true | false | true | true | Tried **synchronously first**; when Graph refuses the query for being too large, an async report run is started automatically and the result comes back with `mode:"async"`, a `reportRunId` and **no rows** — the caller polls `facebook_ads_report_status` instead of retrying this tool (CC-ADS-5). Window is either a `date_preset` or a since/until pair (both or neither); breakdowns with row caps + `truncated` |
 | `facebook_ads_report_status` | true | false | true | true | Probes one async report run and, with `fetch_results:true`, reads its rows once complete. **One call, one answer** — it never sleeps and never loops; the phase (pending / running / complete / failed / skipped) and a stop-polling hint come back to the model, which owns the wait. A FAILED or SKIPPED run produced nothing and must be replaced by a narrower run, not re-probed (there is no cancel API) |
@@ -181,7 +182,7 @@ create-chain, `upload_ad_image`, and `delete_ad_object` — see 08.
 
 **Total as shipped: 36 model-facing tools in the default `core` profile** (core 4
 + posts 8 + reader 7 + insights 3 + moderation 11 + messages 3), with the opt-in
-`ads` package adding 7 more in 1.1 — **43 across all 7 packages**, split 26 read
+`ads` package adding 8 more — **44 across all 7 packages**, split 27 read
 / 17 write (13 reversible, 3 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than

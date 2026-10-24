@@ -37,6 +37,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_get_ad_preview` shows how an ad would render** (ads, read-only).
+  `source` is `{kind:'ad'|'creative', id}` for an existing ad or creative
+  (`GET /{id}/previews`) or `{kind:'post', id:'<page>_<post>'}` for a Page post
+  used as an ad (`GET /act_{id}/generatepreviews`, through `ad_account_id` or
+  `FB_AD_ACCOUNT_ID`). `ad_format` picks one of nine common placements
+  (default `MOBILE_FEED_STANDARD`). Only the preview iframe's `src` is returned,
+  and only when it is an https facebook.com URL, together with `validUntil`
+  (about 24 hours); the surrounding HTML never reaches the model. The tool logs
+  no fields, since the URL carries a short-lived view token. Needs `ads_read`.
+
 - **`facebook_reply_to_comment` can attach a photo or a GIF** (moderation). The
   new optional `attachment` takes `{kind:'image_url', url}` (sent as
   `attachment_url`), `{kind:'gif_url', url}` (sent as `attachment_share_url`) or

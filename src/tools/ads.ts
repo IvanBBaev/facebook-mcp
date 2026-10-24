@@ -11,6 +11,8 @@
 //     fallback for queries Graph refuses to answer synchronously.
 //   * facebook_ads_report_status  — probe one async run and, on request, read its
 //     rows once it is complete.
+//   * facebook_get_ad_preview     — how an ad, a creative or a Page post as an
+//     ad renders in one placement; creates nothing.
 //   * facebook_update_ad_object   — pause/resume and budget changes, plan-gated.
 //
 // Division of labour with `../api/ads-read.js` and `../api/ads-control.js`
@@ -69,6 +71,13 @@ import {
   assertAdAccountUsable,
 } from '../api/ads-read.js';
 import type { AdWriteIntent } from '../api/ads-read.js';
+import {
+  DEFAULT_PREVIEW_FORMAT,
+  PREVIEW_FORMATS,
+  generateAdPreview,
+  normalizeObjectStoryId,
+  type PreviewSource,
+} from '../api/ads-preview.js';
 import {
   SETTABLE_STATUSES,
   applyAdObjectUpdate,
@@ -150,6 +159,28 @@ const objectIdArg = z
   .describe(
     'The campaign, ad set or ad to act on, by id. Ids come from the listing tools; Ads Manager URLs are rejected.',
   );
+
+const previewSourceArg = z
+  .object({
+    kind: z
+      .enum(['ad', 'creative', 'post'])
+      .describe(
+        'ad ⇒ an existing ad (`id` from facebook_list_ads); creative ⇒ an existing ad creative; ' +
+          'post ⇒ a Page post rendered as an ad (`id` in the "<page-id>_<post-id>" form), ' +
+          'read through the ad account.',
+      ),
+    id: z
+      .string()
+      .trim()
+      .min(1)
+      .regex(
+        AD_OBJECT_ID_SHAPE,
+        'Expected a numeric ad / creative id, or "<page-id>_<post-id>" for a post — not a URL.',
+      )
+      .describe('The ad, creative or post id.'),
+  })
+  .strict()
+  .describe('What to preview.');
 
 const levelArg = z
   .enum(AD_LEVELS)
@@ -600,6 +631,62 @@ export function createAdsPackage(): PackageSpec {
     },
   });
 
+  // No `logFields`: the arguments are an object id and a placement, and the
+  // answer carries a short-lived view token that must never reach a log line.
+  const getAdPreview = defineTool({
+    name: 'facebook_get_ad_preview',
+    title: 'Get Ad Preview',
+    description:
+      'Show how an existing ad, an existing ad creative, or a Page post used as an ' +
+      'ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD). ' +
+      'Creates nothing and spends nothing. Returns `iframeSrc`, a facebook.com link ' +
+      'to open in a browser, valid for about 24 hours; it carries a view token, so ' +
+      'do not post it publicly. A post preview needs the ad account ' +
+      '(`ad_account_id` or FB_AD_ACCOUNT_ID). Not every creative renders in every ' +
+      'placement; Meta refuses an unsupported pairing.',
+    inputSchema: z.object({
+      source: previewSourceArg,
+      ad_format: z
+        .enum(PREVIEW_FORMATS)
+        .optional()
+        .describe(`Placement to render. Omitted ⇒ ${DEFAULT_PREVIEW_FORMAT}.`),
+      ad_account_id: adAccountIdArg,
+    }),
+    annotations: READ_ONLY,
+    handler: async (input, ctx) => {
+      let source: PreviewSource;
+      if (input.source.kind === 'post') {
+        source = {
+          kind: 'post',
+          objectStoryId: normalizeObjectStoryId(input.source.id),
+          accountId: resolveAdAccountId(input.ad_account_id, ctx.settings.adAccountId),
+        };
+      } else {
+        if (!/^\d+$/.test(input.source.id)) {
+          throw new GraphApiError(
+            `Invalid ${input.source.kind} id: "${input.source.id}". Ad and creative ids are digits only.`,
+            {
+              code: 100,
+              httpStatus: 400,
+              action: classifyGraphError({ code: 100, message: 'invalid id' }),
+            },
+          );
+        }
+        source =
+          input.source.kind === 'ad'
+            ? { kind: 'ad', adId: input.source.id }
+            : { kind: 'creative', creativeId: input.source.id };
+      }
+      const preview = await generateAdPreview(ctx.fbRequest, {
+        source,
+        adFormat: input.ad_format ?? DEFAULT_PREVIEW_FORMAT,
+        nowMs: ctx.clock.now(),
+        ...signalOf(ctx),
+      });
+      return shapeFor(ctx, { source: input.source, ...preview });
+    },
+  });
+
   const adsInsights = defineTool({
     name: 'facebook_ads_insights',
     title: 'Ads Insights',
@@ -911,13 +998,14 @@ export function createAdsPackage(): PackageSpec {
     title: 'Ads',
     description:
       'Marketing API access: campaign / ad-set / ad listings with delivery truth, ' +
-      'single-object reads, insights with async report runs, and plan-gated ' +
+      'single-object reads, placement previews, insights with async report runs, and plan-gated ' +
       'status and budget control. Off by default.',
     tools: [
       listCampaigns,
       listAdsets,
       listAds,
       getAdObjectTool,
+      getAdPreview,
       adsInsights,
       reportStatus,
       updateAdObject,
