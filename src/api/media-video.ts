@@ -333,6 +333,8 @@ export interface FinishVideoUploadInput extends RequestScope {
   readonly published?: boolean;
   /** Unix seconds for a scheduled publish. */
   readonly scheduledPublishTime?: number;
+  /** The organic `targeting` object, already serialized by the planner. */
+  readonly targeting?: string;
 }
 
 /** What `finish` produced. `note` is always present: created is not ready (CC-MEDIA-7). */
@@ -354,6 +356,7 @@ export interface UploadVideoInput extends RequestScope {
   readonly title?: string;
   readonly published?: boolean;
   readonly scheduledPublishTime?: number;
+  readonly targeting?: string;
   readonly chunkSize?: number;
   readonly fileName?: string;
   readonly onProgress?: UploadProgress;
@@ -1338,6 +1341,7 @@ export async function finishVideoUpload(
       ...(input.scheduledPublishTime !== undefined
         ? { scheduled_publish_time: input.scheduledPublishTime }
         : {}),
+      ...(input.targeting !== undefined ? { targeting: input.targeting } : {}),
     },
     pageId: session.pageId,
     // A lost finish answer is checked on the video status, which needs the id
@@ -1453,6 +1457,7 @@ export async function uploadVideo(
     ...(input.scheduledPublishTime !== undefined
       ? { scheduledPublishTime: input.scheduledPublishTime }
       : {}),
+    ...(input.targeting !== undefined ? { targeting: input.targeting } : {}),
     ...scopeOf(input),
   });
 

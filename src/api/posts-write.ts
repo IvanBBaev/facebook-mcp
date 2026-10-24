@@ -142,6 +142,12 @@ export const VIDEO_CREATED_NOT_READY_NOTE =
 export const UNICODE_PASSTHROUGH_NOTE =
   'Message text is sent verbatim as UTF-8. Hashtags are plain text and @-mentions of other Pages are not supported for third-party apps (CC-PUB-8).';
 
+export const TARGETING_PRIVACY_NOTE =
+  'Targeting narrows who sees the post in Feed; it is not a privacy control — the post stays publicly reachable by link and on the Page.';
+
+export const TARGETING_KEYS_NOTE =
+  'Region/city keys are Meta location ids; look them up in Ads Manager targeting search — the server does not resolve names.';
+
 // ---------------------------------------------------------------------------
 // 2. Local validation failures
 // ---------------------------------------------------------------------------
@@ -161,7 +167,8 @@ export type PostValidationReason =
   | 'no_update_fields'
   | 'unsupported_transition'
   | 'unsupported_media_source'
-  | 'invalid_link';
+  | 'invalid_link'
+  | 'invalid_targeting';
 
 /**
  * A refusal raised locally, before anything was sent. `reason` is the machine
@@ -612,6 +619,7 @@ export interface CreatePostInput {
   readonly childAttachments?: readonly ChildAttachment[];
   /** How many photo sources become carousel children (0 ⇒ a text/link post). */
   readonly photoCount?: number;
+  readonly targeting?: OrganicTargeting;
 }
 
 /** Whether the post goes live now, waits as a draft, or waits for a clock. */
@@ -625,6 +633,8 @@ export interface PostPlan {
   readonly warnings: readonly string[];
   readonly schedule?: ScheduleEcho;
   readonly publishState: PublishState;
+  /** The normalized audience restriction that rides in `params.targeting`. */
+  readonly targetingEcho?: OrganicTargeting;
 }
 
 /**
@@ -753,6 +763,140 @@ function assertWebLinks(
   });
 }
 
+// ---------------------------------------------------------------------------
+// 4a. Organic audience targeting (geo + minimum age)
+// ---------------------------------------------------------------------------
+
+/** The only `age_min` values the publishing `targeting` object documents. */
+export const ORGANIC_AGE_MINS = [13, 15, 18, 21, 25] as const;
+
+export type OrganicAgeMin = (typeof ORGANIC_AGE_MINS)[number];
+
+export interface LocationKey {
+  readonly key: string;
+}
+
+/**
+ * The organic `targeting` object: who sees the post in Feed. Not an ads
+ * targeting spec — Graph documents only `age_min` and `geo_locations` here.
+ */
+export interface OrganicTargeting {
+  readonly age_min?: OrganicAgeMin;
+  readonly geo_locations?: {
+    readonly countries?: readonly string[];
+    readonly regions?: readonly LocationKey[];
+    readonly cities?: readonly LocationKey[];
+  };
+}
+
+/** Server-side guardrails on list length — not Graph limits. */
+export const TARGETING_LIMITS = { countries: 25, regions: 200, cities: 250 } as const;
+
+function targetingError(message: string): PostValidationError {
+  return new PostValidationError('invalid_targeting', message, 'targeting');
+}
+
+function dedupeKeys(
+  list: readonly LocationKey[] | undefined,
+  name: 'regions' | 'cities',
+): LocationKey[] | undefined {
+  if (list === undefined || list.length === 0) return undefined;
+  const seen = new Set<string>();
+  for (const { key } of list) {
+    if (!/^\d+$/.test(key)) {
+      throw targetingError(
+        `targeting.geo_locations.${name} key "${key}" is not a Meta location id (digits only).`,
+      );
+    }
+    seen.add(key);
+  }
+  if (seen.size > TARGETING_LIMITS[name]) {
+    throw targetingError(
+      `targeting.geo_locations.${name} has ${String(seen.size)} keys; at most ${String(TARGETING_LIMITS[name])} are accepted.`,
+    );
+  }
+  return [...seen].map((key) => ({ key }));
+}
+
+/**
+ * Validate and normalize an organic `targeting` object: duplicates are dropped
+ * (first occurrence wins), empty lists are omitted, and a restriction that
+ * restricts nothing is refused rather than sent as `{}`.
+ *
+ * The schema already checks these shapes; this repeats the checks so the
+ * planner is safe to call without it.
+ *
+ * @throws PostValidationError
+ */
+export function normalizeTargeting(input: OrganicTargeting): OrganicTargeting {
+  if (input.age_min !== undefined && !ORGANIC_AGE_MINS.includes(input.age_min)) {
+    throw targetingError(
+      `targeting.age_min ${String(input.age_min)} is not allowed; use one of ${ORGANIC_AGE_MINS.join(', ')}.`,
+    );
+  }
+  let geo: OrganicTargeting['geo_locations'];
+  if (input.geo_locations !== undefined) {
+    const raw = input.geo_locations.countries ?? [];
+    for (const code of raw) {
+      if (!/^[A-Z]{2}$/.test(code)) {
+        throw targetingError(
+          `targeting.geo_locations.countries entry "${code}" is not an uppercase ISO 3166-1 alpha-2 code (e.g. "BG").`,
+        );
+      }
+    }
+    const countries = [...new Set(raw)];
+    if (countries.length > TARGETING_LIMITS.countries) {
+      throw targetingError(
+        `targeting.geo_locations.countries has ${String(countries.length)} codes; at most ${String(TARGETING_LIMITS.countries)} are accepted.`,
+      );
+    }
+    const regions = dedupeKeys(input.geo_locations.regions, 'regions');
+    const cities = dedupeKeys(input.geo_locations.cities, 'cities');
+    if (countries.length === 0 && regions === undefined && cities === undefined) {
+      throw targetingError(
+        'targeting.geo_locations needs at least one non-empty list: countries, regions or cities.',
+      );
+    }
+    geo = {
+      ...(countries.length > 0 ? { countries } : {}),
+      ...(regions !== undefined ? { regions } : {}),
+      ...(cities !== undefined ? { cities } : {}),
+    };
+  }
+  if (input.age_min === undefined && geo === undefined) {
+    throw targetingError('targeting needs age_min or geo_locations (or both).');
+  }
+  return {
+    ...(geo !== undefined ? { geo_locations: geo } : {}),
+    ...(input.age_min !== undefined ? { age_min: input.age_min } : {}),
+  };
+}
+
+/** The summary fragment, e.g. `Audience: countries BG, RO; regions 2 keys; age 18+`. */
+export function describeTargeting(targeting: OrganicTargeting): string {
+  const parts: string[] = [];
+  const geo = targeting.geo_locations;
+  if (geo?.countries !== undefined) parts.push(`countries ${geo.countries.join(', ')}`);
+  const keys = (n: number) => `${String(n)} ${n === 1 ? 'key' : 'keys'}`;
+  if (geo?.regions !== undefined) parts.push(`regions ${keys(geo.regions.length)}`);
+  if (geo?.cities !== undefined) parts.push(`cities ${keys(geo.cities.length)}`);
+  if (targeting.age_min !== undefined) parts.push(`age ${String(targeting.age_min)}+`);
+  return `Audience: ${parts.join('; ')}`;
+}
+
+/** Normalize, then return the param, the summary suffix and the notes in one go. */
+function planTargeting(input: OrganicTargeting | undefined):
+  | {
+      readonly echo: OrganicTargeting;
+      readonly param: string;
+      readonly suffix: string;
+    }
+  | undefined {
+  if (input === undefined) return undefined;
+  const echo = normalizeTargeting(input);
+  return { echo, param: JSON.stringify(echo), suffix: ` ${describeTargeting(echo)}.` };
+}
+
 export function planCreatePost(
   input: CreatePostInput,
   ctx: { readonly nowMs: number; readonly pageTimezone?: string },
@@ -798,6 +942,7 @@ export function planCreatePost(
   }
 
   assertWebLinks(link, children);
+  const targeting = planTargeting(input.targeting);
 
   if (photoCount > 0 && link !== undefined) {
     throw new PostValidationError(
@@ -843,6 +988,7 @@ export function planCreatePost(
     ...(schedule !== undefined && photoCount > 0
       ? { unpublished_content_type: 'SCHEDULED' }
       : {}),
+    ...(targeting !== undefined ? { targeting: targeting.param } : {}),
   };
 
   const warnings: string[] = [publishVerifyNote(publishState), POST_YEAR_CAP_NOTE];
@@ -851,6 +997,7 @@ export function planCreatePost(
   if (link !== undefined) warnings.push(LINK_PREVIEW_NOTE);
   if (publishState === 'draft') warnings.push(DRAFT_TRANSITION_NOTE);
   if (schedule !== undefined) warnings.push(...scheduleWarnings(schedule));
+  if (targeting !== undefined) warnings.push(TARGETING_PRIVACY_NOTE, TARGETING_KEYS_NOTE);
 
   const what =
     photoCount > 0
@@ -862,10 +1009,11 @@ export function planCreatePost(
           : 'a text post';
   return {
     params,
-    summary: `Create ${what} on Page ${input.pageId} ${describeWhen(publishState, schedule)}.`,
+    summary: `Create ${what} on Page ${input.pageId} ${describeWhen(publishState, schedule)}.${targeting?.suffix ?? ''}`,
     warnings,
     ...(schedule !== undefined ? { schedule } : {}),
     publishState,
+    ...(targeting !== undefined ? { targetingEcho: targeting.echo } : {}),
   };
 }
 
@@ -892,6 +1040,7 @@ export interface VideoPostInput {
   readonly scheduledPublishTime?: unknown;
   /** Known for a local file (already stat'ed); absent for a `file_url`. */
   readonly byteLength?: number;
+  readonly targeting?: OrganicTargeting;
 }
 
 /**
@@ -914,6 +1063,7 @@ export function planVideoPost(
   );
   const title = nonEmpty(input.title?.trim());
   assertMessageLength(description);
+  const targeting = planTargeting(input.targeting);
 
   let schedule: ScheduleEcho | undefined;
   let publishState: PublishState;
@@ -940,6 +1090,7 @@ export function planVideoPost(
     ...(publishState === 'published' ? {} : { published: false }),
     ...(schedule !== undefined ? { scheduled_publish_time: schedule.epochSeconds } : {}),
     ...(input.delivery === 'file-url' ? { file_url: input.sourceLabel } : {}),
+    ...(targeting !== undefined ? { targeting: targeting.param } : {}),
   };
 
   const warnings: string[] = [
@@ -957,6 +1108,7 @@ export function planVideoPost(
     );
   }
   if (schedule !== undefined) warnings.push(...scheduleWarnings(schedule));
+  if (targeting !== undefined) warnings.push(TARGETING_PRIVACY_NOTE, TARGETING_KEYS_NOTE);
 
   const from =
     input.delivery === 'file-url'
@@ -965,10 +1117,11 @@ export function planVideoPost(
 
   return {
     params,
-    summary: `Create a video post on Page ${input.pageId} ${from} ${describeWhen(publishState, schedule)}.`,
+    summary: `Create a video post on Page ${input.pageId} ${from} ${describeWhen(publishState, schedule)}.${targeting?.suffix ?? ''}`,
     warnings,
     ...(schedule !== undefined ? { schedule } : {}),
     publishState,
+    ...(targeting !== undefined ? { targetingEcho: targeting.echo } : {}),
   };
 }
 

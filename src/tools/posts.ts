@@ -89,6 +89,7 @@ import {
   publishVerifyNote,
   SCHEDULE_FORMAT_HELP,
   SCHEDULE_TIMEZONE_CAVEAT,
+  TARGETING_LIMITS,
   UPDATE_POST_ACTIONS,
   VIDEO_CREATED_NOT_READY_NOTE,
   assertLocalMediaSource,
@@ -109,6 +110,7 @@ import {
   toMediaSource,
   updatePostRequest,
   videoByUrlRequest,
+  type OrganicTargeting,
   type PostPlan,
   type PostState,
   type PublishState,
@@ -688,6 +690,11 @@ function echoLine(echo: TimeEcho): string {
 }
 
 /** Preview warnings for a create-style plan, with the echo line appended. */
+/** The bound audience, echoed in the preview metadata and the result. */
+function targetingMeta(plan: PostPlan): { targetingEcho?: OrganicTargeting } {
+  return plan.targetingEcho !== undefined ? { targetingEcho: plan.targetingEcho } : {};
+}
+
 function planWarnings(plan: { readonly warnings: readonly string[] }, echo?: TimeEcho) {
   return echo === undefined ? plan.warnings : [...plan.warnings, echoLine(echo)];
 }
@@ -960,6 +967,65 @@ function videoContentType(filename: string): string {
   }
 }
 
+/**
+ * The organic audience restriction shared by the three create tools. Graph
+ * documents only `age_min` and `geo_locations` on the publishing object; the
+ * list caps are this server's guardrails, not Graph limits.
+ */
+const locationKeysArg = (max: number) =>
+  z
+    .array(
+      z
+        .object({
+          key: z.string().regex(/^\d+$/, 'a Meta location id is digits only'),
+        })
+        .strict(),
+    )
+    .max(max);
+
+const targetingArg = z
+  .object({
+    age_min: z
+      .union([z.literal(13), z.literal(15), z.literal(18), z.literal(21), z.literal(25)])
+      .optional()
+      .describe('Minimum viewer age: 13, 15, 18, 21 or 25.'),
+    geo_locations: z
+      .object({
+        countries: z
+          .array(z.string().regex(/^[A-Z]{2}$/, 'an uppercase ISO 3166-1 alpha-2 code'))
+          .min(1)
+          .max(TARGETING_LIMITS.countries)
+          .optional()
+          .describe('Uppercase ISO country codes, e.g. ["BG","RO"].'),
+        regions: locationKeysArg(TARGETING_LIMITS.regions)
+          .optional()
+          .describe(
+            'Region location ids as [{key:"..."}], from Ads Manager targeting search.',
+          ),
+        cities: locationKeysArg(TARGETING_LIMITS.cities)
+          .optional()
+          .describe(
+            'City location ids as [{key:"..."}], from Ads Manager targeting search.',
+          ),
+      })
+      .strict()
+      .refine(
+        (g) =>
+          g.countries !== undefined || g.regions !== undefined || g.cities !== undefined,
+        'geo_locations needs at least one list',
+      )
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (t) => t.age_min !== undefined || t.geo_locations !== undefined,
+    'targeting needs age_min or geo_locations',
+  )
+  .optional()
+  .describe(
+    'Who sees the post in Feed: geo_locations and/or age_min. Narrows distribution only — the post stays publicly reachable by link and on the Page.',
+  );
+
 // ---------------------------------------------------------------------------
 // 7. facebook_create_post
 // ---------------------------------------------------------------------------
@@ -1016,6 +1082,7 @@ function buildCreatePost() {
       published: publishedArg,
       scheduled_publish_time: scheduledPublishTimeArg,
       page_timezone: pageTimezoneArg,
+      targeting: targetingArg,
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
@@ -1048,6 +1115,7 @@ function buildCreatePost() {
               ? { childAttachments: input.child_attachments }
               : {}),
             photoCount: sources.length,
+            ...(input.targeting !== undefined ? { targeting: input.targeting } : {}),
           },
           {
             nowMs: base.nowMs,
@@ -1093,7 +1161,11 @@ function buildCreatePost() {
             'This was a dry run — nothing was posted and no photo was uploaded.',
           classifyOutcome: classifyPublishFailure,
           classifyResult: createPostVerdict,
-          metadata: { publishState: plan.publishState, photoCount: sources.length },
+          metadata: {
+            publishState: plan.publishState,
+            photoCount: sources.length,
+            ...targetingMeta(plan),
+          },
           perform: async (): Promise<CreatePostOutcome> => {
             const scope = requestScope(ctx, base.page);
             let attachedMedia: Readonly<Record<string, string>> = {};
@@ -1132,6 +1204,7 @@ function buildCreatePost() {
                 publishState: plan.publishState,
                 ...(photoIds.length > 0 ? { photoIds } : {}),
                 ...(echo !== undefined ? { schedule: echo } : {}),
+                ...targetingMeta(plan),
                 verifyNote: publishVerifyNote(plan.publishState),
               };
             } catch (err) {
@@ -1186,6 +1259,7 @@ function buildCreatePhotoPost() {
       published: publishedArg,
       scheduled_publish_time: scheduledPublishTimeArg,
       page_timezone: pageTimezoneArg,
+      targeting: targetingArg,
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
@@ -1209,6 +1283,7 @@ function buildCreatePhotoPost() {
               ? { scheduledPublishTime: input.scheduled_publish_time }
               : {}),
             photoCount: 1,
+            ...(input.targeting !== undefined ? { targeting: input.targeting } : {}),
           },
           {
             nowMs: base.nowMs,
@@ -1230,10 +1305,14 @@ function buildCreatePhotoPost() {
           boundSource?.kind === 'local' ? boundSource.sha256 : undefined;
 
         const echo = plan.schedule !== undefined ? toTimeEcho(plan.schedule) : undefined;
-        const extraParams: Record<string, ParamValue> =
-          plan.schedule !== undefined
+        const extraParams: Record<string, ParamValue> = {
+          ...(plan.schedule !== undefined
             ? { scheduled_publish_time: plan.schedule.epochSeconds }
-            : {};
+            : {}),
+          ...(plan.params['targeting'] !== undefined
+            ? { targeting: plan.params['targeting'] }
+            : {}),
+        };
 
         return executeWrite(ctx, {
           tool: 'facebook_create_photo_post',
@@ -1252,7 +1331,10 @@ function buildCreatePhotoPost() {
           resolvedPage: base.page,
           notPerformedNotice: 'This was a dry run — no photo was uploaded or posted.',
           classifyOutcome: classifyPublishFailure,
-          metadata: { publishState: plan.publishState },
+          metadata: {
+            publishState: plan.publishState,
+            ...targetingMeta(plan),
+          },
           perform: async (): Promise<Record<string, unknown>> => {
             const uploaded = await uploadPhoto(media, {
               pageId: base.page.pageId,
@@ -1269,6 +1351,7 @@ function buildCreatePhotoPost() {
               pageId: base.page.pageId,
               publishState: plan.publishState,
               ...(echo !== undefined ? { schedule: echo } : {}),
+              ...targetingMeta(plan),
               verifyNote: publishVerifyNote(plan.publishState),
             };
           },
@@ -1306,6 +1389,7 @@ function buildCreateVideoPost() {
       published: publishedArg,
       scheduled_publish_time: scheduledPublishTimeArg,
       page_timezone: pageTimezoneArg,
+      targeting: targetingArg,
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
@@ -1353,6 +1437,7 @@ function buildCreateVideoPost() {
               ? { scheduledPublishTime: input.scheduled_publish_time }
               : {}),
             ...(resolved !== undefined ? { byteLength: resolved.bytes } : {}),
+            ...(input.targeting !== undefined ? { targeting: input.targeting } : {}),
           },
           {
             nowMs: base.nowMs,
@@ -1389,12 +1474,14 @@ function buildCreateVideoPost() {
           metadata: {
             publishState: plan.publishState,
             delivery: source.kind === 'url' ? 'file-url' : 'resumable-upload',
+            ...targetingMeta(plan),
           },
           perform: async (): Promise<CreateVideoOutcome> => {
             const common = {
               pageId: base.page.pageId,
               publishState: plan.publishState,
               ...(echo !== undefined ? { schedule: echo } : {}),
+              ...targetingMeta(plan),
               // CC-MEDIA-7: "uploaded" is not "live".
               isPublishedAndProcessed: false,
               processingNote: VIDEO_CREATED_NOT_READY_NOTE,
@@ -1451,6 +1538,9 @@ function buildCreateVideoPost() {
                 ...(plan.publishState === 'published' ? {} : { published: false }),
                 ...(plan.schedule !== undefined
                   ? { scheduledPublishTime: plan.schedule.epochSeconds }
+                  : {}),
+                ...(typeof plan.params['targeting'] === 'string'
+                  ? { targeting: plan.params['targeting'] }
                   : {}),
                 token: base.page.token,
                 ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),

@@ -32,15 +32,19 @@ import {
   SCHEDULE_MAX_LEAD_MS,
   SCHEDULE_MIN_LEAD_MS,
   SCHEDULE_WARN_LEAD_MS,
+  TARGETING_KEYS_NOTE,
+  TARGETING_PRIVACY_NOTE,
   VIDEO_CREATED_NOT_READY_NOTE,
   assertLocalMediaSource,
   createdAtMsOf,
   deletePostRequest,
+  describeTargeting,
   feedPostRequest,
   formatInTimeZone,
   isPostAbsentError,
   isSupportedTimeZone,
   normalizePostState,
+  normalizeTargeting,
   pageTimezoneRequest,
   parseScheduledPublishTime,
   planCreatePost,
@@ -1334,4 +1338,101 @@ test('the publish verify note does not promise a time filter facebook_list_posts
   assert.match(PUBLISH_VERIFY_NOTE, /facebook_list_posts/);
   assert.match(PUBLISH_VERIFY_NOTE, /created_time/);
   assert.match(PUBLISH_VERIFY_NOTE, /no time filter/);
+});
+
+// ---------------------------------------------------------------------------
+// Organic targeting (geo + minimum age)
+// ---------------------------------------------------------------------------
+
+test('planCreatePost serializes targeting as one exact JSON string', () => {
+  const plan = planCreatePost(
+    {
+      pageId: PAGE_ID,
+      message: 'Regional offer',
+      targeting: {
+        age_min: 18,
+        geo_locations: { countries: ['BG', 'RO'], regions: [{ key: '1' }, { key: '2' }] },
+      },
+    },
+    { nowMs: NOW_MS },
+  );
+  assert.equal(
+    plan.params['targeting'],
+    '{"geo_locations":{"countries":["BG","RO"],"regions":[{"key":"1"},{"key":"2"}]},"age_min":18}',
+  );
+  assert.match(plan.summary, / Audience: countries BG, RO; regions 2 keys; age 18\+\.$/);
+  assert.ok(plan.warnings.includes(TARGETING_PRIVACY_NOTE));
+  assert.ok(plan.warnings.includes(TARGETING_KEYS_NOTE));
+  assert.deepEqual(plan.targetingEcho, {
+    geo_locations: { countries: ['BG', 'RO'], regions: [{ key: '1' }, { key: '2' }] },
+    age_min: 18,
+  });
+});
+
+test('a post without targeting sends no targeting param and no targeting notes', () => {
+  const plan = planCreatePost({ pageId: PAGE_ID, message: 'hello' }, { nowMs: NOW_MS });
+  assert.equal(plan.params['targeting'], undefined);
+  assert.equal(plan.targetingEcho, undefined);
+  assert.ok(!plan.warnings.includes(TARGETING_PRIVACY_NOTE));
+});
+
+test('normalizeTargeting accepts each documented age_min and refuses 16', () => {
+  for (const age of [13, 15, 18, 21, 25] as const) {
+    assert.deepEqual(normalizeTargeting({ age_min: age }), { age_min: age });
+  }
+  expectValidationError(
+    () => normalizeTargeting({ age_min: 16 as unknown as 18 }),
+    'invalid_targeting',
+  );
+});
+
+test('normalizeTargeting refuses empty geo, lowercase countries and non-numeric keys', () => {
+  expectValidationError(
+    () => normalizeTargeting({ geo_locations: {} }),
+    'invalid_targeting',
+  );
+  expectValidationError(
+    () => normalizeTargeting({ geo_locations: { countries: [], regions: [] } }),
+    'invalid_targeting',
+  );
+  expectValidationError(() => normalizeTargeting({}), 'invalid_targeting');
+  expectValidationError(
+    () => normalizeTargeting({ geo_locations: { countries: ['bg'] } }),
+    'invalid_targeting',
+  );
+  expectValidationError(
+    () => normalizeTargeting({ geo_locations: { cities: [{ key: 'Sofia' }] } }),
+    'invalid_targeting',
+  );
+});
+
+test('normalizeTargeting drops duplicates, keeping first-seen order', () => {
+  assert.deepEqual(
+    normalizeTargeting({
+      geo_locations: {
+        countries: ['RO', 'BG', 'RO'],
+        cities: [{ key: '9' }, { key: '9' }, { key: '3' }],
+      },
+    }),
+    { geo_locations: { countries: ['RO', 'BG'], cities: [{ key: '9' }, { key: '3' }] } },
+  );
+  assert.equal(
+    describeTargeting({ geo_locations: { cities: [{ key: '9' }] } }),
+    'Audience: cities 1 key',
+  );
+});
+
+test('planVideoPost carries targeting on a file_url body', () => {
+  const plan = planVideoPost(
+    {
+      pageId: PAGE_ID,
+      delivery: 'file-url',
+      sourceLabel: 'https://cdn.example/v.mp4',
+      targeting: { geo_locations: { countries: ['BG'] } },
+    },
+    { nowMs: NOW_MS },
+  );
+  assert.equal(plan.params['targeting'], '{"geo_locations":{"countries":["BG"]}}');
+  assert.match(plan.summary, /Audience: countries BG\.$/);
+  assert.ok(plan.warnings.includes(TARGETING_PRIVACY_NOTE));
 });

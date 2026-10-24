@@ -73,6 +73,19 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Organic post `targeting` on `facebook_create_post`,
+  `facebook_create_photo_post` and `facebook_create_video_post`.** An optional
+  `targeting` object narrows who sees the post in Feed. It takes
+  `geo_locations` (uppercase ISO `countries`, and Meta location ids as
+  `regions` / `cities` `{key}` objects) and/or `age_min` (13, 15, 18, 21 or
+  25). Duplicates are dropped. An empty restriction is refused, as are lowercase
+  codes and any other age. The normalized object is sent as one JSON string:
+  on the feed post, on the photo upload, and on the video `finish` phase (or
+  the `file_url` body). It is part of the bound plan, so a changed `targeting`
+  on apply is a plan mismatch. The preview summary adds an `Audience: ...`
+  line and two warnings: targeting is not a privacy control, and location keys
+  are not resolved from names. The result echoes `targetingEcho`.
+  `facebook_update_post` does not take `targeting`.
 - **`facebook_create_story` publishes a Page story** (posts, irreversible). A
   photo story (local file inside `FB_MEDIA_DIR` or a URL; jpeg, bmp, png, gif or
   tiff, at most 10 MB) is uploaded unpublished and then posted to

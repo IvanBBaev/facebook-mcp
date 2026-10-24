@@ -4147,3 +4147,148 @@ test('update_post and delete_post journal a 5xx the transport stamped ambiguous 
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Organic targeting on the three create tools
+// ---------------------------------------------------------------------------
+
+const TARGETING = { geo_locations: { countries: ['BG', 'RO'] }, age_min: 18 } as const;
+const TARGETING_WIRE = '{"geo_locations":{"countries":["BG","RO"]},"age_min":18}';
+
+test('create_post previews the audience line and both targeting notes', async () => {
+  const { fb, ctx } = makeCtx();
+  const preview = body(
+    await tool('facebook_create_post').handler(
+      { message: 'Regional offer', targeting: TARGETING },
+      ctx,
+    ),
+  );
+  assert.equal(preview['status'], 'preview');
+  assert.match(String(preview['summary']), /Audience: countries BG, RO; age 18\+/);
+  const warnings = strings(preview['warnings']);
+  assert.ok(warnings.some((w) => /not a privacy control/.test(w)));
+  assert.ok(warnings.some((w) => /Meta location ids/.test(w)));
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+});
+
+test('create_post sends the bound targeting and echoes it in the result', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/feed`,
+    fbOk({ id: '100_2001' }),
+  );
+  await tool('facebook_create_post').handler(
+    { message: 'Hi', targeting: TARGETING },
+    ctx,
+  );
+  const applied = body(
+    await tool('facebook_create_post').handler(
+      { message: 'Hi', targeting: TARGETING, apply: true, plan_id: 'plan-1' },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied');
+  const feed = findJson(
+    fb,
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/feed`,
+  );
+  assert.equal(jsonBody(feed)['targeting'], TARGETING_WIRE);
+  assert.deepEqual(record(applied['result'])['targetingEcho'], TARGETING);
+});
+
+test('create_post refuses an apply whose targeting changed since the preview', async () => {
+  const { fb, ctx } = makeCtx();
+  await tool('facebook_create_post').handler(
+    { message: 'Hi', targeting: TARGETING },
+    ctx,
+  );
+  const result = await tool('facebook_create_post').handler(
+    {
+      message: 'Hi',
+      targeting: { ...TARGETING, age_min: 21 },
+      apply: true,
+      plan_id: 'plan-1',
+    },
+    ctx,
+  );
+  assert.equal(result.isError, true);
+  assert.equal(body(result)['reason'], 'plan_mismatch');
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+});
+
+test('create_photo_post passes targeting through to the photo upload', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/photos`,
+    fbOk({ id: 'ph-1', post_id: '100_3001' }),
+  );
+  const applied = body(
+    await tool('facebook_create_photo_post').handler(
+      {
+        photo: 'https://cdn.example/a.jpg',
+        published: false,
+        targeting: TARGETING,
+        apply: true,
+      },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied');
+  const upload = findJson(fb, (req) => req.path === `/${PAGE_ID}/photos`);
+  assert.equal(jsonBody(upload)['targeting'], TARGETING_WIRE);
+  assert.deepEqual(record(applied['result'])['targetingEcho'], TARGETING);
+});
+
+test('create_video_post sends targeting on the finish phase of a local upload', async (t) => {
+  const media = await mediaFixture(t, 'clip.mp4', 64);
+  const { fb, ctx } = makeCtx({ settings: makeSettings({ mediaDir: media.dir }) });
+  stubVideoUploadPhases(fb, { video_id: 'vid-1', success: true });
+  const applied = body(
+    await tool('facebook_create_video_post').handler(
+      { video: media.name, published: false, targeting: TARGETING, apply: true },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied');
+  const finish = findJson(fb, (req) => record(req.body)['upload_phase'] === 'finish');
+  assert.equal(jsonBody(finish)['targeting'], TARGETING_WIRE);
+  const start = findJson(fb, (req) => record(req.body)['upload_phase'] === 'start');
+  assert.equal(jsonBody(start)['targeting'], undefined, 'only the finish carries it');
+});
+
+test('the targeting schema refuses age 16, lowercase codes and an empty restriction', () => {
+  const schema = tool('facebook_create_post').inputSchema;
+  for (const targeting of [
+    { age_min: 16 },
+    { geo_locations: { countries: ['bg'] } },
+    { geo_locations: {} },
+    {},
+    { geo_locations: { countries: ['BG'], zips: ['1000'] } },
+  ]) {
+    assert.equal(
+      schema.safeParse({ message: 'x', targeting }).success,
+      false,
+      JSON.stringify(targeting),
+    );
+  }
+  for (const name of ['facebook_create_photo_post', 'facebook_create_video_post']) {
+    assert.equal(
+      tool(name).inputSchema.safeParse({
+        [name.includes('photo') ? 'photo' : 'video']: 'a',
+        targeting: TARGETING,
+      }).success,
+      true,
+      name,
+    );
+  }
+  assert.equal(
+    tool('facebook_update_post').inputSchema.safeParse({
+      post_id: POST_ID,
+      action: 'edit',
+      message: 'x',
+      targeting: TARGETING,
+    }).success,
+    false,
+    'update_post does not take targeting',
+  );
+});
