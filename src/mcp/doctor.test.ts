@@ -359,7 +359,10 @@ test('a package with no satisfied tool is fully blocked', async () => {
 
   const insights = row((await runDoctor(deps)).matrix, 'insights');
   assert.equal(insights.status, 'blocked');
-  assert.deepEqual([...insights.missingPermissions], ['read_insights']);
+  assert.deepEqual(
+    [...insights.missingPermissions],
+    ['read_insights', 'pages_read_engagement'],
+  );
 });
 
 test('an unmapped package name renders as unknown (not blocked)', async () => {

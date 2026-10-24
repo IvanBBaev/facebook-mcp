@@ -220,7 +220,7 @@ function serve(fb: FakeFbRequest, ...entries: unknown[]): void {
 // Package invariants
 // ---------------------------------------------------------------------------
 
-test('createInsightsPackage builds the default-on, read-only package with three tools', () => {
+test('createInsightsPackage builds the default-on, read-only package with four tools', () => {
   const pkg = createInsightsPackage();
   assert.equal(pkg.name, 'insights');
   assert.equal(pkg.enabledByDefault, true);
@@ -231,7 +231,12 @@ test('createInsightsPackage builds the default-on, read-only package with three 
   );
   assert.deepEqual(
     pkg.tools.map((t) => t.name),
-    ['facebook_page_insights', 'facebook_post_insights', 'facebook_reel_insights'],
+    [
+      'facebook_page_insights',
+      'facebook_post_insights',
+      'facebook_reel_insights',
+      'facebook_get_page_report',
+    ],
   );
   for (const t of pkg.tools) {
     // The exact quadruple doc 06 pins for every insights tool: RO/D/I/OW.

@@ -73,6 +73,20 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_get_page_report` answers "how did my Page do?" in one call**
+  (insights, read-only). A preset window (`last_7_days`, `last_28_days` —
+  default — or `last_90_days`, ending at today 00:00 Pacific, exclusive) or a
+  `custom` `[since, until)` is compared with the preceding window of equal
+  length: followers (stock change reconciled with daily follows − unfollows),
+  reach, views, engagement and Page views, each with its derivation (`method`)
+  and a `delta` (`{abs, pct}`, `pct` null over a zero previous value). Reach is
+  read from Meta's rolling `week` / `days_28` window and never summed from daily
+  uniques; any other span reports it as unavailable. The top posts published in
+  the window (`top_posts` 0–10, ranked by `top_by`) come with lifetime post
+  insights; the `published_posts` scan stops at the window start (≤4 pages) and
+  says when it was cut short. Only the current-window read can fail the call —
+  the comparison, reach, post scan and each post's insights degrade to a note
+  or a per-section error. `eligible:false` flags an all-empty read.
 - **`facebook_get_ad_preview` shows how an ad would render** (ads, read-only).
   `source` is `{kind:'ad'|'creative', id}` for an existing ad or creative
   (`GET /{id}/previews`) or `{kind:'post', id:'<page>_<post>'}` for a Page post

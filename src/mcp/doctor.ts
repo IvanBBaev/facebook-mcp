@@ -68,7 +68,8 @@ export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>
   core: ['pages_show_list', 'pages_read_engagement'],
   reader: ['pages_read_engagement', 'pages_read_user_content', 'pages_show_list'],
   posts: ['pages_manage_posts', 'pages_read_engagement'],
-  insights: ['read_insights'],
+  // pages_read_engagement is facebook_get_page_report's published_posts scan.
+  insights: ['read_insights', 'pages_read_engagement'],
   // pages_read_engagement is facebook_list_comments' own requirement and
   // pages_messaging facebook_private_reply's; without them a row blocked only by
   // one of those read "missing: (none)" and named nothing to grant.
@@ -122,6 +123,8 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_page_insights: ['read_insights'],
   facebook_post_insights: ['read_insights'],
   facebook_reel_insights: ['read_insights'],
+  // v2 F2: Page insights plus the published_posts scan for the top posts.
+  facebook_get_page_report: ['read_insights', 'pages_read_engagement'],
 
   // moderation (V05/V06) — the delete/private-reply split (doc 04, CC-AUTH-4)
   // The tool's description: pages_read_engagement, plus pages_read_user_content
