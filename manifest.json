@@ -150,6 +150,10 @@
       "description": "Post a PUBLIC reply under a comment — visible to everyone who can see the thread."
     },
     {
+      "name": "facebook_comment_on_post",
+      "description": "Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment with a link."
+    },
+    {
       "name": "facebook_hide_comment",
       "description": "Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores)."
     },

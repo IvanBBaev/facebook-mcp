@@ -37,6 +37,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_comment_on_post` posts a top-level comment as the Page
+  (organic F6).** A new `moderation` tool (tier `reversible`) for
+  `POST /{post-id}/comments` with `message`, an https `attachment_url` photo,
+  or both. The plan-mode preview reads the post, quotes its first 80
+  characters and warns when the Page did not write it; a foreign post's text
+  is quoted only inside a taint envelope. A lost answer is `attempted`, never
+  retried, and points at `facebook_list_comments`. `replyToComment` now rides
+  the shared `commentOnObject` helper with the same wire shape. The surface
+  grows to 41 tools (34 by default). Not yet verified against live Graph.
+
 - **`facebook_get_page` reads the Page's business profile (organic F9).**
   `field_set: "profile"` adds about, description, website, phone, emails,
   hours, is_always_open, temporary_status, single_line_address and location.

@@ -5,6 +5,8 @@ import { createFakeFbRequest, fbOk, fbErr } from '../core/fakes/index.js';
 import { GraphApiError } from '../core/index.js';
 import type { FbRequest } from '../core/index.js';
 
+import { loadFixture } from '../testing/fixtures.js';
+
 import { CURSOR_EXPIRED_NOTE } from './shared.js';
 
 import {
@@ -17,6 +19,7 @@ import {
   NOT_BLOCKED_NOTE,
   PRIVATE_REPLY_WINDOW_MS,
   classifyPrivateReplyFailure,
+  commentOnObject,
   deleteComment,
   fetchCommentSummary,
   getComment,
@@ -28,6 +31,7 @@ import {
   privateReplyRefusalError,
   privateReplyWindow,
   readCommentStates,
+  readCommentTarget,
   replyToComment,
   runBulk,
   sendPrivateReply,
@@ -822,6 +826,89 @@ test('replyToComment reports no id when the acknowledgement carries an unusable 
     await replyToComment(fb.fn, { ...SCOPE, commentId: 'c1', message: 'thanks!' }),
     {},
   );
+});
+
+test('commentOnObject posts message and attachment_url to the object comments edge', async () => {
+  const ack = await loadFixture<{ id: string }>('graph-comment-create.json');
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk(ack));
+
+  const created = await commentOnObject(fb.fn, {
+    ...SCOPE,
+    objectId: '100000000000001_200000000000002',
+    message: 'Tickets are live',
+    attachmentUrl: 'https://example.com/poster.jpg',
+  });
+
+  const req = fb.lastRequest();
+  assert.equal(req?.method, 'POST');
+  assert.equal(req?.path, '/100000000000001_200000000000002/comments');
+  assert.deepEqual(bodyOf(req), {
+    message: 'Tickets are live',
+    attachment_url: 'https://example.com/poster.jpg',
+  });
+  assert.equal(req?.verifyTool, 'facebook_list_comments');
+  assert.deepEqual(created, { id: ack.id });
+});
+
+test('commentOnObject sends an attachment-only comment without a message param', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ id: 'p1_c1' }));
+
+  await commentOnObject(fb.fn, {
+    ...SCOPE,
+    objectId: 'p1',
+    attachmentUrl: 'https://example.com/a.png',
+  });
+
+  assert.deepEqual(bodyOf(fb.lastRequest()), {
+    attachment_url: 'https://example.com/a.png',
+  });
+});
+
+test('commentOnObject reports no id for an acknowledgement without a usable one', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ id: '' }));
+  assert.deepEqual(
+    await commentOnObject(fb.fn, { ...SCOPE, objectId: 'p1', message: 'hi' }),
+    {},
+  );
+});
+
+test('readCommentTarget reads id, message, from and created_time off the post', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({
+      id: 'p1',
+      message: 'Our launch post',
+      from: { id: 'page-1', name: 'Example Page' },
+      created_time: '2026-10-01T10:00:00+0000',
+    }),
+  );
+
+  const target = await readCommentTarget(fb.fn, { ...SCOPE, postId: 'p1' });
+
+  const req = fb.lastRequest();
+  assert.equal(req?.method, 'GET');
+  assert.equal(req?.path, '/p1');
+  assert.deepEqual(req?.protocol === 'json' ? req.params : undefined, {
+    fields: 'id,message,from,created_time',
+  });
+  assert.deepEqual(target, {
+    id: 'p1',
+    fromId: 'page-1',
+    message: 'Our launch post',
+    createdTime: '2026-10-01T10:00:00+0000',
+  });
+});
+
+test('readCommentTarget tolerates a post node without from or message', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({}));
+  assert.deepEqual(await readCommentTarget(fb.fn, { ...SCOPE, postId: 'p1' }), {
+    id: 'p1',
+  });
 });
 
 test('setCommentHidden posts is_hidden and works in both directions', async () => {

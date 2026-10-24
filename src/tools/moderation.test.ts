@@ -318,6 +318,7 @@ const TOOL_TABLE: readonly (readonly [
   ['facebook_list_comments', true, false, true, undefined],
   ['facebook_get_comment', true, false, true, undefined],
   ['facebook_reply_to_comment', false, false, false, 'reversible'],
+  ['facebook_comment_on_post', false, false, false, 'reversible'],
   ['facebook_hide_comment', false, false, true, 'reversible'],
   ['facebook_delete_comment', false, true, true, 'irreversible'],
   ['facebook_private_reply', false, true, false, 'irreversible'],
@@ -376,6 +377,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'plan_id',
   'object_id',
   'comment_id',
+  'post_id',
   'filter',
   'order',
   'hidden',
@@ -392,6 +394,7 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     facebook_list_comments: ['profile', 'object_id', 'filter', 'order'],
     facebook_get_comment: ['profile', 'comment_id'],
     facebook_reply_to_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
+    facebook_comment_on_post: ['profile', 'apply', 'plan_id', 'post_id'],
     facebook_hide_comment: ['profile', 'apply', 'plan_id', 'hidden'],
     facebook_delete_comment: ['profile', 'apply', 'plan_id'],
     facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
@@ -425,7 +428,13 @@ test('every moderation log allowlist names real, non-content arguments', () => {
   // The named dangers, spelled out so the reason survives a refactor of the set:
   // visitor-authored text, the identity behind a block, and the operator's
   // out-of-band secret.
-  for (const banned of ['message', 'psids', 'comment_ids', 'confirm_token']) {
+  for (const banned of [
+    'message',
+    'attachment_url',
+    'psids',
+    'comment_ids',
+    'confirm_token',
+  ]) {
     assert.ok(!SAFE_TO_LOG.has(banned), `${banned} must never be cleared for stderr`);
   }
 });
@@ -963,6 +972,170 @@ test('a reply Facebook refused with an error envelope stays journaled failed', a
 
   assert.equal(journal.entries.length, 1);
   assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+// ---------------------------------------------------------------------------
+// 4b. facebook_comment_on_post — a top-level comment as the Page (organic F6)
+// ---------------------------------------------------------------------------
+
+const POST_ID = '900_555';
+
+function postNode(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: POST_ID,
+    message: 'Our autumn tour starts on Friday — see you there!',
+    from: { id: PAGE.pageId, name: PAGE.name },
+    created_time: CREATED,
+    ...overrides,
+  };
+}
+
+test('a comment on a post previews the post excerpt and mutates nothing in plan mode', async () => {
+  const { fb, ctx, journal } = makeHarness({ writeMode: 'plan' });
+  fb.on((r) => r.method === 'GET' && r.path === `/${POST_ID}`, fbOk(postNode()));
+
+  const payload = body(
+    await tool('facebook_comment_on_post').handler(
+      { post_id: POST_ID, message: 'Tickets are live — link in bio' },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'preview');
+  assert.equal(payload.tier, 'reversible');
+  assert.ok(str(payload.summary).includes(`Comment as ${PAGE.name}`));
+  assert.ok(str(payload.summary).includes(`on post ${POST_ID}`));
+  assert.ok(str(payload.summary).includes('Tickets are live'));
+  const warnings = arr(payload.warnings).map(str);
+  assert.ok(warnings.some((w) => w.includes('Our autumn tour starts on Friday')));
+  assert.ok(!warnings.some((w) => w.includes("another Page's")));
+  assert.deepEqual(paramsOf(firstCall(fb)), { fields: 'id,message,from,created_time' });
+  assert.ok(!anyCall(fb, 'POST'), 'a dry run must not post');
+  assert.ok(str(payload.notPerformedNotice).includes('no comment was posted'));
+  assert.equal(journal.entries.length, 0);
+});
+
+test("a comment on another author's post warns and quotes it only inside a taint envelope", async () => {
+  const { fb, ctx } = makeHarness({ writeMode: 'plan' });
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${POST_ID}`,
+    fbOk(postNode({ from: { id: 'u77', name: 'Someone' }, message: INJECTION })),
+  );
+
+  const payload = body(
+    await tool('facebook_comment_on_post').handler(
+      { post_id: POST_ID, message: 'Thanks!' },
+      ctx,
+    ),
+  );
+
+  const warnings = arr(payload.warnings).map(str);
+  assert.ok(warnings.some((w) => w.includes("another Page's or user's post")));
+  const quoted = warnings.find((w) => w.includes('Ignore all previous'));
+  assert.ok(quoted, 'the foreign post is quoted');
+  assert.ok(quoted.includes(TAINT_BEGIN) && quoted.includes(TAINT_END));
+  assert.ok(!str(payload.summary).includes('Ignore all previous'));
+});
+
+test('an applied comment on a post sends message and photo and journals the write', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`,
+    fbOk({ id: `${POST_ID}_c1` }),
+  );
+
+  const payload = body(
+    await tool('facebook_comment_on_post').handler(
+      {
+        post_id: POST_ID,
+        message: 'Tickets are live',
+        attachment_url: 'https://example.com/poster.jpg',
+      },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'applied');
+  assert.deepEqual(payload.result, { id: `${POST_ID}_c1` });
+  assert.deepEqual(bodyOf(firstCall(fb)), {
+    message: 'Tickets are live',
+    attachment_url: 'https://example.com/poster.jpg',
+  });
+  assert.equal(journal.entries.length, 1);
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+  assert.deepEqual(journal.entries[0]?.metadata, {
+    postId: POST_ID,
+    messageChars: 16,
+    withPhoto: true,
+  });
+});
+
+test('a comment on a post whose answer was lost is attempted and points at the listing', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`,
+    fbErr(ambiguousWriteError()),
+  );
+
+  await assert.rejects(
+    () =>
+      tool('facebook_comment_on_post').handler({ post_id: POST_ID, message: 'Hi' }, ctx),
+    (err: unknown) =>
+      err instanceof GraphApiError && err.action?.category === 'ambiguous',
+  );
+  assert.equal(
+    jsonCalls(fb).filter((r) => r.method === 'POST').length,
+    1,
+    'a lost answer is never retried',
+  );
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('a comment acknowledged without an id is not applied and says to check the listing', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`, fbOk({}));
+
+  const payload = body(
+    await tool('facebook_comment_on_post').handler(
+      { post_id: POST_ID, message: 'Hi' },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'not_applied');
+  assert.equal(payload.outcome, 'attempted');
+  assert.ok(str(obj(payload.result).note).includes('facebook_list_comments'));
+  assert.equal(journal.entries[0]?.outcome, 'attempted');
+});
+
+test('a comment with neither message nor photo is refused before any call', async () => {
+  const { fb, ctx } = makeHarness();
+  await assert.rejects(
+    () => tool('facebook_comment_on_post').handler({ post_id: POST_ID }, ctx),
+    (err: unknown) =>
+      err instanceof GraphApiError && err.action?.category === 'validation',
+  );
+  assert.equal(fb.calls.length, 0);
+});
+
+test('a comment photo must be an https URL without credentials', () => {
+  const schema = tool('facebook_comment_on_post').inputSchema;
+  for (const bad of [
+    'http://example.com/a.jpg',
+    'file:///etc/passwd',
+    'https://user:pw@example.com/a.jpg',
+  ]) {
+    assert.equal(
+      schema.safeParse({ post_id: POST_ID, attachment_url: bad }).success,
+      false,
+      bad,
+    );
+  }
+  assert.equal(
+    schema.safeParse({ post_id: POST_ID, attachment_url: 'https://example.com/a.jpg' })
+      .success,
+    true,
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,9 @@ here as published.
   (`/{page-id}/albums`), `graph-photos.json` (`/{album-id}/photos`) and
   `graph-page-profile.json` (`/{page-id}` with the profile fields) are
   synthetic: hand-written to the documented field sets, with placeholder ids.
+  `graph-comment-create.json` is the synthetic `{id}` acknowledgement of
+  `POST /{post-id}/comments` — hand-written, not a recording, so it does not
+  break the no-write-recordings rule below.
 
 ## What does not
 

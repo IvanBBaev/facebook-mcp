@@ -5,6 +5,7 @@
 //   * facebook_list_comments    — cursor-paginated comments edge (filter/order).
 //   * facebook_get_comment      — one comment with its replies.
 //   * facebook_reply_to_comment — public reply            (tier: reversible).
+//   * facebook_comment_on_post  — top-level Page comment  (tier: reversible).
 //   * facebook_hide_comment     — is_hidden true/false    (tier: reversible).
 //   * facebook_delete_comment   — permanent delete        (tier: irreversible).
 //   * facebook_private_reply    — the ONE private reply   (tier: irreversible).
@@ -68,6 +69,8 @@ import {
   privateReplyRefusalError,
   privateReplyWindow,
   readCommentStates,
+  commentOnObject,
+  readCommentTarget,
   replyToComment,
   runBulk,
   sendPrivateReply,
@@ -76,6 +79,7 @@ import {
   type BulkOutcome,
   type BulkTally,
   type CommentNode,
+  type CommentTarget,
   type CommentScope,
   type CommentState,
   type PrivateReplyReceipt,
@@ -166,6 +170,7 @@ const PRIVATE_REPLY_ANNOTATIONS: ToolAnnotations = {
  */
 const TIERS = {
   facebook_reply_to_comment: 'reversible',
+  facebook_comment_on_post: 'reversible',
   facebook_hide_comment: 'reversible',
   facebook_delete_comment: 'irreversible',
   facebook_private_reply: 'irreversible',
@@ -206,6 +211,31 @@ const psidsArg = z
   .describe(
     `Page-scoped user IDs (PSIDs) — 1 to ${String(MAX_BULK_IDS)} per call. A PSID is the ` +
       'per-Page id from a comment author or a conversation, NOT a public profile ID or a username.',
+  );
+
+/**
+ * The post a top-level comment lands on. Interpolated into `/{post_id}/comments`,
+ * so the shared containment shape applies (see {@link commentIdArg}).
+ */
+const postIdArg = graphNodeIdArg({
+  hint: 'Pass the `id` facebook_list_posts returns, verbatim.',
+  description:
+    'The post ID, normally "{page-id}_{post-id}" as returned by facebook_list_posts. Not a comment ID — reply to a comment with facebook_reply_to_comment.',
+});
+
+/**
+ * A photo for a comment: an https:// URL Facebook fetches itself. Credentials
+ * in the URL are refused — Facebook would receive them, and so would a log.
+ */
+const attachmentUrlArg = z
+  .string()
+  .url()
+  .refine((raw) => {
+    const url = new URL(raw);
+    return url.protocol === 'https:' && url.username === '' && url.password === '';
+  }, 'attachment_url must be an https:// URL without embedded credentials.')
+  .describe(
+    'Optional photo for the comment: a public https:// image URL Facebook fetches itself (no credentials in the URL).',
   );
 
 const messageArg = z
@@ -287,6 +317,52 @@ const REPLY_UNCONFIRMED_NOTE =
  */
 function replyVerdict(outcome: ReplyOutcome) {
   return outcome.id === undefined ? ATTEMPTED_VERDICT : APPLIED_VERDICT;
+}
+
+/** The `facebook_comment_on_post` counterpart of {@link REPLY_UNCONFIRMED_NOTE}. */
+const COMMENT_UNCONFIRMED_NOTE =
+  'Facebook accepted the request but returned no comment id, so the comment is ' +
+  'UNCONFIRMED: it may already be public. Check the post with ' +
+  'facebook_list_comments before doing anything else, and do not post it again blindly.';
+
+/** How much of the target post a comment preview quotes. */
+const POST_EXCERPT_CHARS = 80;
+
+/**
+ * Preview warnings derived from the post read at plan time. The Page's own
+ * post is quoted as-is; a post someone else wrote is quoted only inside a
+ * taint envelope, because its text is not the Page's (rule 1 above).
+ */
+function commentTargetWarnings(target: CommentTarget, pageId: string): string[] {
+  const excerpt =
+    target.message !== undefined && target.message.length > 0
+      ? truncate(target.message, POST_EXCERPT_CHARS)
+      : undefined;
+  if (target.fromId === pageId) {
+    return excerpt !== undefined ? [`The post being commented on: "${excerpt}"`] : [];
+  }
+  return [
+    "Commenting on another Page's or user's post: the post must be visible to the " +
+      'Page, and the comment appears under content the Page does not control.',
+    ...(excerpt !== undefined
+      ? [`The post being commented on: ${renderTainted(taint('visitor_post', excerpt))}`]
+      : []),
+  ];
+}
+
+/**
+ * A comment needs a message, a photo or both. Refused before any call, with
+ * the same client-side shape as the package's other local refusals.
+ */
+function emptyCommentError(): GraphApiError {
+  const text =
+    'A comment needs `message`, `attachment_url` or both — neither was given. ' +
+    'Nothing was sent; add the text or photo and call again.';
+  return new GraphApiError(text, {
+    code: 0,
+    httpStatus: 400,
+    action: { category: 'validation', retryable: false, operatorText: text },
+  });
 }
 
 /**
@@ -972,6 +1048,96 @@ export function createModerationPackage(): PackageSpec {
   });
 
   // -------------------------------------------------------------------------
+  // facebook_comment_on_post (reversible)
+  // -------------------------------------------------------------------------
+  const commentOnPostTool = defineTool({
+    name: 'facebook_comment_on_post',
+    title: 'Comment on post',
+    description:
+      'Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment ' +
+      'with a link. Takes `message`, an https `attachment_url` photo, or both. To ' +
+      'answer a comment use facebook_reply_to_comment instead. @[page-id] mentions ' +
+      'are passed through but Facebook reviews them. Reversible by deleting the ' +
+      'comment, but NOT idempotent: if the response is lost, verify with ' +
+      'facebook_list_comments before retrying, or you will post twice. Needs a PAGE ' +
+      'token with pages_manage_engagement and the MODERATE task.',
+    inputSchema: z.object({
+      ...writeArgs,
+      post_id: postIdArg,
+      message: messageArg.optional(),
+      attachment_url: attachmentUrlArg.optional(),
+    }),
+    annotations: REPLY_ANNOTATIONS,
+    writeTier: TIERS.facebook_comment_on_post,
+    // Where the comment went and how it was armed; never the text or the URL.
+    logFields: ['profile', 'apply', 'plan_id', 'post_id'],
+    handler: async (input, ctx) => {
+      if (input.message === undefined && input.attachment_url === undefined) {
+        throw emptyCommentError();
+      }
+      const resolved = await ctx.pages.resolvePage(input.profile);
+      const scope = scopeOf(ctx, resolved);
+      const what =
+        input.message !== undefined
+          ? `"${truncate(input.message, POST_EXCERPT_CHARS)}"`
+          : '(photo only)';
+      return executeWrite(ctx, {
+        tool: 'facebook_comment_on_post',
+        tier: TIERS.facebook_comment_on_post,
+        pageId: resolved.pageId,
+        resolvedPage: resolved,
+        params: {
+          post_id: input.post_id,
+          ...(input.message !== undefined ? { message: input.message } : {}),
+          ...(input.attachment_url !== undefined
+            ? { attachment_url: input.attachment_url }
+            : {}),
+        },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          `Comment as ${resolved.name} (${resolved.pageId}) on post ${input.post_id}: ${what}` +
+          (input.attachment_url !== undefined && input.message !== undefined
+            ? ' with a photo'
+            : ''),
+        warnings: [
+          'The comment is PUBLIC — everyone who can see the post can see it.',
+          'Posting twice is possible: if this call fails without a clear answer, check ' +
+            'facebook_list_comments before retrying.',
+        ],
+        notPerformedNotice: 'This was a dry run — no comment was posted.',
+        // Plan mode reads the post so the preview can say what is being
+        // answered and whose post it is. A post edited between plan and apply
+        // diverges, which is the point: the comment would answer other text.
+        readState: () =>
+          readCommentTarget(ctx.fbRequest, { ...scope, postId: input.post_id }),
+        stateWarnings: (before) =>
+          commentTargetWarnings(before as CommentTarget, resolved.pageId),
+        perform: async (): Promise<ReplyOutcome> => {
+          const ack = await commentOnObject(ctx.fbRequest, {
+            ...scope,
+            objectId: input.post_id,
+            ...(input.message !== undefined ? { message: input.message } : {}),
+            ...(input.attachment_url !== undefined
+              ? { attachmentUrl: input.attachment_url }
+              : {}),
+          });
+          return ack.id !== undefined
+            ? { id: ack.id }
+            : { note: COMMENT_UNCONFIRMED_NOTE };
+        },
+        classifyOutcome: classifyWriteFailure,
+        classifyResult: replyVerdict,
+        metadata: {
+          postId: input.post_id,
+          messageChars: input.message?.length ?? 0,
+          withPhoto: input.attachment_url !== undefined,
+        },
+      });
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // facebook_hide_comment (reversible, bulk)
   // -------------------------------------------------------------------------
   const hideTool = defineTool({
@@ -1309,12 +1475,13 @@ export function createModerationPackage(): PackageSpec {
     name: 'moderation',
     title: 'Moderation',
     description:
-      'Read and moderate comments on Page content (list, reply, hide, delete, ' +
-      'private reply) and maintain the blocked-users list.',
+      'Read and moderate comments on Page content (list, reply, comment on a post, ' +
+      'hide, delete, private reply) and maintain the blocked-users list.',
     tools: [
       listCommentsTool,
       getCommentTool,
       replyTool,
+      commentOnPostTool,
       hideTool,
       deleteTool,
       privateReplyTool,

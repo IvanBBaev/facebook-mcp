@@ -404,6 +404,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_list_comments`        | `pages_read_engagement`, `pages_read_user_content`                    |
 | `facebook_get_comment`          | `pages_read_engagement`, `pages_read_user_content`                    |
 | `facebook_reply_to_comment`     | `pages_manage_engagement`                                             |
+| `facebook_comment_on_post`      | `pages_manage_engagement`                                             |
 | `facebook_hide_comment`         | `pages_manage_engagement`                                             |
 | `facebook_delete_comment`       | `pages_manage_engagement`, `pages_read_user_content`                  |
 | `facebook_private_reply`        | `pages_messaging`, `pages_read_engagement`, `pages_read_user_content` |
@@ -446,7 +447,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `reader`     |       yes       | 7 read           |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                         |
 | `posts`      |       yes       | 2 read + 6 write |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos and Reels (plan-first: every write previews before it applies).                                                                           |
 | `insights`   |       yes       | 3 read           |         —          | Page, post and Reel insights: compact reshaped metric series, aggregate totals and post-2025 metric-rename guidance (read-only).                                                                        |
-| `moderation` |       yes       | 2 read + 6 write |      `apply`       | Read and moderate comments on Page content (list, reply, hide, delete, private reply) and maintain the blocked-users list.                                                                              |
+| `moderation` |       yes       | 2 read + 7 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, hide, delete, private reply) and maintain the blocked-users list.                                                           |
 | `messages`   |       yes       | 2 read + 1 write |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window. Plan-first by default. |
 | `ads`        | **no** (opt-in) | 6 read + 1 write |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, insights with async report runs, and plan-gated status and budget control. Off by default.              |
 
@@ -454,7 +455,7 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: tools -->
 
-**40 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**41 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                            |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -483,6 +484,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `moderation` | `facebook_list_comments`        |     `read`     | List the comments on a post, photo, video or another comment, newest-first by default.                                                                                     |
 | `moderation` | `facebook_get_comment`          |     `read`     | Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window).                                              |
 | `moderation` | `facebook_reply_to_comment`     |  `reversible`  | Post a PUBLIC reply under a comment — visible to everyone who can see the thread.                                                                                          |
+| `moderation` | `facebook_comment_on_post`      |  `reversible`  | Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment with a link.                                                                                  |
 | `moderation` | `facebook_hide_comment`         |  `reversible`  | Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores).                                                                               |
 | `moderation` | `facebook_delete_comment`       | `irreversible` | PERMANENTLY delete up to 50 comments.                                                                                                                                      |
 | `moderation` | `facebook_private_reply`        | `irreversible` | Send a private message to the author of a comment.                                                                                                                         |

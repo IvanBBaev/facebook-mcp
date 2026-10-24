@@ -731,31 +731,94 @@ function ackOf(body: unknown): Record<string, unknown> {
 }
 
 /**
- * Post a PUBLIC reply under a comment. Additive, so there is no before-state;
- * a comment deleted in the meantime is a hard error — there is nothing to reply
- * to (CC-MOD-1).
+ * Post a PUBLIC comment on any commentable object — a post, photo, video or
+ * another comment (`POST /{object-id}/comments`). Additive, so there is no
+ * before-state; an object deleted in the meantime is a hard error — there is
+ * nothing to comment on (CC-MOD-1). At least one of `message` and
+ * `attachmentUrl` must be present; the tools layer enforces that before this
+ * is reached.
  *
- * `id` is ABSENT when Facebook acknowledged the reply without a usable one.
- * That is not a hard failure — the reply may well be public — but it is not
+ * `id` is ABSENT when Facebook acknowledged the comment without a usable one.
+ * That is not a hard failure — the comment may well be public — but it is not
  * a confirmation either: the caller must treat such an ack as unconfirmed
  * (the `tools` layer journals it `attempted`), and there is no handle to pass
  * to a follow-up call.
  */
-export async function replyToComment(
+export async function commentOnObject(
   fbRequest: FbRequestFn,
-  input: { readonly commentId: string; readonly message: string } & CommentScope,
+  input: {
+    readonly objectId: string;
+    readonly message?: string;
+    readonly attachmentUrl?: string;
+  } & CommentScope,
 ): Promise<{ readonly id?: string }> {
   const res = await fbRequest<unknown>({
     protocol: 'json',
     method: 'POST',
     host: 'graph',
-    path: `/${input.commentId}/comments`,
-    body: { message: input.message },
+    path: `/${input.objectId}/comments`,
+    body: {
+      ...(input.message !== undefined ? { message: input.message } : {}),
+      ...(input.attachmentUrl !== undefined
+        ? { attachment_url: input.attachmentUrl }
+        : {}),
+    },
     verifyTool: VERIFY_REPLY_TOOL,
     ...scopeFields(input),
   });
   const id = ackId(ackOf(res.data).id);
   return id !== undefined ? { id } : {};
+}
+
+/**
+ * Post a PUBLIC reply under a comment: {@link commentOnObject} on the comment's
+ * own edge, so a reply and a top-level comment share one wire shape.
+ */
+export async function replyToComment(
+  fbRequest: FbRequestFn,
+  input: { readonly commentId: string; readonly message: string } & CommentScope,
+): Promise<{ readonly id?: string }> {
+  const { commentId, ...rest } = input;
+  return commentOnObject(fbRequest, { ...rest, objectId: commentId });
+}
+
+/** The fields a comment preview reads off the target post. */
+const COMMENT_TARGET_FIELDS = 'id,message,from,created_time';
+
+/** The post a top-level comment lands on, as the preview needs it. */
+export interface CommentTarget {
+  readonly id: string;
+  readonly fromId?: string;
+  readonly message?: string;
+  readonly createdTime?: string;
+}
+
+/**
+ * Read the post a comment is about to land on (`GET /{post-id}`), so a preview
+ * can show what is being answered and whether the Page wrote it. Not
+ * `can_comment`: that field is documented on comment objects, not posts.
+ */
+export async function readCommentTarget(
+  fbRequest: FbRequestFn,
+  input: { readonly postId: string } & CommentScope,
+): Promise<CommentTarget> {
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'GET',
+    host: 'graph',
+    path: `/${input.postId}`,
+    params: { fields: COMMENT_TARGET_FIELDS },
+    ...scopeFields(input),
+  });
+  const node = ackOf(res.data);
+  const from = isRecord(node.from) ? node.from : {};
+  const fromId = ackId(from.id);
+  return {
+    id: ackId(node.id) ?? input.postId,
+    ...(fromId !== undefined ? { fromId } : {}),
+    ...(typeof node.message === 'string' ? { message: node.message } : {}),
+    ...(typeof node.created_time === 'string' ? { createdTime: node.created_time } : {}),
+  };
 }
 
 /**
