@@ -29,7 +29,8 @@ import {
   buildPageReport,
   resolveReportWindow,
 } from '../api/page-report.js';
-import { defineTool } from '../mcp/index.js';
+import { defineTool, exportOutputArg } from '../mcp/index.js';
+import { exportPostsInsights } from './insights-export.js';
 import { profileArg, shapeFor } from './shared.js';
 
 const READ_ONLY: ToolAnnotations = {
@@ -160,6 +161,7 @@ const postsInsightsArgs = {
     .describe(
       'Lifetime post metric names (the table columns). Vetted once, on the first post: a dead or rejected name is dropped for the rest.',
     ),
+  output: exportOutputArg,
 };
 
 function exactlyOneSourceError(): GraphApiError {
@@ -183,8 +185,10 @@ export function createPostsInsightsTool(): ToolSpec {
       '`breakdowns` (e.g. reactions by type). Pass `post_ids` or `latest` (the N ' +
       'most recent published posts). Defaults to views, unique viewers, clicks ' +
       'and reactions by type. A post Graph refuses, or one on another Page, gets ' +
-      'a row `error` instead of failing the call. For one post with full ' +
-      'summaries use facebook_post_insights.',
+      'a row `error` instead of failing the call. output:{format} writes the ' +
+      'table to a CSV (one line per post × metric) or JSON file in ' +
+      'FB_EXPORT_DIR and returns its path instead of the rows. For one post ' +
+      'with full summaries use facebook_post_insights.',
     inputSchema: z.object(postsInsightsArgs),
     annotations: READ_ONLY,
     handler: async (input, ctx) => {
@@ -222,11 +226,29 @@ export function createPostsInsightsTool(): ToolSpec {
         nowMs: ctx.clock.now(),
         ...signal,
       });
+      if (input.output === undefined) {
+        return shapeFor(ctx, {
+          profile: input.profile ?? null,
+          pageId: resolved.pageId,
+          contractVersion: INSIGHTS_CONTRACT_VERSION,
+          ...table,
+        });
+      }
+      const receipt = await exportPostsInsights(
+        ctx,
+        input.output,
+        { contractVersion: INSIGHTS_CONTRACT_VERSION, pageId: resolved.pageId },
+        table,
+      );
+      const { posts: rows, ...summary } = table;
       return shapeFor(ctx, {
         profile: input.profile ?? null,
         pageId: resolved.pageId,
         contractVersion: INSIGHTS_CONTRACT_VERSION,
-        ...table,
+        ...summary,
+        postCount: rows.length,
+        postErrors: rows.filter((row) => row.error !== undefined).length,
+        export: receipt,
       });
     },
   });

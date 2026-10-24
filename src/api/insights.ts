@@ -915,10 +915,27 @@ function summarize(
  * boilerplate is dropped on the floor.
  */
 export function reshapeInsights(body: unknown): ReshapedInsights {
+  const { rows, metrics } = reshapeWithEnds(body);
+  return { rows, metrics };
+}
+
+/**
+ * One data point of a file export (v2 insights F5): the inline row plus the raw
+ * `end_time` it was read from, which the inline shape keeps only once per metric.
+ */
+export interface InsightExportRow extends InsightRow {
+  readonly endTime?: string;
+}
+
+/** {@link reshapeInsights} plus each row's raw `end_time`, index-aligned. */
+function reshapeWithEnds(
+  body: unknown,
+): ReshapedInsights & { readonly rowEnds: readonly (string | undefined)[] } {
   const rawData: unknown = isRecord(body) ? body.data : undefined;
   const entries: readonly unknown[] = Array.isArray(rawData) ? rawData : [];
 
   const rows: InsightRow[] = [];
+  const rowEnds: (string | undefined)[] = [];
   const metrics: MetricSummary[] = [];
 
   for (const entry of entries) {
@@ -929,6 +946,7 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
     const points: readonly unknown[] = Array.isArray(entry.values) ? entry.values : [];
 
     const metricRows: InsightRow[] = [];
+    const metricRowEnds: (string | undefined)[] = [];
     const ends: string[] = [];
     const emptyMapEnds: string[] = [];
     let nonNumeric = false;
@@ -951,10 +969,12 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
           ...(flat.breakdown !== undefined ? { breakdown: flat.breakdown } : {}),
           value: flat.value,
         });
+        metricRowEnds.push(endTime);
       }
     }
 
     for (const row of metricRows) rows.push(row);
+    for (const end of metricRowEnds) rowEnds.push(end);
     // Empty-map points only shape a series that has data at all: a metric whose
     // every point is `{}` stays an empty series (emptyMetrics), with no invented
     // boundaries. A `{}` point is a breakdown with no keys, so the series is a
@@ -964,7 +984,7 @@ export function reshapeInsights(body: unknown): ReshapedInsights {
     metrics.push(summarize(name, period, metricRows, ends, nonNumeric, hasEmptyMap));
   }
 
-  return { rows, metrics };
+  return { rows, metrics, rowEnds };
 }
 
 /** Row-cap outcome: the kept prefix plus how many points were dropped. */
@@ -1158,6 +1178,11 @@ export interface InsightsRequest {
   readonly aggregate?: boolean;
   /** Row-cap override; defaults to {@link INSIGHTS_MAX_ROWS}. */
   readonly maxRows?: number;
+  /**
+   * True ⇒ also return the full, UNCAPPED series in `exportRows` for a file
+   * export (v2 insights F5). The inline `rows` and the cap are unaffected.
+   */
+  readonly exportRows?: boolean;
   /** Page access token (always pass the resolved Page token — C1). */
   readonly token?: string;
   readonly signal?: AbortSignal;
@@ -1273,6 +1298,8 @@ export interface InsightsResult {
   /** Data points Graph returned, before the row cap. */
   readonly rowsAvailable: number;
   readonly truncated: boolean;
+  /** Every data point, uncapped, with its raw `end_time`; only with `exportRows`. */
+  readonly exportRows?: readonly InsightExportRow[];
   /** Requested names that are dead, each with a replacement suggestion. */
   readonly deprecatedMetrics: readonly MetricVerdict[];
   /** Sent but never mentioned in the response ⇒ invalid for this object/version. */
@@ -1653,6 +1680,7 @@ export async function fetchInsights(
       ...(mode === 'series' ? { rows: [] } : {}),
       rowsAvailable: 0,
       truncated: false,
+      ...(req.exportRows === true ? { exportRows: [] } : {}),
       deprecatedMetrics: deprecated,
       unavailableMetrics: [],
       emptyMetrics: [],
@@ -1661,7 +1689,7 @@ export async function fetchInsights(
   }
 
   const { body, answered, rejected } = await readTolerant(fbRequest, req, live, period);
-  const reshaped = reshapeInsights(body);
+  const reshaped = reshapeWithEnds(body);
   // Aggregate mode emits no rows at all, so the row cap simply does not apply —
   // and must not raise a truncation note about rows nobody asked for.
   const capped: CappedRows =
@@ -1700,6 +1728,14 @@ export async function fetchInsights(
     ...(mode === 'series' ? { rows: capped.rows } : {}),
     rowsAvailable: reshaped.rows.length,
     truncated: capped.truncated,
+    ...(req.exportRows === true
+      ? {
+          exportRows: reshaped.rows.map((row, index) => {
+            const endTime = reshaped.rowEnds[index];
+            return endTime !== undefined ? { ...row, endTime } : row;
+          }),
+        }
+      : {}),
     deprecatedMetrics: deprecated,
     unavailableMetrics,
     emptyMetrics,

@@ -95,6 +95,19 @@ stays ungated.
 | `facebook_get_page_report` | true | false | true | true | v2 F2. One-call Page report: a preset (`last_7/28/90_days`, ending today 00:00 PT, exclusive) or `custom` window vs the preceding equal window — followers (reconciled), reach, views, engagement, Page views with `method` + `delta {abs, pct}`, plus top posts published in the window with lifetime insights. Reach only from the rolling `week`/`days_28` window, never summed; other spans report it unavailable. ≤18 Graph calls; only the current-window read is load-bearing, every other section degrades to a note/error |
 | `facebook_get_posts_insights` | true | false | true | true | v2 F4. Lifetime insights for up to 25 posts in one table: `post_ids` (composite `{page}_{post}`, own Page only) or `latest` N published posts, ≤10 `metrics` (default views, unique viewers, clicks, reactions by type). The metric list is vetted once on the first post that answers (renamed/rejected names dropped for the rest); 3 reads in flight; a failing post is a row `error`, only all rows failing throws. Breakdown maps stay unaggregated |
 
+**File export (v2 F5).** `facebook_page_insights`, `facebook_post_insights`,
+`facebook_reel_insights` and `facebook_get_posts_insights` take an optional
+`output: {format: "csv" | "json", file_name?}`. The full series goes to one file
+under `FB_EXPORT_DIR` (default: the XDG / `%APPDATA%` state dir + `exports/`;
+dir 0700, file 0600), written atomically and never overwriting (a taken name
+gets `-1`, `-2`, …). The row cap and `max_rows` do not apply to the file; the
+inline answer is the aggregate-mode summary plus `export: {path, format, rows,
+bytes, sha256}` (the posts tool returns `postCount` / `postErrors` instead of
+`posts`). `file_name` is a bare name (no path, no leading dot). CSV is RFC 4180
+with CRLF; a text cell starting with `= + - @` is prefixed with `'`. The
+annotations are unchanged: the tools write nothing to Meta, and the local file is
+a new one per call.
+
 ## Package `moderation` (profile `moderator`)
 
 Write-mode default: **apply-by-default** for the reversible ops — moderation is

@@ -8,6 +8,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createFakeClock,
@@ -1418,4 +1421,151 @@ test('post_insights re-reads the rest when Graph rejects one metric by position'
   const rejected = parsed.rejectedMetrics as readonly Record<string, unknown>[];
   assert.equal(rejected[0]?.metric, 'page_media_view');
   assert.match(String(rejected[0]?.reason), /Page-level metric.*facebook_page_insights/);
+});
+
+// ---------------------------------------------------------------------------
+// File export (v2 insights F5)
+// ---------------------------------------------------------------------------
+
+async function withExportDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'fbmcp-insights-export-')));
+  try {
+    await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+function exportOf(parsed: Record<string, unknown>): Record<string, unknown> {
+  const value = parsed.export;
+  assert.ok(value !== null && typeof value === 'object', 'expected an `export` receipt');
+  return value as Record<string, unknown>;
+}
+
+test('page_insights output:csv writes every row past the cap and answers with summaries only', async () => {
+  await withExportDir(async (dir) => {
+    const { fb, ctx } = makeCtx({ settings: makeSettings({ exportDir: dir }) });
+    const available = INSIGHTS_MAX_ROWS + 50;
+    serve(fb, series('page_media_view', 'day', days(available, 3)));
+
+    const parsed = body(
+      await tool('facebook_page_insights').handler(
+        {
+          metrics: ['page_media_view'],
+          since: '2026-07-01',
+          until: '2026-07-20',
+          max_rows: 5,
+          output: { format: 'csv' },
+        },
+        ctx,
+      ),
+    );
+
+    assert.equal(Object.hasOwn(parsed, 'rows'), false, 'no rows inline');
+    assert.equal(Object.hasOwn(parsed, 'exportRows'), false);
+    assert.equal(parsed.mode, 'aggregate');
+    assert.equal(parsed.truncated, false);
+    assert.equal(summariesOf(parsed)[0]?.points, available);
+    const receipt = exportOf(parsed);
+    assert.equal(receipt.format, 'csv');
+    assert.equal(receipt.rows, available, 'the file ignores max_rows and the cap');
+    assert.equal(
+      receipt.path,
+      join(dir, 'page-111222333-2026-07-01-2026-07-20-20260720T120000Z.csv'),
+    );
+    const csv = await readFile(receipt.path, 'utf8');
+    const lines = csv.split('\r\n');
+    assert.equal(lines[0], 'metric,date,end_time,breakdown,value');
+    assert.equal(lines[1], 'page_media_view,2026-07-01,2026-07-01T07:00:00+0000,,3');
+    assert.equal(lines.length, available + 2, 'header + rows + trailing CRLF');
+    assert.equal(receipt.bytes, Buffer.byteLength(csv));
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(receipt.path)).mode & 0o777, 0o600);
+    }
+  });
+});
+
+test('post_insights output:json writes the summaries and rows, and never overwrites', async () => {
+  await withExportDir(async (dir) => {
+    const { fb, ctx } = makeCtx({ settings: makeSettings({ exportDir: dir }) });
+    serve(
+      fb,
+      series('post_reactions_by_type_total', 'lifetime', [
+        [end('2026-07-01'), { '=cmd': 1, like: 4 }],
+      ]),
+    );
+    const input = {
+      metrics: ['post_reactions_by_type_total'],
+      post_id: POST_ID,
+      output: { format: 'json', file_name: 'reactions' },
+    };
+
+    const first = exportOf(
+      body(await tool('facebook_post_insights').handler(input, ctx)),
+    );
+    const second = exportOf(
+      body(await tool('facebook_post_insights').handler(input, ctx)),
+    );
+    assert.equal(first.path, join(dir, 'reactions.json'));
+    assert.equal(second.path, join(dir, 'reactions-1.json'));
+
+    const file = JSON.parse(await readFile(first.path, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(file.scope, 'post');
+    assert.equal(file.postId, POST_ID);
+    assert.equal(file.pageId, PAGE_ID);
+    assert.ok(Array.isArray(file.metrics));
+    assert.deepEqual(
+      (file.rows as Record<string, unknown>[]).map((row) => [row.breakdown, row.value]),
+      [
+        ['=cmd', 1],
+        ['like', 4],
+      ],
+    );
+  });
+});
+
+test('page_insights output:csv guards a formula-looking breakdown key', async () => {
+  await withExportDir(async (dir) => {
+    const { fb, ctx } = makeCtx({ settings: makeSettings({ exportDir: dir }) });
+    serve(
+      fb,
+      series('page_actions_post_reactions_by_type_total', 'day', [
+        [end('2026-07-01'), { '=HYPERLINK("x")': 2 }],
+      ]),
+    );
+    const receipt = exportOf(
+      body(
+        await tool('facebook_page_insights').handler(
+          {
+            metrics: ['page_actions_post_reactions_by_type_total'],
+            output: { format: 'csv' },
+          },
+          ctx,
+        ),
+      ),
+    );
+    const csv = await readFile(receipt.path as string, 'utf8');
+    assert.match(csv, /,"'=HYPERLINK\(""x""\)",2\r\n$/);
+  });
+});
+
+test('the output file_name refuses a path before any request', async () => {
+  const { fb, ctx } = makeCtx();
+  for (const fileName of ['../escape', '.env', 'a/b']) {
+    await rejects(
+      tool('facebook_reel_insights').handler(
+        {
+          metrics: ['blue_reels_play_count'],
+          video_id: VIDEO_ID,
+          output: { format: 'csv', file_name: fileName },
+        },
+        ctx,
+      ),
+      /file_name/,
+    );
+  }
+  assert.equal(fb.calls.length, 0);
 });

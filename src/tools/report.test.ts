@@ -7,6 +7,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createFakeClock,
@@ -36,7 +39,7 @@ const PAGE_TOKEN = 'EAA-PAGE-TOKEN-0123456789';
 /** 2026-10-24 05:00 Pacific. */
 const NOW = Date.parse('2026-10-24T12:00:00Z');
 
-function makeSettings(): Settings {
+function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     profiles: {},
     apiVersion: 'v23.0',
@@ -55,6 +58,7 @@ function makeSettings(): Settings {
     packagesReadonly: [],
     journalPath: '/tmp/journal.ndjson',
     logLevel: 'info',
+    ...overrides,
   };
 }
 
@@ -62,14 +66,18 @@ function makeLogger(): Logger {
   return { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 }
 
-function makeCtx(): { fb: FakeFbRequest; pages: FakePageResolver; ctx: ToolContext } {
+function makeCtx(settings: Settings = makeSettings()): {
+  fb: FakeFbRequest;
+  pages: FakePageResolver;
+  ctx: ToolContext;
+} {
   const fb = createFakeFbRequest();
   const pages = createFakePageResolver({
     default: { pageId: PAGE_ID, name: 'Default', token: PAGE_TOKEN },
   });
   const clock = createFakeClock(NOW);
   const ctx: ToolContext = {
-    settings: makeSettings(),
+    settings,
     fbRequest: fb.fn,
     pages,
     logger: makeLogger(),
@@ -404,4 +412,38 @@ test('get_posts_insights: the schema bounds ids, latest and metrics', () => {
     'post_clicks',
     'post_reactions_by_type_total',
   ]);
+});
+
+test('get_posts_insights: output:csv writes a long table and returns counts, not rows', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'fbmcp-posts-export-')));
+  try {
+    const { fb, ctx } = makeCtx(makeSettings({ exportDir: dir }));
+    const spec = postsTool();
+    servePostInsights(fb, `${PAGE_ID}_1`, 10);
+
+    const parsed = body(
+      await spec.handler(
+        spec.inputSchema.parse({
+          post_ids: [`${PAGE_ID}_1`, '444555666_2'],
+          metrics: ['post_media_view'],
+          output: { format: 'csv' },
+        }),
+        ctx,
+      ),
+    );
+
+    assert.equal(Object.hasOwn(parsed, 'posts'), false, 'no rows inline');
+    assert.equal(parsed.postCount, 2);
+    assert.equal(parsed.postErrors, 1);
+    assert.deepEqual(parsed.columns, ['post_media_view']);
+    const receipt = parsed.export as Record<string, unknown>;
+    assert.equal(receipt.path, join(dir, 'posts-111222333-20261024T120000Z.csv'));
+    assert.equal(receipt.rows, 2);
+    const lines = (await readFile(receipt.path, 'utf8')).split('\r\n');
+    assert.equal(lines[0], 'post_id,created_time,metric,breakdown,value,error');
+    assert.equal(lines[1], `${PAGE_ID}_1,,post_media_view,,10,`);
+    assert.match(lines[2] ?? '', /^444555666_2,,,,,.+/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

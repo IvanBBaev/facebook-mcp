@@ -334,6 +334,20 @@ export const env = Object.freeze([
       'Path to the small JSON file where facebook_get_activity_since keeps, per Page, the horizon of the last complete read. Defaults to the XDG/%APPDATA% state path next to the journal; the file holds Page ids and timestamps only and is written atomically, owner-only (0600).',
     example: '',
   },
+  {
+    name: 'FB_EXPORT_DIR',
+    group: 'Write safety',
+    required: 'no',
+    secret: false,
+    default: 'XDG / %APPDATA% state path',
+    defaultIsProse: true,
+    format: 'filepath',
+    summary:
+      'Directory for insights file exports (`output` argument; 0700 dir, 0600 files).',
+    description:
+      'Directory where the insights tools write a CSV or JSON file when called with `output`. Defaults to `exports/` under the XDG/%APPDATA% state path. Files are written atomically and owner-only (0600) and are never overwritten; a name collision gets a numeric suffix.',
+    example: '',
+  },
 
   // --- Tool surface --------------------------------------------------------
   {

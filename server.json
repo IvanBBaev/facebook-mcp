@@ -126,6 +126,12 @@
           "format": "filepath"
         },
         {
+          "name": "FB_EXPORT_DIR",
+          "description": "Directory where the insights tools write a CSV or JSON file when called with `output`. Defaults to `exports/` under the XDG/%APPDATA% state path. Files are written atomically and owner-only (0600) and are never overwritten; a name collision gets a numeric suffix.",
+          "isRequired": false,
+          "format": "filepath"
+        },
+        {
           "name": "FB_TOOL_PACKAGES",
           "description": "Comma-separated tool packages or profiles to expose (e.g. core,posts,reader, or the profiles core|all|reader|publisher|moderator|ads). Omit for the default profile, which excludes ads.",
           "isRequired": false,

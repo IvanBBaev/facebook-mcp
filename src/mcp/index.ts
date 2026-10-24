@@ -66,3 +66,6 @@ export * from './doctor.js';
 
 // R05 — guided `setup-token` onboarding (classify → exchange → Page → env file).
 export * from './setup-token.js';
+
+// v2 insights F5 — local file exports (CSV/JSON, atomic, no overwrite).
+export * from './export-file.js';

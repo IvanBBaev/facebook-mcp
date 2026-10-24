@@ -23,6 +23,7 @@ import type {
 } from './types.js';
 import {
   defaultActivityStatePath,
+  defaultExportDir,
   defaultJournalPath,
   envFilePath,
   loadEnvFile,
@@ -162,6 +163,7 @@ const SETTING_NAMES: readonly string[] = [
   'FB_PACKAGES_READONLY',
   'FB_JOURNAL_PATH',
   'FB_ACTIVITY_STATE_PATH',
+  'FB_EXPORT_DIR',
   'FB_LOG_LEVEL',
   'FB_AD_ACCOUNT_ID',
   'FB_ADS_BUDGET_CEILING',
@@ -440,6 +442,19 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
           key,
         ),
     ) ?? defaultActivityState();
+  const defaultExport = (): string =>
+    defaultExportDir({ platform: options.platform, env, homeDir: options.homeDir });
+  const exportDir =
+    resolveOperatorPath('FB_EXPORT_DIR', str('FB_EXPORT_DIR'), pathOpts, (key, raw) =>
+      warn(
+        'relative-export-dir',
+        `${key} must be an absolute path; got ${JSON.stringify(raw)}. A relative directory resolves ` +
+          'against whatever working directory the MCP client spawned the server in, so insights ' +
+          `exports would land somewhere unpredictable. Using the default ${defaultExport()} instead ` +
+          '(a leading ~ is expanded to the home directory).',
+        key,
+      ),
+    ) ?? defaultExport();
   const logLevel = enumOf<LogLevel>(
     'FB_LOG_LEVEL',
     ['debug', 'info', 'warn', 'error'],
@@ -488,6 +503,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     packagesReadonly,
     journalPath,
     activityStatePath,
+    exportDir,
     logLevel,
     adAccountId,
     adsBudgetCeiling,

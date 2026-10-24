@@ -129,6 +129,8 @@ export interface Settings {
   readonly journalPath: string;
   /** `FB_ACTIVITY_STATE_PATH`; absent ⇒ `defaultActivityStatePath()` (config.ts). */
   readonly activityStatePath?: string;
+  /** `FB_EXPORT_DIR`; absent ⇒ `defaultExportDir()` (config.ts). */
+  readonly exportDir?: string;
   readonly logLevel: LogLevel;
 
   // Ads (opt-in, 1.1)

@@ -25,6 +25,9 @@ export const ENV_FILE_NAME = '.env';
 export const JOURNAL_FILE_NAME = 'journal.ndjson';
 export const ACTIVITY_STATE_FILE_NAME = 'activity-state.json';
 
+/** Basename of the insights export directory inside the state dir. */
+export const EXPORT_DIR_NAME = 'exports';
+
 /** Basename of the operator-curated saved replies inside the config dir. */
 export const SAVED_REPLIES_FILE_NAME = 'saved-replies.json';
 
@@ -130,6 +133,11 @@ export function defaultJournalPath(o?: PathOptions): string {
 /** Absolute default path of the facebook_get_activity_since high-water marks. */
 export function defaultActivityStatePath(o?: PathOptions): string {
   return pathFor(resolvePlatform(o)).join(stateDir(o), ACTIVITY_STATE_FILE_NAME);
+}
+
+/** Absolute default directory of the insights file exports (v2 insights F5). */
+export function defaultExportDir(o?: PathOptions): string {
+  return pathFor(resolvePlatform(o)).join(stateDir(o), EXPORT_DIR_NAME);
 }
 
 /**

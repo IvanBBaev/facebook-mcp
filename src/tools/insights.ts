@@ -55,7 +55,8 @@ import {
   fetchInsights,
   type InsightsScope,
 } from '../api/insights.js';
-import { defineTool } from '../mcp/index.js';
+import { defineTool, exportOutputArg, type ExportOutput } from '../mcp/index.js';
+import { exportInsights, withoutRows } from './insights-export.js';
 import { createPageReportTool, createPostsInsightsTool } from './report.js';
 import { profileArg, shapeFor, videoIdArg } from './shared.js';
 
@@ -231,6 +232,7 @@ const insightsArgs = {
   until: untilArg,
   aggregate: aggregateArg,
   max_rows: maxRowsArg,
+  output: exportOutputArg,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -250,6 +252,7 @@ interface InsightsInput {
   readonly until?: string | undefined;
   readonly aggregate?: boolean | undefined;
   readonly max_rows?: number | undefined;
+  readonly output?: ExportOutput | undefined;
 }
 
 /**
@@ -330,6 +333,10 @@ function assertWindowHasPast(since: string | undefined, nowMs: number): void {
  * over-wide window, a Graph metric rejection) propagate: the server maps them
  * through the F06 matrix into a redacted error result, so swallowing them here
  * would only hide the actionable text the api module worked to produce.
+ *
+ * With `output` (v2 insights F5) the call runs in aggregate mode and ALSO asks
+ * for the uncapped series; that series goes to the file, never inline, and the
+ * result carries the file's receipt as `export` instead of `rows`.
  */
 async function readInsights(
   ctx: ToolContext,
@@ -351,20 +358,48 @@ async function readInsights(
     ...(input.period !== undefined ? { period: input.period } : {}),
     ...(input.since !== undefined ? { since: input.since } : {}),
     ...(input.until !== undefined ? { until: input.until } : {}),
-    ...(input.aggregate !== undefined ? { aggregate: input.aggregate } : {}),
-    ...(input.max_rows !== undefined ? { maxRows: input.max_rows } : {}),
+    ...(input.output !== undefined
+      ? { aggregate: true, exportRows: true }
+      : {
+          ...(input.aggregate !== undefined ? { aggregate: input.aggregate } : {}),
+          ...(input.max_rows !== undefined ? { maxRows: input.max_rows } : {}),
+        }),
     token: resolved.token,
     ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     // The injected clock, never Date.now(): the freshness note and the span of
     // a lone `since` both depend on "now" and must stay testable.
     nowMs: ctx.clock.now(),
   });
+  const object = objectId !== undefined ? { [OBJECT_KEY[scope]]: objectId } : undefined;
+  if (input.output === undefined) {
+    return shapeFor(ctx, {
+      profile: input.profile ?? null,
+      pageId: resolved.pageId,
+      ...object,
+      contractVersion: INSIGHTS_CONTRACT_VERSION,
+      ...result,
+    });
+  }
+  const receipt = await exportInsights(
+    ctx,
+    input.output,
+    {
+      contractVersion: INSIGHTS_CONTRACT_VERSION,
+      scope,
+      pageId: resolved.pageId,
+      ...(object !== undefined ? { object } : {}),
+    },
+    result,
+  );
   return shapeFor(ctx, {
     profile: input.profile ?? null,
     pageId: resolved.pageId,
-    ...(objectId !== undefined ? { [OBJECT_KEY[scope]]: objectId } : {}),
+    ...object,
     contractVersion: INSIGHTS_CONTRACT_VERSION,
-    ...result,
+    ...withoutRows(result),
+    // The cap never applied to the file: every point Graph returned is in it.
+    truncated: false,
+    export: receipt,
   });
 }
 
@@ -395,7 +430,9 @@ export function createInsightsPackage(): PackageSpec {
       'stock is never summed, rolling windows are not double-counted, and ' +
       'unique or unknown multi-point metrics are left unaggregated rather than ' +
       'guessed; `derived.followers` reconciles page_follows with daily follows ' +
-      'minus unfollows. Set aggregate:true to omit rows. The window is ' +
+      'minus unfollows. Set aggregate:true to omit rows, or output:{format} to ' +
+      'write the full uncapped series to a CSV/JSON file in FB_EXPORT_DIR and ' +
+      'get only its path and the summaries back. The window is ' +
       '[since, until) in Pacific Time, ' +
       `at most ${String(INSIGHTS_MAX_WINDOW_DAYS)} days per call. ` +
       'Metric names renamed by the 2024-09 / 2025-11 / 2026-06 waves are answered ' +
@@ -419,7 +456,8 @@ export function createInsightsPackage(): PackageSpec {
       'post_reactions_by_type_total, video metrics, ...) in the same compact flat ' +
       'shape as facebook_page_insights: rows plus semantics-aware per-metric ' +
       'summaries (`total` removed; read `value` and `aggregation`), or ' +
-      'summaries only with aggregate:true. The default period is "lifetime" — one ' +
+      'summaries only with aggregate:true (output:{format} writes every row to a ' +
+      'CSV/JSON file instead). The default period is "lifetime" — one ' +
       'cumulative value per metric. Post metrics lag minutes to hours after ' +
       'publishing, so empty series on a fresh post are normal and are flagged as ' +
       'such rather than reported as zeros. Reel metrics are NOT reachable through ' +
@@ -441,7 +479,8 @@ export function createInsightsPackage(): PackageSpec {
       'or returned by facebook_create_reel), NOT a "{page-id}_{post-id}" post ID. Same compact ' +
       'shape as the other insights tools: flat rows plus one semantics-aware ' +
       'summary per metric (`total` removed; read `value` and `aggregation`), ' +
-      'or summaries only with aggregate:true. The default period is "lifetime", ' +
+      'or summaries only with aggregate:true (output:{format} writes every row to ' +
+      'a CSV/JSON file instead). The default period is "lifetime", ' +
       'because plays and watch time are cumulative counters rather than a daily ' +
       'series. Metric names are their own vocabulary — page/post names do not ' +
       "transfer — and Meta's reference lists blue_reels_play_count, " +

@@ -73,6 +73,19 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Insights file export (v2 insights F5).** `facebook_page_insights`,
+  `facebook_post_insights`, `facebook_reel_insights` and
+  `facebook_get_posts_insights` take an optional
+  `output: {format: "csv" | "json", file_name?}`. The full, uncapped series is
+  written to one file under the new `FB_EXPORT_DIR` setting (default: an
+  `exports` folder in the state directory). The tool then answers with the
+  per-metric summaries and `export: {path, format, rows, bytes, sha256}`
+  instead of rows, so a long daily series is no longer cut at the row cap.
+  Files are written atomically with mode 0600 and never overwrite an existing
+  file; a taken name gets a numeric suffix. `file_name` must be a bare name.
+  CSV output prefixes text cells that start with `=`, `+`, `-` or `@` with `'`,
+  so a spreadsheet does not run them as formulas.
+
 - **`facebook_upload_ad_image` (v2 ads §2).** Upload one local image under
   `FB_MEDIA_DIR` to an ad account's image library and get back its `hash`, the
   handle ad creatives reference. Plan-first, tier `reversible`; the preview
