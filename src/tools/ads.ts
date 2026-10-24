@@ -320,6 +320,15 @@ const lifetimeBudgetMinorArg = z
     'New lifetime budget in MINOR currency units of the ad account — the unit Meta counts for that currency, its currency offset (USD 1000 = 10.00; zero-decimal JPY or TWD 1000 = 1000). Mutually exclusive with `daily_budget_minor`. A lifetime budget requires the object to have an end time — without one Graph rejects the write.',
   );
 
+const spendCapMinorArg = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe(
+    'New campaign spend cap — the total the campaign may spend over its lifetime — in MINOR currency units of the ad account (same unit as the budgets). Campaign level only: pass level="campaign". Setting a first cap or lowering one is irreversible (it can stop delivery); raising one is a spend write. Refused above FB_ADS_CAMPAIGN_SPEND_CAP_MAX (raise or first set; lowering is always allowed) and below the account\'s minimum campaign spend cap. Removing a cap is not offered.',
+  );
+
 /** The fields the three listing tools share, spread into each tool's own object. */
 const listAdArgs = {
   ad_account_id: adAccountIdArg,
@@ -468,6 +477,7 @@ function divergenceState(record: AdRecord): Record<string, unknown> {
     effective_status: record.effective_status ?? null,
     daily_budget_minor: record.daily_budget_minor ?? null,
     lifetime_budget_minor: record.lifetime_budget_minor ?? null,
+    spend_cap_minor: record.spend_cap_minor ?? null,
   };
 }
 
@@ -529,11 +539,13 @@ function writeIntent(input: {
   readonly status?: SettableStatus | undefined;
   readonly daily_budget_minor?: number | undefined;
   readonly lifetime_budget_minor?: number | undefined;
+  readonly spend_cap_minor?: number | undefined;
 }): AdWriteIntent {
   const stopsDelivery =
     input.status === 'PAUSED' &&
     input.daily_budget_minor === undefined &&
-    input.lifetime_budget_minor === undefined;
+    input.lifetime_budget_minor === undefined &&
+    input.spend_cap_minor === undefined;
   return { stopsDelivery };
 }
 
@@ -834,7 +846,7 @@ export function createAdsPackage(): PackageSpec {
     name: 'facebook_update_ad_object',
     title: 'Update Ad Object',
     description:
-      'Pause or resume an ads object, or change its budget. Plan-first: without ' +
+      'Pause or resume an ads object, change its budget, or set a campaign spend cap. Plan-first: without ' +
       'apply:true this returns a preview naming the exact before → after values ' +
       'and changes NOTHING. Applying requires apply:true plus the plan_id from ' +
       'that preview, because both writes move money — resuming starts spending ' +
@@ -843,7 +855,8 @@ export function createAdsPackage(): PackageSpec {
       'account — the unit Meta counts for that currency, its currency offset ' +
       '(USD 1000 = 10.00; zero-decimal JPY or TWD 1000 = 1000), integers only — and are refused, never ' +
       'clamped, when ' +
-      'they exceed FB_ADS_BUDGET_CEILING. Only campaigns and ad sets have ' +
+      'they exceed FB_ADS_BUDGET_CEILING. A campaign `spend_cap_minor` is bounded by ' +
+      'FB_ADS_CAMPAIGN_SPEND_CAP_MAX and is never removed. Only campaigns and ad sets have ' +
       'budgets; archived and deleted objects are read-only and are refused before ' +
       'the request. Setting status:"ACTIVE" sets the CONFIGURATION — check ' +
       '`effective_status` afterwards to learn whether the object actually ' +
@@ -856,6 +869,7 @@ export function createAdsPackage(): PackageSpec {
       status: statusArg,
       daily_budget_minor: dailyBudgetMinorArg,
       lifetime_budget_minor: lifetimeBudgetMinorArg,
+      spend_cap_minor: spendCapMinorArg,
       apply: applyArg,
       plan_id: planIdArg,
       confirm_token: confirmTokenArg,
@@ -908,12 +922,21 @@ export function createAdsPackage(): PackageSpec {
           ...(input.lifetime_budget_minor !== undefined
             ? { lifetimeBudgetMinor: input.lifetime_budget_minor }
             : {}),
+          ...(input.spend_cap_minor !== undefined
+            ? { spendCapMinor: input.spend_cap_minor }
+            : {}),
         },
         {
           current: current.object,
           ...(account?.currency !== undefined ? { currency: account.currency } : {}),
           ...(ctx.settings.adsBudgetCeiling !== undefined
             ? { budgetCeilingMinor: ctx.settings.adsBudgetCeiling }
+            : {}),
+          ...(ctx.settings.adsCampaignSpendCapMax !== undefined
+            ? { spendCapMaxMinor: ctx.settings.adsCampaignSpendCapMax }
+            : {}),
+          ...(account?.minCampaignSpendCapMinor !== undefined
+            ? { minCampaignSpendCapMinor: account.minCampaignSpendCapMinor }
             : {}),
         },
       );
@@ -968,6 +991,9 @@ export function createAdsPackage(): PackageSpec {
           ...(input.lifetime_budget_minor !== undefined
             ? { lifetime_budget_minor: input.lifetime_budget_minor }
             : {}),
+          ...(input.spend_cap_minor !== undefined
+            ? { spend_cap_minor: input.spend_cap_minor }
+            : {}),
         },
         ...gateArgs(input),
         summary: plan.summary,
@@ -999,7 +1025,7 @@ export function createAdsPackage(): PackageSpec {
     description:
       'Marketing API access: campaign / ad-set / ad listings with delivery truth, ' +
       'single-object reads, placement previews, insights with async report runs, and plan-gated ' +
-      'status and budget control. Off by default.',
+      'status, budget and campaign spend-cap control. Off by default.',
     tools: [
       listCampaigns,
       listAdsets,

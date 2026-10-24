@@ -47,7 +47,7 @@ import type {
   FbRequestFn,
   ParamValue,
 } from '../core/index.js';
-import { formatMinor } from './ads-money.js';
+import { SPEND_CAP_REMOVAL_SENTINEL, formatMinor } from './ads-money.js';
 import { DEFAULT_PAGE_LIMIT, fetchPage } from './shared.js';
 import type { EdgeRequest } from './shared.js';
 
@@ -435,7 +435,16 @@ export function normalizeAdNode(raw: unknown): AdRecord {
   for (const key of BUDGET_KEYS) {
     if (!(key in src)) continue;
     const minor = parseMinorUnits(src[key]);
-    if (minor !== undefined) {
+    const beyondSafe =
+      minor === undefined && /^\d{16,}$/.test(readString(src[key])?.trim() ?? '');
+    if (
+      key === 'spend_cap' &&
+      (beyondSafe || (minor !== undefined && minor >= SPEND_CAP_REMOVAL_SENTINEL))
+    ) {
+      // Meta's "no cap" sentinel (or a wider integer form of it) is not an
+      // amount: `null` means the campaign has none.
+      out.spend_cap_minor = null;
+    } else if (minor !== undefined) {
       out[`${key}_minor`] = minor;
     } else {
       // Not an integer string — keep Graph's value verbatim rather than invent one.

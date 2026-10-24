@@ -73,6 +73,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Campaign `spend_cap_minor` on `facebook_update_ad_object`.** A campaign's
+  lifetime spend cap can now be set, raised or lowered in minor units of the ad
+  account currency. It needs `level: "campaign"`. A raise is a `spend` write; a
+  first cap or a lower one is `irreversible`, because it can stop delivery. When
+  combined with a status or budget change, the higher tier applies. Setting or
+  raising a cap is refused above `FB_ADS_CAMPAIGN_SPEND_CAP_MAX`, and refused
+  outright when that setting is unset. Lowering a cap is always allowed. A cap
+  below the account's `min_campaign_group_spend_cap` is refused, as is a cap
+  equal to the current one. Removal is not offered: Meta's "no cap" sentinel is
+  refused, and it reads back as `spend_cap_minor: null`. The cap is part of the
+  plan's divergence check and of the journal's `changedFields`.
+
 - **Organic post `targeting` on `facebook_create_post`,
   `facebook_create_photo_post` and `facebook_create_video_post`.** An optional
   `targeting` object narrows who sees the post in Feed. It takes

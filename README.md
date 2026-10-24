@@ -462,7 +462,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `insights`   |       yes       | 5 read            |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                                                                |
 | `moderation` |       yes       | 3 read + 10 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                                                                          |
 | `messages`   |       yes       | 4 read + 3 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window; or ask what is new since the last look; keep local saved replies to send verbatim. Plan-first by default. |
-| `ads`        | **no** (opt-in) | 7 read + 1 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status and budget control. Off by default.                                                                             |
+| `ads`        | **no** (opt-in) | 7 read + 1 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, and plan-gated status, budget and campaign spend-cap control. Off by default.                                                         |
 
 <!-- END GENERATED -->
 
@@ -524,7 +524,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `ads`        | `facebook_get_ad_preview`         |     `read`     | Show how an existing ad, an existing ad creative, or a Page post used as an ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD).                  |
 | `ads`        | `facebook_ads_insights`           |     `read`     | Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad.                                                          |
 | `ads`        | `facebook_ads_report_status`      |     `read`     | Probe one async insights report run and, with fetch_results:true, read its rows once it has completed.                                                                     |
-| `ads`        | `facebook_update_ad_object`       |    `spend`     | Pause or resume an ads object, or change its budget.                                                                                                                       |
+| `ads`        | `facebook_update_ad_object`       |    `spend`     | Pause or resume an ads object, change its budget, or set a campaign spend cap.                                                                                             |
 
 <!-- END GENERATED -->
 

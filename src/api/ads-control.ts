@@ -45,11 +45,15 @@ import { MARKETING_API } from './ads-read.js';
 import type { AdLevel, AdRecord } from './ads-read.js';
 import {
   HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES,
+  SPEND_CAP_REMOVAL_SENTINEL,
   ZERO_DECIMAL_CURRENCIES,
+  assertSpendCapMaxReachable,
   enforceCeiling,
+  enforceSpendCapMax,
   formatMinor,
   hundredthOffsetNote,
   validateBudgetMinor,
+  validateSpendCapMinor,
   zeroDecimalNote,
 } from './ads-money.js';
 
@@ -106,6 +110,17 @@ export const LIFETIME_NEEDS_END_NOTE =
  */
 export const LIFETIME_END_UNVERIFIED_NOTE =
   'A lifetime budget requires an end time (`end_time` on an ad set, `stop_time` on a campaign). It could not be checked: no `level` was given, so the object was read with the common field set, which carries neither. Pass level=campaign|adset to have the preview verify it; if the object has no end time, Graph rejects the write.';
+
+/** Emitted whenever a campaign spend cap is written: it is a hard stop on delivery. */
+export const SPEND_CAP_STOP_NOTE =
+  'A campaign spend cap is a hard stop: once the campaign has spent this much in total (lifetime, not per day), Meta stops delivering it. The previous cap is overwritten and this server cannot remove a cap afterwards.';
+
+/**
+ * Emitted when the campaign's lifetime spend could not be compared with the new
+ * cap: a cap at or below what the campaign has already spent stops it at once.
+ */
+export const SPEND_CAP_SPENT_UNKNOWN_NOTE =
+  "The campaign's lifetime spend was not read for this preview. If it has already spent the new cap or more, the campaign stops delivering immediately — check the campaign's lifetime spend in facebook_ads_insights (date_preset=maximum) before applying.";
 
 // ---------------------------------------------------------------------------
 // 2. Errors
@@ -212,12 +227,12 @@ export function resolveSettableStatus(raw: string): SettableStatus {
 // 4. Plan shapes
 // ---------------------------------------------------------------------------
 
-export type AdUpdateKind = 'status' | 'budget';
+export type AdUpdateKind = 'status' | 'budget' | 'spend_cap';
 
 /** One field being written, with the value it is replacing when known. */
 export interface AdUpdateChange {
   readonly kind: AdUpdateKind;
-  /** Wire field name (`status`, `daily_budget`, `lifetime_budget`). */
+  /** Wire field name (`status`, `daily_budget`, `lifetime_budget`, `spend_cap`). */
   readonly field: string;
   /** Current value, when it could be read off the object. */
   readonly from?: string | number;
@@ -231,6 +246,8 @@ export interface AdUpdateRequest {
   readonly status?: string;
   readonly dailyBudgetMinor?: number;
   readonly lifetimeBudgetMinor?: number;
+  /** Campaign spend cap in minor units; campaign level only, never removed. */
+  readonly spendCapMinor?: number;
 }
 
 export interface AdUpdateContext {
@@ -240,6 +257,12 @@ export interface AdUpdateContext {
   readonly currency?: string;
   /** `FB_ADS_BUDGET_CEILING`, in minor units. Absent ⇒ no local ceiling. */
   readonly budgetCeilingMinor?: number;
+  /** `FB_ADS_CAMPAIGN_SPEND_CAP_MAX`, in minor units. Absent ⇒ no cap may be set or raised. */
+  readonly spendCapMaxMinor?: number;
+  /** The ad account's `min_campaign_group_spend_cap`, in minor units. */
+  readonly minCampaignSpendCapMinor?: number;
+  /** The campaign's lifetime spend so far, in minor units, when it was read. */
+  readonly amountSpentMinor?: number;
 }
 
 export interface AdUpdatePlan {
@@ -398,10 +421,11 @@ export function planAdObjectUpdate(
   if (
     req.status === undefined &&
     req.dailyBudgetMinor === undefined &&
-    req.lifetimeBudgetMinor === undefined
+    req.lifetimeBudgetMinor === undefined &&
+    req.spendCapMinor === undefined
   ) {
     throw validationError(
-      'Nothing to change: pass `status` (ACTIVE or PAUSED) and/or a budget in minor units (`daily_budget_minor` or `lifetime_budget_minor`).',
+      'Nothing to change: pass `status` (ACTIVE or PAUSED), a budget in minor units (`daily_budget_minor` or `lifetime_budget_minor`) and/or a campaign `spend_cap_minor`.',
     );
   }
 
@@ -435,7 +459,8 @@ export function planAdObjectUpdate(
     req.status !== undefined &&
     resolveSettableStatus(req.status) === 'PAUSED' &&
     req.dailyBudgetMinor === undefined &&
-    req.lifetimeBudgetMinor === undefined;
+    req.lifetimeBudgetMinor === undefined &&
+    req.spendCapMinor === undefined;
   if (
     advantageState !== undefined &&
     OUT_OF_SCOPE_ADVANTAGE_STATES.has(advantageState) &&
@@ -545,6 +570,14 @@ export function planAdObjectUpdate(
     }
   }
 
+  if (req.spendCapMinor !== undefined) {
+    const raise = planSpendCap(req, ctx, params, changes, warnings);
+    // Setting a first cap or lowering one can only stop delivery sooner, but it
+    // overwrites the previous value: irreversible. A raise lets it spend more.
+    tier = higherTier(tier, raise ? 'spend' : 'irreversible');
+    if (raise) increasesSpend = true;
+  }
+
   return {
     objectId: req.objectId,
     ...(req.level !== undefined ? { level: req.level } : {}),
@@ -558,6 +591,110 @@ export function planAdObjectUpdate(
   };
 }
 
+/**
+ * The campaign's current spend cap: a positive minor-unit value, or `undefined`
+ * when it has none (absent, `null` — the normaliser's reading of Meta's removal
+ * sentinel — or `0`).
+ */
+function currentSpendCap(record: AdRecord): number | undefined {
+  const value = currentMinor(record, 'spend_cap');
+  return value !== undefined && value > 0 && value < SPEND_CAP_REMOVAL_SENTINEL
+    ? value
+    : undefined;
+}
+
+/**
+ * Validate and plan the `spend_cap` part of an update, pushing its param,
+ * change and warnings. Returns whether it RAISES an existing cap — the one case
+ * that lets the campaign spend more.
+ */
+function planSpendCap(
+  req: AdUpdateRequest,
+  ctx: AdUpdateContext,
+  params: Record<string, ParamValue>,
+  changes: AdUpdateChange[],
+  warnings: string[],
+): boolean {
+  const requested = req.spendCapMinor ?? 0;
+  const argName = 'spend_cap_minor';
+  if (req.level !== 'campaign') {
+    throw validationError(
+      `spend_cap is a campaign field: pass level="campaign" with \`${argName}\`. Ad sets and ads have no spend cap of their own. Nothing was changed.`,
+    );
+  }
+  validateSpendCapMinor(argName, requested);
+  if (requested <= 0) {
+    throw validationError(
+      `\`${argName}\` must be a positive integer in minor units; removing a campaign spend cap is out of scope for this server. Nothing was changed.`,
+    );
+  }
+
+  const current = currentSpendCap(ctx.current);
+  if (current !== undefined && requested === current) {
+    throw validationError(
+      `Nothing to change: the campaign spend cap of ${req.objectId} is already ${formatMinor(current, ctx.currency)}.`,
+    );
+  }
+  const lowering = current !== undefined && requested < current;
+  if (!lowering) {
+    // A first cap or a raise is bounded by the operator's maximum. Lowering only
+    // reduces exposure, so it stays allowed even above the max or without one.
+    // A max below Meta's minimum is named first: no cap could ever pass both.
+    if (ctx.spendCapMaxMinor !== undefined) {
+      assertSpendCapMaxReachable(
+        ctx.spendCapMaxMinor,
+        ctx.minCampaignSpendCapMinor,
+        ctx.currency,
+      );
+    }
+    enforceSpendCapMax({
+      field: argName,
+      requested,
+      current,
+      max: ctx.spendCapMaxMinor,
+      currency: ctx.currency,
+      objectId: req.objectId,
+    });
+  }
+  if (
+    ctx.minCampaignSpendCapMinor !== undefined &&
+    requested < ctx.minCampaignSpendCapMinor
+  ) {
+    throw validationError(
+      `Refused: \`${argName}\` of ${formatMinor(requested, ctx.currency)} is below Meta's minimum campaign spend cap (${formatMinor(ctx.minCampaignSpendCapMinor, ctx.currency)}) for this account. Nothing was changed on ${req.objectId}. Request ${String(ctx.minCampaignSpendCapMinor)} or more.`,
+    );
+  }
+
+  params.spend_cap = requested;
+  changes.push({
+    kind: 'spend_cap',
+    field: 'spend_cap',
+    ...(current !== undefined ? { from: current } : {}),
+    to: requested,
+  });
+  warnings.push(SPEND_CAP_STOP_NOTE);
+  if (ctx.amountSpentMinor === undefined) {
+    warnings.push(SPEND_CAP_SPENT_UNKNOWN_NOTE);
+  } else if (requested <= ctx.amountSpentMinor) {
+    warnings.push(
+      `The campaign has already spent ${formatMinor(ctx.amountSpentMinor, ctx.currency)}, at or above the new cap of ${formatMinor(requested, ctx.currency)}: the campaign stops delivering immediately after this write.`,
+    );
+  }
+  if (
+    ctx.currency !== undefined &&
+    ZERO_DECIMAL_CURRENCIES.has(ctx.currency.trim().toUpperCase())
+  ) {
+    warnings.push(zeroDecimalNote(argName, requested, ctx.currency));
+  }
+  if (
+    ctx.currency !== undefined &&
+    HUNDREDTH_OFFSET_THREE_DECIMAL_CURRENCIES.has(ctx.currency.trim().toUpperCase())
+  ) {
+    warnings.push(hundredthOffsetNote(argName, requested, ctx.currency));
+  }
+  return current !== undefined && requested > current;
+}
+
 /** One-line, value-explicit summary for the plan preview. */
 export function summarizePlan(
   objectId: string,
@@ -567,14 +704,17 @@ export function summarizePlan(
 ): string {
   const what = changes
     .map((change) => {
+      const money = change.kind === 'budget' || change.kind === 'spend_cap';
       const to =
-        change.kind === 'budget' && typeof change.to === 'number'
+        money && typeof change.to === 'number'
           ? formatMinor(change.to, currency)
           : String(change.to);
       const from =
         change.from === undefined
-          ? 'unknown'
-          : change.kind === 'budget' && typeof change.from === 'number'
+          ? change.kind === 'spend_cap'
+            ? 'none'
+            : 'unknown'
+          : money && typeof change.from === 'number'
             ? formatMinor(change.from, currency)
             : String(change.from);
       return `${change.field}: ${from} -> ${to}`;

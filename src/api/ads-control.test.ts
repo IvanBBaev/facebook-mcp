@@ -16,6 +16,8 @@ import {
   LIFETIME_END_UNVERIFIED_NOTE,
   LIFETIME_NEEDS_END_NOTE,
   RESUME_NOT_DELIVERY_NOTE,
+  SPEND_CAP_SPENT_UNKNOWN_NOTE,
+  SPEND_CAP_STOP_NOTE,
   applyAdObjectUpdate,
   mapUpdateError,
   planAdObjectUpdate,
@@ -931,4 +933,167 @@ test('A5: other Advantage+ states, or no state at all, are not refused', () => {
     );
     assert.equal(plan.params.daily_budget, 2000);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Campaign spend cap (v2 ads §4)
+// ---------------------------------------------------------------------------
+
+function capCtx(
+  cap: string | undefined,
+  overrides: Partial<AdUpdateContext> = {},
+): AdUpdateContext {
+  return ctx({
+    current: current(cap !== undefined ? { spend_cap: cap } : {}),
+    spendCapMaxMinor: 1_000_000,
+    ...overrides,
+  });
+}
+
+function capPlan(
+  spendCapMinor: number,
+  context: AdUpdateContext,
+  extra: Record<string, unknown> = {},
+) {
+  return planAdObjectUpdate(
+    { objectId: OBJECT_ID, level: 'campaign', spendCapMinor, ...extra },
+    context,
+  );
+}
+
+test('spend cap tier matrix: first set and lowering are irreversible, raising is spend', () => {
+  const first = capPlan(50_000, capCtx(undefined));
+  assert.equal(first.tier, 'irreversible');
+  assert.equal(first.increasesSpend, false);
+  assert.deepEqual(first.params, { spend_cap: 50_000 });
+  assert.ok(
+    first.summary.includes('spend_cap: none -> 50000 minor units of USD'),
+    first.summary,
+  );
+
+  const lower = capPlan(40_000, capCtx('60000'));
+  assert.equal(lower.tier, 'irreversible');
+  assert.equal(lower.increasesSpend, false);
+  assert.deepEqual(lower.changes[0], {
+    kind: 'spend_cap',
+    field: 'spend_cap',
+    from: 60_000,
+    to: 40_000,
+  });
+
+  const raise = capPlan(80_000, capCtx('60000'));
+  assert.equal(raise.tier, 'spend');
+  assert.equal(raise.increasesSpend, true);
+  assert.ok(raise.warnings.includes(SPEND_CAP_STOP_NOTE));
+  assert.ok(raise.warnings.includes(SPEND_CAP_SPENT_UNKNOWN_NOTE));
+});
+
+test('spend cap equal to the current cap is refused as nothing to change', () => {
+  assert.throws(() => capPlan(60_000, capCtx('60000')), /Nothing to change/);
+});
+
+test('spend cap combined with other changes takes the higher tier', () => {
+  const pauseAndRaise = capPlan(80_000, capCtx('60000'), { status: 'PAUSED' });
+  assert.equal(pauseAndRaise.tier, 'spend');
+  assert.deepEqual(pauseAndRaise.params, { status: 'PAUSED', spend_cap: 80_000 });
+
+  const pauseAndLower = capPlan(40_000, capCtx('60000'), { status: 'PAUSED' });
+  assert.equal(pauseAndLower.tier, 'irreversible');
+
+  const resumeAndLower = capPlan(40_000, capCtx('60000'), { status: 'ACTIVE' });
+  assert.equal(resumeAndLower.tier, 'spend');
+
+  const budgetCutAndSet = capPlan(50_000, capCtx(undefined), { dailyBudgetMinor: 500 });
+  assert.equal(budgetCutAndSet.tier, 'irreversible');
+  assert.equal(budgetCutAndSet.increasesSpend, false);
+});
+
+test('spend cap is a campaign field', () => {
+  for (const level of ['adset', 'ad', undefined] as const) {
+    assert.throws(
+      () =>
+        planAdObjectUpdate(
+          {
+            objectId: OBJECT_ID,
+            ...(level !== undefined ? { level } : {}),
+            spendCapMinor: 50_000,
+          },
+          capCtx(undefined),
+        ),
+      /spend_cap is a campaign field/,
+      String(level),
+    );
+  }
+});
+
+test('the removal sentinel is refused, and normalised to "no cap" on read', () => {
+  assert.throws(
+    () => capPlan(922_337_203_685_478, capCtx(undefined)),
+    /remove the spend cap/,
+  );
+  const record = current({ spend_cap: '922337203685478' });
+  assert.equal(record.spend_cap_minor, null);
+  assert.equal(current({ spend_cap: '9223372036854775807' }).spend_cap_minor, null);
+  // A campaign whose read carries the sentinel has no cap: setting one is a first set.
+  const plan = capPlan(50_000, capCtx('922337203685478'));
+  assert.equal(plan.tier, 'irreversible');
+  assert.equal(plan.changes[0]?.from, undefined);
+});
+
+test('spend cap above FB_ADS_CAMPAIGN_SPEND_CAP_MAX is refused on a set or raise, allowed on a lower', () => {
+  assert.throws(
+    () => capPlan(2_000_000, capCtx(undefined)),
+    /FB_ADS_CAMPAIGN_SPEND_CAP_MAX/,
+  );
+  assert.throws(() => capPlan(2_000_000, capCtx('1500000')), /NOT reduced/);
+  const lower = capPlan(1_200_000, capCtx('1500000'));
+  assert.equal(lower.tier, 'irreversible');
+});
+
+test('without FB_ADS_CAMPAIGN_SPEND_CAP_MAX a cap cannot be set or raised, only lowered', () => {
+  const noMax = (cap: string | undefined) => capCtx(cap, { spendCapMaxMinor: undefined });
+  assert.throws(
+    () => capPlan(50_000, noMax(undefined)),
+    /needs FB_ADS_CAMPAIGN_SPEND_CAP_MAX/,
+  );
+  assert.throws(
+    () => capPlan(70_000, noMax('60000')),
+    /needs FB_ADS_CAMPAIGN_SPEND_CAP_MAX/,
+  );
+  assert.equal(capPlan(50_000, noMax('60000')).tier, 'irreversible');
+});
+
+test('spend cap below the account minimum is refused, as is a max below that minimum', () => {
+  assert.throws(
+    () => capPlan(5_000, capCtx(undefined, { minCampaignSpendCapMinor: 10_000 })),
+    /below Meta's minimum campaign spend cap/,
+  );
+  assert.throws(
+    () =>
+      capPlan(
+        50_000,
+        capCtx(undefined, { spendCapMaxMinor: 5_000, minCampaignSpendCapMinor: 10_000 }),
+      ),
+    /FB_ADS_CAMPAIGN_SPEND_CAP_MAX \(.*\) is below Meta's minimum/,
+  );
+});
+
+test('spend cap at or below the amount already spent warns that delivery stops immediately', () => {
+  const plan = capPlan(40_000, capCtx('60000', { amountSpentMinor: 45_000 }));
+  assert.ok(
+    plan.warnings.some((w) =>
+      w.includes('stops delivering immediately after this write'),
+    ),
+    plan.warnings.join('\n'),
+  );
+  assert.ok(!plan.warnings.includes(SPEND_CAP_SPENT_UNKNOWN_NOTE));
+  const safe = capPlan(50_000, capCtx('60000', { amountSpentMinor: 45_000 }));
+  assert.ok(!safe.warnings.some((w) => w.includes('stops delivering immediately')));
+});
+
+test('spend cap in a zero-decimal currency is stated in whole units', () => {
+  const plan = capPlan(50_000, capCtx(undefined, { currency: 'JPY' }));
+  assert.ok(!plan.summary.includes('minor units'), plan.summary);
+  assert.ok(plan.summary.includes('JPY'), plan.summary);
+  assert.ok(plan.warnings.some((w) => w.includes('spend_cap_minor')));
 });

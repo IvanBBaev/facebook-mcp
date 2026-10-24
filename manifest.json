@@ -259,7 +259,7 @@
     },
     {
       "name": "facebook_update_ad_object",
-      "description": "Pause or resume an ads object, or change its budget."
+      "description": "Pause or resume an ads object, change its budget, or set a campaign spend cap."
     }
   ],
   "user_config": {

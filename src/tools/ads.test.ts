@@ -1911,3 +1911,119 @@ test('the insights description names the currency and unit of money metrics', ()
   assert.match(description, /`account_currency`/);
   assert.match(description, /not minor units/);
 });
+
+// ---------------------------------------------------------------------------
+// Campaign spend cap (v2 ads §4)
+// ---------------------------------------------------------------------------
+
+test('a spend cap raise is a spend write that applies spend_cap and journals it', async () => {
+  const { fb, ctx, journal } = makeHarness({ adsCampaignSpendCapMax: 100_000 });
+  stubWriteReads(fb, { object: campaignNode({ spend_cap: '40000' }), currency: 'USD' });
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  const update = tool('facebook_update_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign', spend_cap_minor: 60_000 };
+  const preview = body(await update.handler(args, ctx));
+  assert.equal(preview.status, 'preview');
+  assert.equal(preview.tier, 'spend');
+  assert.ok(
+    str(preview.summary).includes('spend_cap: 40000 minor units of USD -> 60000'),
+  );
+  assert.equal(writes(fb).length, 0);
+
+  const applied = body(
+    await update.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+  assert.equal(applied.status, 'applied');
+  const post = writes(fb)[0];
+  assert.ok(post && isJson(post));
+  assert.deepEqual(post.body, { spend_cap: 60_000 });
+  const metadata = obj(journal.entries.at(-1)?.metadata);
+  assert.deepEqual(metadata.changedFields, ['spend_cap']);
+  assert.equal(metadata.increasesSpend, true);
+});
+
+test('a first spend cap is irreversible and refused when FB_ADS_CAMPAIGN_SPEND_CAP_MAX is unset', async () => {
+  const set = makeHarness({ adsCampaignSpendCapMax: 100_000 });
+  stubWriteReads(set.fb);
+  const preview = body(
+    await tool('facebook_update_ad_object').handler(
+      { object_id: CAMPAIGN_ID, level: 'campaign', spend_cap_minor: 50_000 },
+      set.ctx,
+    ),
+  );
+  assert.equal(preview.tier, 'irreversible');
+
+  const unset = makeHarness();
+  stubWriteReads(unset.fb);
+  await assert.rejects(
+    () =>
+      tool('facebook_update_ad_object').handler(
+        { object_id: CAMPAIGN_ID, level: 'campaign', spend_cap_minor: 50_000 },
+        unset.ctx,
+      ),
+    /needs FB_ADS_CAMPAIGN_SPEND_CAP_MAX/,
+  );
+  assert.equal(writes(unset.fb).length, 0);
+});
+
+test('a spend cap below the account minimum is refused before the wire', async () => {
+  const { fb, ctx } = makeHarness({ adsCampaignSpendCapMax: 100_000 });
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ACCOUNT_ID}`,
+    fbOk({
+      id: ACCOUNT_ID,
+      account_status: 1,
+      currency: 'USD',
+      min_campaign_group_spend_cap: '10000',
+    }),
+  );
+  fb.on((r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`, fbOk(campaignNode()));
+  await assert.rejects(
+    () =>
+      tool('facebook_update_ad_object').handler(
+        { object_id: CAMPAIGN_ID, level: 'campaign', spend_cap_minor: 5_000 },
+        ctx,
+      ),
+    /below Meta's minimum campaign spend cap/,
+  );
+  assert.equal(writes(fb).length, 0);
+});
+
+test('a spend cap change made elsewhere between preview and apply diverges', async () => {
+  const { fb, ctx } = makeHarness({ adsCampaignSpendCapMax: 100_000 });
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${ACCOUNT_ID}`,
+    fbOk({ id: ACCOUNT_ID, account_status: 1, currency: 'EUR' }),
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`,
+    fbOk(campaignNode({ spend_cap: '40000' })),
+    1,
+  );
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${CAMPAIGN_ID}`,
+    fbOk(campaignNode({ spend_cap: '45000' })),
+  );
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  const update = tool('facebook_update_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign', status: 'PAUSED' };
+  const preview = body(await update.handler(args, ctx));
+  const result = body(
+    await update.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx),
+  );
+  assert.equal(result.status, 'diverged');
+  assert.equal(writes(fb).length, 0);
+});
+
+test('spend_cap_minor must be a positive integer', () => {
+  const schema = tool('facebook_update_ad_object').inputSchema;
+  for (const bad of [0, -1, 1.5]) {
+    assert.equal(
+      schema.safeParse({ object_id: CAMPAIGN_ID, spend_cap_minor: bad }).success,
+      false,
+      String(bad),
+    );
+  }
+});
