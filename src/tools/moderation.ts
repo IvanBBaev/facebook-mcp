@@ -124,6 +124,7 @@ import {
   shapeFor,
   writeArgs,
 } from './shared.js';
+import { messageOrSavedReply, savedReplyIdArg } from './saved-replies.js';
 
 // ---------------------------------------------------------------------------
 // 1. Annotation quadruples (doc 06, one line per tool)
@@ -315,10 +316,13 @@ type ReplyAttachment =
       readonly sha256: string;
     };
 
+/** Longest text the comment and private-reply tools accept. */
+const MAX_COMMENT_MESSAGE_CHARS = 8000;
+
 const messageArg = z
   .string()
   .min(1)
-  .max(8000)
+  .max(MAX_COMMENT_MESSAGE_CHARS)
   .describe('The text to send. Written by you — Facebook rejects an empty message.');
 
 // ---------------------------------------------------------------------------
@@ -1412,6 +1416,7 @@ export function createModerationPackage(): PackageSpec {
       ...writeArgs,
       comment_id: commentIdArg,
       message: messageArg.optional(),
+      saved_reply_id: savedReplyIdArg.optional(),
       attachment: replyAttachmentArg.optional(),
     }),
     annotations: REPLY_ANNOTATIONS,
@@ -1422,7 +1427,11 @@ export function createModerationPackage(): PackageSpec {
     // comment being answered.
     logFields: ['profile', 'apply', 'plan_id', 'comment_id'],
     handler: async (input, ctx) => {
-      if (input.message === undefined && input.attachment === undefined) {
+      if (
+        input.message === undefined &&
+        input.saved_reply_id === undefined &&
+        input.attachment === undefined
+      ) {
         throw emptyCommentError('attachment');
       }
       const opts = localMediaOptions(ctx.settings.mediaDir);
@@ -1434,8 +1443,15 @@ export function createModerationPackage(): PackageSpec {
           : undefined;
       const resolved = await ctx.pages.resolvePage(input.profile);
       const scope = scopeOf(ctx, resolved);
-      const text =
-        input.message !== undefined ? `"${truncate(input.message, 300)}"` : '(no text)';
+      // A saved reply's text, not its id, is bound to the plan.
+      const message = await messageOrSavedReply(
+        ctx,
+        resolved,
+        input,
+        MAX_COMMENT_MESSAGE_CHARS,
+      );
+      const savedReplyId = input.saved_reply_id;
+      const text = message !== undefined ? `"${truncate(message, 300)}"` : '(no text)';
       return executeWrite(ctx, {
         tool: 'facebook_reply_to_comment',
         tier: TIERS.facebook_reply_to_comment,
@@ -1445,7 +1461,7 @@ export function createModerationPackage(): PackageSpec {
         // for one file cannot upload another.
         params: {
           comment_id: input.comment_id,
-          ...(input.message !== undefined ? { message: input.message } : {}),
+          ...(message !== undefined ? { message } : {}),
           ...(attachment !== undefined ? { attachment } : {}),
         },
         ...(input.apply !== undefined ? { apply: input.apply } : {}),
@@ -1465,7 +1481,7 @@ export function createModerationPackage(): PackageSpec {
         perform: () =>
           postReply(ctx.fbRequest, scope, opts, {
             commentId: input.comment_id,
-            ...(input.message !== undefined ? { message: input.message } : {}),
+            ...(message !== undefined ? { message } : {}),
             ...(attachment !== undefined ? { attachment } : {}),
           }),
         // A lost answer may have left the reply public: `attempted`, not `failed`.
@@ -1477,7 +1493,8 @@ export function createModerationPackage(): PackageSpec {
         // The attachment's kind only — never its URL or path.
         metadata: {
           commentId: input.comment_id,
-          messageChars: input.message?.length ?? 0,
+          messageChars: message?.length ?? 0,
+          ...(savedReplyId !== undefined ? { savedReplyId } : {}),
           ...(attachment !== undefined ? { attachmentKind: attachment.kind } : {}),
         },
       });
@@ -2054,7 +2071,8 @@ export function createModerationPackage(): PackageSpec {
     inputSchema: z.object({
       ...confirmableWriteArgs,
       comment_id: commentIdArg,
-      message: messageArg,
+      message: messageArg.optional(),
+      saved_reply_id: savedReplyIdArg.optional(),
     }),
     annotations: PRIVATE_REPLY_ANNOTATIONS,
     writeTier: TIERS.facebook_private_reply,
@@ -2064,8 +2082,16 @@ export function createModerationPackage(): PackageSpec {
     // `message` is content and `confirm_token` is a secret; both stay off.
     logFields: ['profile', 'apply', 'plan_id', 'comment_id'],
     handler: async (input, ctx) => {
+      if (input.message === undefined && input.saved_reply_id === undefined) {
+        throw new Error('Pass `message` or `saved_reply_id`.');
+      }
       const resolved = await ctx.pages.resolvePage(input.profile);
       const scope = scopeOf(ctx, resolved);
+      // Resolved before the comment read, so an unknown id spends no Graph call.
+      const message =
+        (await messageOrSavedReply(ctx, resolved, input, MAX_COMMENT_MESSAGE_CHARS)) ??
+        '';
+      const savedReplyId = input.saved_reply_id;
 
       // Client-side pre-flight (CC-MOD-2). Done in BOTH modes and before the
       // gate: a preview that promises a send which can never succeed is worse
@@ -2107,12 +2133,12 @@ export function createModerationPackage(): PackageSpec {
         tier: TIERS.facebook_private_reply,
         pageId: resolved.pageId,
         resolvedPage: resolved,
-        params: { comment_id: input.comment_id, message: input.message },
+        params: { comment_id: input.comment_id, message },
         ...gateArgs(input),
         summary:
           `Send the ONE allowed private reply to the author of comment ` +
           `${input.comment_id} from Page ${resolved.pageId}: ` +
-          `"${truncate(input.message, 300)}"`,
+          `"${truncate(message, 300)}"`,
         warnings: [
           'This consumes the single private reply allowed for this comment — there is ' +
             'no second attempt and no unsend.',
@@ -2125,7 +2151,7 @@ export function createModerationPackage(): PackageSpec {
             ...scope,
             pageId: resolved.pageId,
             commentId: input.comment_id,
-            message: input.message,
+            message,
           });
           return receipt.messageId !== undefined
             ? receipt
@@ -2141,7 +2167,8 @@ export function createModerationPackage(): PackageSpec {
         classifyResult: privateReplyVerdict,
         metadata: {
           commentId: input.comment_id,
-          messageChars: input.message.length,
+          messageChars: message.length,
+          ...(savedReplyId !== undefined ? { savedReplyId } : {}),
           commentAgeMs: window.ageMs,
         },
       });

@@ -25,6 +25,9 @@ export const ENV_FILE_NAME = '.env';
 export const JOURNAL_FILE_NAME = 'journal.ndjson';
 export const ACTIVITY_STATE_FILE_NAME = 'activity-state.json';
 
+/** Basename of the operator-curated saved replies inside the config dir. */
+export const SAVED_REPLIES_FILE_NAME = 'saved-replies.json';
+
 /** Inputs that make path resolution injectable (and cross-platform testable). */
 export interface PathOptions {
   /** Defaults to `process.platform`. Pass `'win32'` to exercise the Windows branch. */
@@ -127,6 +130,14 @@ export function defaultJournalPath(o?: PathOptions): string {
 /** Absolute default path of the facebook_get_activity_since high-water marks. */
 export function defaultActivityStatePath(o?: PathOptions): string {
   return pathFor(resolvePlatform(o)).join(stateDir(o), ACTIVITY_STATE_FILE_NAME);
+}
+
+/**
+ * Absolute path of the local saved replies (v2 messaging F10). It lives in the
+ * config dir, not the state dir: the operator curates it, nothing regenerates it.
+ */
+export function savedRepliesPath(o?: PathOptions): string {
+  return pathFor(resolvePlatform(o)).join(configDir(o), SAVED_REPLIES_FILE_NAME);
 }
 
 /** Options for {@link loadEnvFile}. */

@@ -52,6 +52,9 @@ import {
   createUploadHandler,
   createVersionDriftMonitor,
   defaultActivityStatePath,
+  createSavedReplyStore,
+  savedRepliesPath,
+  SavedRepliesError,
   usageOfGraphError,
   createLogger,
   createPagesRegistry,
@@ -62,6 +65,7 @@ import {
   loadSettings,
   setHintLaunchCommand,
   type ActivityCursorStore,
+  type SavedReplyStore,
   type Clock,
   type ConfirmationRequest,
   type Confirmer,
@@ -160,6 +164,8 @@ export interface BuildServerDeps {
   readonly journal: Journal;
   /** High-water marks for facebook_get_activity_since; absent ⇒ no persistence. */
   readonly activityState?: ActivityCursorStore;
+  /** Local saved replies (F10); absent ⇒ the saved-reply tools refuse. */
+  readonly savedReplies?: SavedReplyStore;
   readonly fbRequest: FbRequestFn;
   readonly pages: PageResolver;
   /**
@@ -287,6 +293,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       clock: deps.clock,
       journal: deps.journal,
       ...(deps.activityState !== undefined ? { activityState: deps.activityState } : {}),
+      ...(deps.savedReplies !== undefined ? { savedReplies: deps.savedReplies } : {}),
       signal: extra.signal,
       ...(profile !== undefined ? { profile } : {}),
       ...(reportProgress !== undefined ? { reportProgress } : {}),
@@ -605,6 +612,9 @@ function buildErrorRecord(err: unknown): Record<string, unknown> {
   const message = errorMessageOf(err);
   if (err instanceof WriteGateError) {
     return { error: message, code: err.code, tool: err.tool, tier: err.tier };
+  }
+  if (err instanceof SavedRepliesError) {
+    return { error: message, code: err.code };
   }
   if (err instanceof GraphApiError) {
     const action = err.action;
@@ -1449,6 +1459,7 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
   const activityState = createActivityStateStore({
     statePath: settings.activityStatePath ?? defaultActivityStatePath(),
   });
+  const savedReplies = createSavedReplyStore({ filePath: savedRepliesPath(), clock });
   const pages = createPagesRegistry({ settings, fbRequest, clock, redactor, logger });
 
   // --- Package assembly -----------------------------------------------------
@@ -1533,6 +1544,7 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     redactor,
     journal,
     activityState,
+    savedReplies,
     fbRequest,
     pages,
   });

@@ -14,6 +14,9 @@ export * from './types.js';
 export * from './config.js';
 export * from './settings.js';
 
+// v2 messaging F10 — operator-curated local reply templates.
+export * from './saved-replies.js';
+
 // F05 — stderr JSON logging + value-based redaction choke-point (C3).
 export { createRedactor } from './redact.js';
 export { createLogger, type LoggerConfig } from './log.js';

@@ -402,7 +402,15 @@ test('createMessagesPackage builds the plan-first messages package', () => {
   assert.equal(pkg.writeModeDefault, 'plan');
   assert.deepEqual(
     pkg.tools.map((t) => t.name),
-    [TOOL_LIST, TOOL_GET, TOOL_SEND, 'facebook_get_activity_since'],
+    [
+      TOOL_LIST,
+      TOOL_GET,
+      TOOL_SEND,
+      'facebook_get_activity_since',
+      'facebook_list_saved_replies',
+      'facebook_save_reply',
+      'facebook_delete_saved_reply',
+    ],
   );
   for (const spec of pkg.tools) {
     assert.ok(spec.description.length > 0, `${spec.name} must be described`);
@@ -502,6 +510,10 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'apply',
   'plan_id',
   'conversation_id',
+  // A saved reply's slug and the overwrite flag: operator-chosen labels, never
+  // the template text or anything a visitor wrote.
+  'id',
+  'overwrite',
 ]);
 
 test('every messages log allowlist names real, non-content arguments', () => {
@@ -513,6 +525,8 @@ test('every messages log allowlist names real, non-content arguments', () => {
   const expected: Record<string, readonly string[]> = {
     [TOOL_GET]: ['profile', 'conversation_id'],
     [TOOL_SEND]: ['profile', 'apply', 'plan_id', 'conversation_id'],
+    facebook_save_reply: ['profile', 'id', 'overwrite'],
+    facebook_delete_saved_reply: ['profile', 'id'],
   };
 
   for (const spec of createMessagesPackage().tools) {

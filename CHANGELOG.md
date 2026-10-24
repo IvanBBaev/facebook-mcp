@@ -73,6 +73,18 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Local saved replies** (messages). `facebook_list_saved_replies`,
+  `facebook_save_reply` and `facebook_delete_saved_reply` keep operator-approved
+  reply templates in `saved-replies.json` in the config directory (mode 0600,
+  keyed by Page id, at most 200 per Page). `facebook_send_message`,
+  `facebook_reply_to_comment` and `facebook_private_reply` take a
+  `saved_reply_id` in place of `message`; the template is filled
+  (`{{page_name}}` is the only placeholder) and its text is bound to the plan,
+  so editing it between preview and apply makes the apply diverge. Save and
+  delete make no Graph call and apply directly; delete returns the record so it
+  can be re-saved. A corrupt file is reported as `config_error` and is never
+  overwritten.
+
 - **`facebook_reply_and_hide_comment` answers and hides a comment in one
   approved step** (moderation, reversible). It posts a public reply (text and an
   optional attachment, as `facebook_reply_to_comment`) and then hides the

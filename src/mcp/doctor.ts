@@ -173,6 +173,10 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
     'pages_read_user_content',
     'pages_messaging',
   ],
+  // Local saved replies: a file on this machine, no Graph call.
+  facebook_list_saved_replies: [],
+  facebook_save_reply: [],
+  facebook_delete_saved_reply: [],
 
   // ads (V08/V09/V10)
   facebook_list_campaigns: ['ads_read'],

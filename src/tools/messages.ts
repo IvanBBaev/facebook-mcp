@@ -77,6 +77,11 @@ import {
 } from '../mcp/index.js';
 import { malformedRowsNote } from '../api/shared.js';
 import { createActivitySinceTool } from './activity.js';
+import {
+  createSavedReplyTools,
+  messageOrSavedReply,
+  savedReplyIdArg,
+} from './saved-replies.js';
 import { executeWrite, graphNodeIdArg, listArgs, shapeFor, writeArgs } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -806,9 +811,11 @@ export function createMessagesPackage(): PackageSpec {
         .string()
         .min(1)
         .max(MAX_MESSAGE_CHARS)
+        .optional()
         .describe(
-          `The message text (1–${String(MAX_MESSAGE_CHARS)} characters). Sent verbatim to a real person; there is no unsend.`,
+          `The message text (1–${String(MAX_MESSAGE_CHARS)} characters). Sent verbatim to a real person; there is no unsend. Exactly one of message / saved_reply_id.`,
         ),
+      saved_reply_id: savedReplyIdArg.optional(),
       reply_to_message_id: z
         .string()
         .regex(MESSAGE_ID_SHAPE, 'reply_to_message_id must be a Messenger mid.')
@@ -833,8 +840,18 @@ export function createMessagesPackage(): PackageSpec {
     // too. The conversation id finds the thread again without any of them.
     logFields: ['profile', 'apply', 'plan_id', 'conversation_id'],
     handler: async (input, ctx) => {
-      if (input.message.trim().length === 0) throw new Error(BLANK_MESSAGE);
+      if (input.message !== undefined && input.message.trim().length === 0) {
+        throw new Error(BLANK_MESSAGE);
+      }
+      if (input.message === undefined && input.saved_reply_id === undefined) {
+        throw new Error('Pass `message` or `saved_reply_id`.');
+      }
       const resolved: ResolvedPage = await ctx.pages.resolvePage(input.profile);
+      // A saved reply is resolved to its text now, and the text (not the id) is
+      // bound to the plan: editing the template after the preview diverges it.
+      const text =
+        (await messageOrSavedReply(ctx, resolved, input, MAX_MESSAGE_CHARS)) ?? '';
+      const savedReplyId = input.saved_reply_id;
       const target = await resolveSendTarget(ctx, resolved, input);
       const window = windowInput(target, ctx.clock.now());
       const replyTo = input.reply_to_message_id;
@@ -866,7 +883,7 @@ export function createMessagesPackage(): PackageSpec {
         params: {
           conversationId: target.conversationId ?? null,
           recipientId: target.recipientId,
-          message: input.message,
+          message: text,
           // The quoted message is part of what was previewed: a changed target
           // invalidates the plan. Absent (not null) when unset, so plain sends
           // keep the identity they always had.
@@ -875,7 +892,8 @@ export function createMessagesPackage(): PackageSpec {
         ...(input.apply !== undefined ? { apply: input.apply } : {}),
         ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
         summary:
-          `Send a PRIVATE Messenger message of ${String(input.message.length)} ` +
+          `Send a PRIVATE Messenger message of ${String(text.length)} ` +
+          (savedReplyId !== undefined ? `(saved reply "${savedReplyId}") ` : '') +
           `characters from Page ${resolved.pageId} (${resolved.name}) to recipient ` +
           `${target.recipientId}` +
           (target.conversationId !== undefined
@@ -900,7 +918,8 @@ export function createMessagesPackage(): PackageSpec {
           ...(target.conversationId !== undefined
             ? { conversationId: target.conversationId }
             : {}),
-          chars: input.message.length,
+          chars: text.length,
+          ...(savedReplyId !== undefined ? { savedReplyId } : {}),
           windowStatus: window.status,
           // Whether the send quoted a message — never which one (see logFields).
           replyTo: replyTo !== undefined,
@@ -912,7 +931,7 @@ export function createMessagesPackage(): PackageSpec {
             result = await sendMessage(ctx.fbRequest, {
               pageId: resolved.pageId,
               recipientId: target.recipientId,
-              text: input.message,
+              text,
               ...(replyTo !== undefined ? { replyToMessageId: replyTo } : {}),
               token: resolved.token,
               ...signalOf(ctx),
@@ -949,13 +968,15 @@ export function createMessagesPackage(): PackageSpec {
     description:
       'Messenger conversations for a Page: poll the inbox, read a thread (untrusted ' +
       'content wrapped, attachments as placeholders) and send one private reply ' +
-      'inside the 24-hour window; or ask what is new since the last look. ' +
+      'inside the 24-hour window; or ask what is new since the last look; keep local ' +
+      'saved replies to send verbatim. ' +
       'Plan-first by default.',
     tools: [
       listConversationsTool,
       getConversationTool,
       sendMessageTool,
       createActivitySinceTool(),
+      ...createSavedReplyTools(),
     ],
     enabledByDefault: true,
     writeModeDefault: 'plan',

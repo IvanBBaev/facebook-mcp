@@ -14,14 +14,14 @@
 // README table and `manifest.json` agree on tool NAMES. Neither freezes all four
 // booleans for the whole surface in one place, which is what this file does:
 //
-//   * ANNOTATION_MANIFEST below is a frozen literal — 49 rows, one per tool.
+//   * ANNOTATION_MANIFEST below is a frozen literal — 52 rows, one per tool.
 //     Changing a hint anywhere in `src/tools/` fails here until the row is
 //     edited too, which is the point: the edit is the review.
 //   * The table and the registry must agree in BOTH directions, so a new tool
 //     cannot ship without its annotations being looked at, and a deleted tool
 //     cannot leave a stale row behind.
 //   * The cross-cutting invariants (all four hints present; `openWorldHint`
-//     always true; `readOnlyHint` ⇔ no write tier) are asserted over the
+//     true except for the named local-only tools; `readOnlyHint` ⇔ no write tier) are asserted over the
 //     registry itself, not over the table, so they hold for tools the table has
 //     not yet heard of.
 //
@@ -194,6 +194,10 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_get_conversation', true, false, true, true, undefined],
   ['facebook_send_message', false, true, false, true, 'reversible'],
   ['facebook_get_activity_since', true, false, false, true, undefined],
+  // Local saved replies: a file on this machine, so the world is closed.
+  ['facebook_list_saved_replies', true, false, true, false, undefined],
+  ['facebook_save_reply', false, false, true, false, 'reversible'],
+  ['facebook_delete_saved_reply', false, false, true, false, 'reversible'],
 
   // package `ads` — off by default.
   ['facebook_list_campaigns', true, false, true, true, undefined],
@@ -324,18 +328,28 @@ test('every tool matches the annotation quadruple and write tier frozen here', (
 // 4. Cross-cutting invariants, asserted over the registry
 // ---------------------------------------------------------------------------
 
-test('openWorldHint is true for every tool — all of them call a live Graph API', () => {
+/**
+ * The only tools that never call Graph: the saved-reply curation tools read and
+ * write one local file (v2 messaging F10), so their world is closed.
+ */
+const LOCAL_ONLY_TOOLS: readonly string[] = [
+  'facebook_delete_saved_reply',
+  'facebook_list_saved_replies',
+  'facebook_save_reply',
+];
+
+test('openWorldHint is true for every tool that calls the live Graph API', () => {
   const closed = REGISTRY.tools
     .filter((tool) => hintsOf(tool)['openWorldHint'] !== true)
     .map((tool) => tool.name)
     .sort();
   assert.deepEqual(
     closed,
-    [],
+    [...LOCAL_ONLY_TOOLS],
     `these tools claim a closed world: ${closed.join(', ')}. Every tool in this server ` +
-      `talks to graph.facebook.com, whose responses change without us doing anything, ` +
-      `so openWorldHint must be true — a false value tells a client it may cache or ` +
-      `replay the result.`,
+      `except the named local-only ones talks to graph.facebook.com, whose responses ` +
+      `change without us doing anything, so openWorldHint must be true — a false value ` +
+      `tells a client it may cache or replay the result.`,
   );
 });
 
@@ -400,7 +414,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 49 tools across 7 packages', () => {
+test('the full surface is 52 tools across 7 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -413,17 +427,17 @@ test('the full surface is 49 tools across 7 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    49,
+    52,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    49,
+    52,
     'the frozen manifest lost or gained a row',
   );
 });
 
-test('the default `core` profile ships 41 tools — everything except `ads`', () => {
+test('the default `core` profile ships 44 tools — everything except `ads`', () => {
   // `toolPackages: undefined` is what an operator who never set FB_TOOL_PACKAGES gets.
   const byDefault = createRegistry(PACKAGES, makeSettings());
   assert.deepEqual(
@@ -433,8 +447,8 @@ test('the default `core` profile ships 41 tools — everything except `ads`', ()
   );
   assert.equal(
     byDefault.tools.length,
-    41,
-    'the out-of-box tool count changed; the README and doc 06 both quote 41',
+    44,
+    'the out-of-box tool count changed; the README and doc 06 both quote 44',
   );
   assert.equal(
     byDefault.has('facebook_list_campaigns'),
@@ -448,12 +462,12 @@ test('the default `core` profile ships 41 tools — everything except `ads`', ()
   );
 });
 
-test('the surface splits 31 read / 18 write (14 reversible, 3 irreversible, 1 spend)', () => {
+test('the surface splits 32 read / 20 write (16 reversible, 3 irreversible, 1 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
-  assert.equal(read.length, 31, 'the read-only tool count changed (doc 06 quotes 31)');
-  assert.equal(write.length, 18, 'the write tool count changed (doc 06 quotes 18)');
+  assert.equal(read.length, 32, 'the read-only tool count changed (doc 06 quotes 32)');
+  assert.equal(write.length, 20, 'the write tool count changed (doc 06 quotes 20)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 
   const byTier: Record<string, number> = {};
@@ -463,7 +477,7 @@ test('the surface splits 31 read / 18 write (14 reversible, 3 irreversible, 1 sp
   }
   assert.deepEqual(
     byTier,
-    { reversible: 14, irreversible: 3, spend: 1 },
+    { reversible: 16, irreversible: 3, spend: 1 },
     'the write-tier distribution changed. The single `spend` is ' +
       '`facebook_update_ad_object`, which is the only tool in this server that can ' +
       'cost money — resuming delivery or raising a budget. `safe` stays deliberately ' +
@@ -517,12 +531,14 @@ const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
   'filter',
   'force_async',
   'hidden',
+  'id',
   'include_replies',
   'is_hidden',
   'is_pinned',
   'level',
   'object_id',
   'order',
+  'overwrite',
   'plan_id',
   'post_id',
   'posts',
