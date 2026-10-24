@@ -163,6 +163,25 @@ const OVERLAPPING_PERIODS: ReadonlySet<string> = new Set(['week', 'days_28', 'li
  */
 const STOCK_METRICS: ReadonlySet<string> = new Set(['page_follows']);
 
+/** Metrics whose daily / monthly / range observations are declared additive flows. */
+const ADDITIVE_FLOW_METRICS: ReadonlySet<string> = new Set([
+  'page_media_view',
+  'post_media_view',
+  'page_daily_follows',
+  'page_daily_unfollows',
+  'page_post_engagements',
+  'page_views_total',
+  'page_video_views',
+  'page_video_view_time',
+  'post_video_views',
+  'post_video_view_time',
+]);
+
+const BREAKDOWN_AGGREGATION_NOTE =
+  'No scalar total: breakdown categories are not declared additive and may overlap.';
+const UNVERIFIED_ADDITIVITY_NOTE =
+  'No scalar total: additivity across multiple observations is not verified for this metric.';
+
 /** Why `total` is the latest point, not a sum, for an overlapping period. */
 export const OVERLAPPING_TOTAL_NOTE =
   '`total` for a week / days_28 / lifetime metric with more than one point is ' +
@@ -171,7 +190,9 @@ export const OVERLAPPING_TOTAL_NOTE =
   'overlaps the previous one, so adding them would count the same day up to 28 ' +
   'times. The same holds for a stock metric such as page_follows in any period: ' +
   'each point is the follower count at that date, so the total is the latest ' +
-  'count. Only day, month and total_over_range flow totals are sums.';
+  'count. Only explicitly supported additive flows are summed across disjoint ' +
+  'day, month or total_over_range observations. Breakdown categories and other ' +
+  'multi-observation metrics may omit a scalar total; see aggregationNote.';
 
 /** One metric whose per-point rows the cap cut short (or cut entirely). */
 interface CutSeries {
@@ -598,16 +619,17 @@ export interface MetricSummary {
   /** Number of flattened data points Graph returned for this metric. */
   readonly points: number;
   /**
-   * The metric's total across breakdown keys. Absent ⇒ no numeric point. For a
-   * disjoint period (`day`, `month`, `total_over_range`) this is the sum of all
-   * numeric points; for an overlapping one (`week`, `days_28`, `lifetime`) or a
-   * stock metric (`page_follows`) with points on more than one date it is the
-   * LATEST date's value only, flagged by `totalIsLatest` — see
-   * {@link OVERLAPPING_TOTAL_NOTE}.
+   * A scalar total when aggregation is supported. Disjoint observations are
+   * summed only for explicitly declared additive flows; overlapping periods
+   * and stock metrics use their latest value when they have multiple dates.
+   * Breakdown categories or unverified multi-observation metrics may omit it;
+   * see `aggregationNote` for the reason.
    */
   readonly total?: number;
   /** True ⇒ `total` is the newest point (overlapping period), not a sum. */
   readonly totalIsLatest?: true;
+  /** Why a scalar total was omitted because aggregation was not established. */
+  readonly aggregationNote?: string;
   /** Raw `end_time` of the first/last point — the exact boundary, kept once. */
   readonly firstEnd?: string;
   readonly lastEnd?: string;
@@ -735,6 +757,21 @@ function summarize(
   if (total === undefined && latestDate !== undefined && emptyMapDates.has(latestDate)) {
     total = 0;
   }
+  let aggregationNote: string | undefined;
+  const hasBreakdownRows = rows.some((row) => row.breakdown !== undefined);
+  const latestEmptyBreakdownIsZero =
+    latestDate !== undefined && emptyMapDates.has(latestDate) && total === 0;
+  if (hasBreakdownRows && !latestEmptyBreakdownIsZero) {
+    total = undefined;
+    aggregationNote = BREAKDOWN_AGGREGATION_NOTE;
+  } else if (
+    rows.length > 1 &&
+    latestDate === undefined &&
+    !ADDITIVE_FLOW_METRICS.has(canonicalMetricName(metric))
+  ) {
+    total = undefined;
+    aggregationNote = UNVERIFIED_ADDITIVITY_NOTE;
+  }
   const breakdowns = new Set(
     rows.filter((r) => r.breakdown !== undefined).map((r) => r.breakdown),
   ).size;
@@ -754,6 +791,7 @@ function summarize(
     ...(total !== undefined && latestDate !== undefined
       ? { totalIsLatest: true as const }
       : {}),
+    ...(aggregationNote !== undefined ? { aggregationNote } : {}),
     ...(first !== undefined ? { firstEnd: first } : {}),
     ...(last !== undefined ? { lastEnd: last } : {}),
     ...(breakdowns > 0 ? { breakdowns } : {}),

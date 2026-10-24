@@ -156,7 +156,7 @@ const aggregateArg = z
   .boolean()
   .optional()
   .describe(
-    'True ⇒ return per-metric totals only (period, points, total, first/last boundary) and NO per-point rows. Use it for wide windows or many metrics: it is the cheapest way to stay inside the result budget when a daily series would otherwise be truncated. `total` is a sum for disjoint periods (day, month, total_over_range); for the overlapping ones (week, days_28, lifetime) and for stock metrics such as page_follows it is the latest point, flagged totalIsLatest.',
+    'True ⇒ return per-metric totals only (period, points, total, first/last boundary) and NO per-point rows. Use it for wide windows or many metrics: it is the cheapest way to stay inside the result budget when a daily series would otherwise be truncated. `total` sums disjoint observations only for explicitly supported additive flows. Overlapping periods (week, days_28, lifetime) and stock metrics such as page_follows use the latest point, flagged totalIsLatest. Breakdown categories and other unverified multi-observation metrics omit a scalar total and explain why in aggregationNote.',
   );
 
 const maxRowsArg = z

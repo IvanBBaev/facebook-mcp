@@ -432,7 +432,11 @@ test('page_insights flattens a breakdown map into breakdown rows', async () => {
     ],
   );
   assert.equal(summariesOf(parsed)[0]?.breakdowns, 2);
-  assert.equal(summariesOf(parsed)[0]?.total, 7);
+  assert.equal(summariesOf(parsed)[0]?.total, undefined);
+  assert.match(
+    String(summariesOf(parsed)[0]?.aggregationNote),
+    /breakdown categories.*may overlap/,
+  );
 });
 
 test('page_insights never lets the token-bearing paging block reach the model', async () => {
