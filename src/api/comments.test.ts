@@ -11,6 +11,8 @@ import { CURSOR_EXPIRED_NOTE } from './shared.js';
 
 import {
   ALREADY_GONE_NOTE,
+  ALREADY_IN_LIKE_STATE_NOTE,
+  LIKE_TARGET_GONE_ERROR,
   COMMENT_FIELDS,
   EMPTY_CONTINUATION_NOTE,
   EMPTY_PAGE_MORE_FOLLOWS_NOTE,
@@ -24,6 +26,7 @@ import {
   fetchCommentSummary,
   getComment,
   isObjectGoneError,
+  likeCommentStep,
   listComments,
   messageFingerprint,
   moderateCommentStep,
@@ -39,6 +42,7 @@ import {
   sendPrivateReply,
   setBlocked,
   setCommentHidden,
+  setCommentLiked,
   tallyBulk,
   type BulkStep,
   type RawComment,
@@ -500,6 +504,86 @@ test('readCommentStates snapshots hidden + a fingerprint but never the body', as
     },
   });
   assert.equal(JSON.stringify(states).includes('Ignore all previous'), false);
+});
+
+test('readCommentStates reads user_likes only when the like verb asks for it', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ id: 'c1', message: 'a', is_hidden: false, user_likes: true }));
+
+  const plain = await readCommentStates(fb.fn, { ...SCOPE, commentIds: ['c1'] });
+  assert.equal(paramsOf(fb.lastRequest()).fields, 'id,message,is_hidden');
+  assert.equal(
+    plain.c1?.liked,
+    undefined,
+    'a hide/delete snapshot never carries the like',
+  );
+
+  const withLikes = await readCommentStates(fb.fn, {
+    ...SCOPE,
+    commentIds: ['c1'],
+    withLikes: true,
+  });
+  assert.equal(paramsOf(fb.lastRequest()).fields, 'id,message,is_hidden,user_likes');
+  assert.equal(withLikes.c1?.liked, true);
+});
+
+test('setCommentLiked POSTs a like and DELETEs an unlike on /{id}/likes', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ success: true }));
+
+  assert.equal(
+    await setCommentLiked(fb.fn, { ...SCOPE, commentId: 'c1', liked: true }),
+    true,
+  );
+  assert.equal(
+    await setCommentLiked(fb.fn, { ...SCOPE, commentId: 'c1', liked: false }),
+    true,
+  );
+  assert.deepEqual(
+    fb.calls.map((r) => `${r.method} ${r.path}`),
+    ['POST /c1/likes', 'DELETE /c1/likes'],
+  );
+});
+
+test('likeCommentStep skips an id already in state and settles a gone comment per verb', async () => {
+  const fb = createFakeFbRequest();
+  const live = (liked: boolean) => ({ id: 'c1', gone: false, liked });
+  const gone = { id: 'c1', gone: true };
+
+  assert.deepEqual(
+    await likeCommentStep(fb.fn, {
+      ...SCOPE,
+      commentId: 'c1',
+      liked: true,
+      state: live(true),
+    }),
+    { ok: true, note: ALREADY_IN_LIKE_STATE_NOTE },
+  );
+  assert.deepEqual(
+    await likeCommentStep(fb.fn, { ...SCOPE, commentId: 'c1', liked: true, state: gone }),
+    { ok: false, error: LIKE_TARGET_GONE_ERROR },
+  );
+  assert.deepEqual(
+    await likeCommentStep(fb.fn, {
+      ...SCOPE,
+      commentId: 'c1',
+      liked: false,
+      state: gone,
+    }),
+    { ok: true, note: ALREADY_GONE_NOTE },
+  );
+  assert.equal(fb.calls.length, 0, 'none of those sent a write');
+
+  fb.on(() => true, fbOk({ success: true }));
+  assert.deepEqual(
+    await likeCommentStep(fb.fn, {
+      ...SCOPE,
+      commentId: 'c1',
+      liked: true,
+      state: live(false),
+    }),
+    { ok: true },
+  );
 });
 
 test('readCommentStates records a deleted comment as gone instead of throwing', async () => {

@@ -37,6 +37,14 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_like_comment` likes or unlikes comments as the Page** (moderation,
+  `reversible`). It takes up to 50 `comment_ids` and sends `POST
+/{comment-id}/likes`, or `DELETE` with `unlike:true`. Each id gets its own
+  outcome, as with `facebook_hide_comment`. The snapshot reads `user_likes`, so a
+  comment already in the requested state is skipped without a write, and a plan
+  whose like state changed before apply diverges. Unliking a deleted comment
+  counts as done; liking one fails for that id only. Needs
+  `pages_manage_engagement`.
 - **`facebook_edit_comment` rewrites a comment the Page itself wrote** (moderation,
   `reversible`). It sends `POST /{comment-id}` with the new `message`, e.g. to fix
   a typo in a reply. A pre-flight read of `from{id}` runs on every call, and

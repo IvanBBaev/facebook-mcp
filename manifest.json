@@ -162,6 +162,10 @@
       "description": "Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores)."
     },
     {
+      "name": "facebook_like_comment",
+      "description": "Like up to 50 comments as the Page, or unlike them with `unlike:true`."
+    },
+    {
       "name": "facebook_delete_comment",
       "description": "PERMANENTLY delete up to 50 comments."
     },

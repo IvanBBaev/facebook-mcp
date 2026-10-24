@@ -61,6 +61,13 @@ export const COMMENT_FIELDS =
  */
 const COMMENT_STATE_FIELDS = 'id,message,is_hidden';
 
+/**
+ * The like verb's snapshot adds `user_likes` (whether the Page has liked the
+ * comment). Only that verb asks for it, so a like on a comment cannot make a
+ * pending hide or delete plan diverge.
+ */
+const COMMENT_LIKE_STATE_FIELDS = `${COMMENT_STATE_FIELDS},user_likes`;
+
 /** Hard cap on the ids one bulk moderation call accepts (CC-MOD-5). */
 export const MAX_BULK_IDS = 50;
 
@@ -442,6 +449,8 @@ export interface CommentState {
   /** `true` when the comment no longer exists / is not visible (CC-MOD-1). */
   readonly gone: boolean;
   readonly hidden?: boolean;
+  /** Whether the Page has liked the comment; read only by the like verb. */
+  readonly liked?: boolean;
   /** Short digest of the comment body — detects an edit without leaking it. */
   readonly fingerprint?: string;
   /**
@@ -495,7 +504,11 @@ export function isObjectGoneError(err: unknown): err is GraphApiError {
  */
 export async function readCommentStates(
   fbRequest: FbRequestFn,
-  input: { readonly commentIds: readonly string[] } & CommentScope,
+  input: {
+    readonly commentIds: readonly string[];
+    /** Also read `user_likes` into `liked` (the like verb's snapshot). */
+    readonly withLikes?: boolean;
+  } & CommentScope,
 ): Promise<Record<string, CommentState>> {
   const states: Record<string, CommentState> = {};
   let firstRefusal: GraphApiError | undefined;
@@ -526,7 +539,10 @@ export async function readCommentStates(
         method: 'GET',
         host: 'graph',
         path: `/${id}`,
-        params: { fields: COMMENT_STATE_FIELDS },
+        params: {
+          fields:
+            input.withLikes === true ? COMMENT_LIKE_STATE_FIELDS : COMMENT_STATE_FIELDS,
+        },
         ...scopeFields(input),
       });
       // Typed `unknown` and read field by field: `RawComment` is a hope about
@@ -538,11 +554,16 @@ export async function readCommentStates(
       // throws inside the fingerprint hash and aborts the whole snapshot.
       const node: Record<string, unknown> = isRecord(res.data) ? res.data : {};
       const hidden = typeof node.is_hidden === 'boolean' ? node.is_hidden : undefined;
+      const liked =
+        input.withLikes === true && typeof node.user_likes === 'boolean'
+          ? node.user_likes
+          : undefined;
       const message = typeof node.message === 'string' ? node.message : '';
       states[id] = {
         id,
         gone: false,
         ...(hidden !== undefined ? { hidden } : {}),
+        ...(liked !== undefined ? { liked } : {}),
         fingerprint: messageFingerprint(message),
       };
       observed = true;
@@ -903,6 +924,26 @@ export async function setCommentHidden(
 }
 
 /**
+ * Like or unlike a comment as the Page (`POST` / `DELETE /{comment-id}/likes`).
+ * Reversible by the opposite verb. Returns whether the acknowledgement
+ * confirms the write.
+ */
+export async function setCommentLiked(
+  fbRequest: FbRequestFn,
+  input: { readonly commentId: string; readonly liked: boolean } & CommentScope,
+): Promise<boolean> {
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: input.liked ? 'POST' : 'DELETE',
+    host: 'graph',
+    path: `/${input.commentId}/likes`,
+    verifyTool: VERIFY_COMMENT_TOOL,
+    ...scopeFields(input),
+  });
+  return confirmsWrite(res.data);
+}
+
+/**
  * Delete a comment permanently. Deleting the Page's OWN comment needs
  * `pages_manage_engagement`; deleting a comment left BY a user needs
  * `pages_read_user_content` (doc 04 — the CC-AUTH-4 permission split).
@@ -965,6 +1006,40 @@ export async function moderateCommentStep(
     if (await commentStillThere(fbRequest, input)) throw err;
     return { ok: true, note: ALREADY_GONE_NOTE };
   }
+}
+
+/** Note on a like/unlike id the snapshot already showed in the target state. */
+export const ALREADY_IN_LIKE_STATE_NOTE =
+  'already in the requested state (the snapshot showed it) — nothing was sent';
+
+/** Error for a like on a comment the snapshot found gone. */
+export const LIKE_TARGET_GONE_ERROR =
+  'the comment no longer exists (or this token cannot see it), so it cannot be liked';
+
+/**
+ * Like or unlike one comment against the snapshot taken for the plan. An id
+ * already in the target state is skipped (success-with-note, no write sent). A
+ * gone comment is done for an unlike (nothing left to unlike) and a failure for
+ * a like. Everything else is one `setCommentLiked` call; a thrown error is the
+ * bulk runner's to record.
+ */
+export async function likeCommentStep(
+  fbRequest: FbRequestFn,
+  input: {
+    readonly commentId: string;
+    readonly liked: boolean;
+    readonly state: CommentState | undefined;
+  } & CommentScope,
+): Promise<BulkStep> {
+  if (input.state?.gone === true) {
+    return input.liked
+      ? { ok: false, error: LIKE_TARGET_GONE_ERROR }
+      : { ok: true, note: ALREADY_GONE_NOTE };
+  }
+  if (input.state?.liked === input.liked)
+    return { ok: true, note: ALREADY_IN_LIKE_STATE_NOTE };
+  const ok = await setCommentLiked(fbRequest, input);
+  return ok ? { ok: true } : { ok: false, error: 'Facebook reported success:false' };
 }
 
 /**

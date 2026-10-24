@@ -42,8 +42,10 @@ import type {
 } from '../core/index.js';
 import {
   ALREADY_GONE_NOTE,
+  ALREADY_IN_LIKE_STATE_NOTE,
   COMMENT_FIELDS,
   EMPTY_PAGE_TOKEN_HINT,
+  LIKE_TARGET_GONE_ERROR,
   MAX_BULK_IDS,
   NOT_BLOCKED_NOTE,
   PRIVATE_REPLY_WINDOW_MS,
@@ -321,6 +323,7 @@ const TOOL_TABLE: readonly (readonly [
   ['facebook_comment_on_post', false, false, false, 'reversible'],
   ['facebook_edit_comment', false, false, true, 'reversible'],
   ['facebook_hide_comment', false, false, true, 'reversible'],
+  ['facebook_like_comment', false, false, true, 'reversible'],
   ['facebook_delete_comment', false, true, true, 'irreversible'],
   ['facebook_private_reply', false, true, false, 'irreversible'],
   ['facebook_block_user', false, false, true, 'reversible'],
@@ -382,6 +385,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'filter',
   'order',
   'hidden',
+  'unlike',
 ]);
 
 test('every moderation log allowlist names real, non-content arguments', () => {
@@ -398,6 +402,7 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     facebook_comment_on_post: ['profile', 'apply', 'plan_id', 'post_id'],
     facebook_edit_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_hide_comment: ['profile', 'apply', 'plan_id', 'hidden'],
+    facebook_like_comment: ['profile', 'apply', 'plan_id', 'unlike'],
     facebook_delete_comment: ['profile', 'apply', 'plan_id'],
     facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_block_user: ['profile', 'apply', 'plan_id'],
@@ -1521,6 +1526,123 @@ test('exactly 50 ids are accepted — the cap is inclusive', async () => {
 
   assert.equal(obj(payload.result).total, MAX_BULK_IDS);
   assert.equal(jsonCalls(fb).length, MAX_BULK_IDS);
+});
+
+// ---------------------------------------------------------------------------
+// 5b. facebook_like_comment — like / unlike as the Page (messaging F9)
+// ---------------------------------------------------------------------------
+
+/** The like verb's snapshot: the state read plus `user_likes`. */
+function isLikeStateRead(req: FbRequest): boolean {
+  return (
+    isJson(req) &&
+    req.method === 'GET' &&
+    paramsOf(req).fields === 'id,message,is_hidden,user_likes'
+  );
+}
+
+test('facebook_like_comment likes each id once and skips one already liked', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(
+    (r) => isLikeStateRead(r) && r.path === '/c1',
+    fbOk({ id: 'c1', message: INJECTION, is_hidden: false, user_likes: false }),
+  );
+  fb.on(
+    (r) => isLikeStateRead(r) && r.path === '/c2',
+    fbOk({ id: 'c2', message: 'hi', is_hidden: false, user_likes: true }),
+  );
+  fb.on((r) => r.method === 'POST' && r.path === '/c1/likes', fbOk({ success: true }));
+
+  const result = await tool('facebook_like_comment').handler(
+    { comment_ids: ['c1', 'c2'] },
+    ctx,
+  );
+  const payload = body(result);
+
+  assert.equal(payload.status, 'applied');
+  assert.deepEqual(obj(payload.result).outcomes, [
+    { id: 'c1', ok: true },
+    { id: 'c2', ok: true, note: ALREADY_IN_LIKE_STATE_NOTE },
+  ]);
+  assert.deepEqual(
+    jsonCalls(fb).map((r) => `${r.method} ${r.path}`),
+    ['GET /c1', 'GET /c2', 'POST /c1/likes'],
+    'the already-liked comment gets no write',
+  );
+  assert.ok(!text(result).includes(INJECTION), 'no comment text in the result');
+  const entry = journal.entries.find((e) => e.tool === 'facebook_like_comment');
+  assert.ok(entry);
+  assert.ok(!JSON.stringify(entry).includes(INJECTION), 'no comment text in the journal');
+});
+
+test('facebook_like_comment with unlike:true sends DELETE and treats a gone comment as done', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(
+    (r) => isLikeStateRead(r) && r.path === '/c1',
+    fbOk({ id: 'c1', message: 'hi', is_hidden: false, user_likes: true }),
+  );
+  fb.on((r) => isLikeStateRead(r) && r.path === '/c2', fbErr(goneError()));
+  fb.on((r) => r.method === 'DELETE' && r.path === '/c1/likes', fbOk({ success: true }));
+
+  const payload = body(
+    await tool('facebook_like_comment').handler(
+      { comment_ids: ['c1', 'c2'], unlike: true },
+      ctx,
+    ),
+  );
+
+  assert.deepEqual(obj(payload.result).outcomes, [
+    { id: 'c1', ok: true },
+    { id: 'c2', ok: true, note: ALREADY_GONE_NOTE },
+  ]);
+  assert.ok(!anyCall(fb, 'POST'), 'an unlike never POSTs');
+});
+
+test('facebook_like_comment fails a like on a gone comment and an unconfirmed write', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => isLikeStateRead(r) && r.path === '/c1', fbErr(goneError()));
+  fb.on(
+    (r) => isLikeStateRead(r) && r.path === '/c2',
+    fbOk({ id: 'c2', message: 'hi', is_hidden: false, user_likes: false }),
+  );
+  fb.on((r) => r.method === 'POST' && r.path === '/c2/likes', fbOk({ success: false }));
+
+  const payload = body(
+    await tool('facebook_like_comment').handler({ comment_ids: ['c1', 'c2'] }, ctx),
+  );
+
+  assert.equal(payload.applied, false);
+  assert.deepEqual(obj(payload.result).outcomes, [
+    { id: 'c1', ok: false, error: LIKE_TARGET_GONE_ERROR },
+    { id: 'c2', ok: false, error: 'Facebook reported success:false' },
+  ]);
+  assert.equal(journal.entries.at(-1)?.outcome, 'failed');
+});
+
+test('a facebook_like_comment plan diverges when the like state changed before apply', async () => {
+  const { fb, ctx } = makeHarness({ writeMode: 'plan' });
+  fb.on(
+    isLikeStateRead,
+    fbOk({ id: 'c1', message: 'hi', is_hidden: false, user_likes: false }),
+    1,
+  );
+  fb.on(
+    isLikeStateRead,
+    fbOk({ id: 'c1', message: 'hi', is_hidden: false, user_likes: true }),
+  );
+  const like = tool('facebook_like_comment');
+
+  const preview = body(await like.handler({ comment_ids: ['c1'] }, ctx));
+  assert.equal(preview.status, 'preview');
+  const applied = body(
+    await like.handler(
+      { comment_ids: ['c1'], apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+
+  assert.equal(applied.status, 'diverged');
+  assert.ok(!anyCall(fb, 'POST'), 'a diverged plan sends no like');
 });
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 //   * facebook_reply_to_comment — public reply            (tier: reversible).
 //   * facebook_comment_on_post  — top-level Page comment  (tier: reversible).
 //   * facebook_hide_comment     — is_hidden true/false    (tier: reversible).
+//   * facebook_like_comment     — like / unlike as Page   (tier: reversible).
 //   * facebook_delete_comment   — permanent delete        (tier: irreversible).
 //   * facebook_private_reply    — the ONE private reply   (tier: irreversible).
 //   * facebook_block_user       — add PSIDs to /blocked   (tier: reversible).
@@ -66,6 +67,7 @@ import {
   isUnreadableState,
   listComments,
   moderateCommentStep,
+  likeCommentStep,
   privateReplyRefusalError,
   privateReplyWindow,
   readCommentStates,
@@ -177,6 +179,7 @@ const TIERS = {
   facebook_comment_on_post: 'reversible',
   facebook_edit_comment: 'reversible',
   facebook_hide_comment: 'reversible',
+  facebook_like_comment: 'reversible',
   facebook_delete_comment: 'irreversible',
   facebook_private_reply: 'irreversible',
   facebook_block_user: 'reversible',
@@ -775,17 +778,27 @@ function trackedCommentStates(
   fbRequest: FbRequestFn,
   scope: CommentScope,
   commentIds: readonly string[],
+  withLikes = false,
 ): {
   readonly readState: () => Promise<Record<string, CommentState>>;
   readonly unread: (id: string) => boolean;
+  readonly stateOf: (id: string) => CommentState | undefined;
+  /** Whether `readState` has answered at least once (a plan or divergence read). */
+  readonly observed: () => boolean;
 } {
   let last: Record<string, CommentState> | undefined;
   return {
     readState: async () => {
-      last = await readCommentStates(fbRequest, { ...scope, commentIds });
+      last = await readCommentStates(fbRequest, {
+        ...scope,
+        commentIds,
+        ...(withLikes ? { withLikes } : {}),
+      });
       return last;
     },
     unread: (id) => isUnreadableState(last?.[id]),
+    stateOf: (id) => last?.[id],
+    observed: () => last !== undefined,
   };
 }
 
@@ -1373,6 +1386,82 @@ export function createModerationPackage(): PackageSpec {
   });
 
   // -------------------------------------------------------------------------
+  // facebook_like_comment (reversible, bulk)
+  // -------------------------------------------------------------------------
+  const likeTool = defineTool({
+    name: 'facebook_like_comment',
+    title: 'Like or unlike comments as the Page',
+    description:
+      'Like up to 50 comments as the Page, or unlike them with `unlike:true`. ' +
+      'Reversible with the opposite flag. A comment the Page has already liked ' +
+      '(or, for unlike, has not liked) is skipped without a write; each id gets ' +
+      'its own outcome. Needs a PAGE token with pages_manage_engagement.',
+    inputSchema: z.object({
+      ...writeArgs,
+      comment_ids: commentIdsArg,
+      unlike: z
+        .boolean()
+        .optional()
+        .describe("true ⇒ remove the Page's like instead of adding one. Default false."),
+    }),
+    annotations: REVERSIBLE_ANNOTATIONS,
+    writeTier: TIERS.facebook_like_comment,
+    // `unlike` is the whole verb (like vs unlike); `comment_ids` would log as
+    // "[array]", so it is left out as on facebook_hide_comment.
+    logFields: ['profile', 'apply', 'plan_id', 'unlike'],
+    handler: async (input, ctx) => {
+      const resolved = await ctx.pages.resolvePage(input.profile);
+      const scope = scopeOf(ctx, resolved);
+      const liked = input.unlike !== true;
+      const verb = liked ? 'liked' : 'unliked';
+      const count = new Set(input.comment_ids).size;
+      const states = trackedCommentStates(ctx.fbRequest, scope, input.comment_ids, true);
+      return executeWrite(ctx, {
+        tool: 'facebook_like_comment',
+        tier: TIERS.facebook_like_comment,
+        pageId: resolved.pageId,
+        resolvedPage: resolved,
+        params: { comment_ids: input.comment_ids, unlike: !liked },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          `${liked ? 'Like' : 'Unlike'} ${String(count)} comment(s) as Page ` +
+          `${resolved.pageId}. Reversible with the opposite flag.`,
+        warnings: bulkPreviewWarnings(count, verb),
+        notPerformedNotice: `This was a dry run — no comment was ${verb}.`,
+        // Fingerprints and flags only — no comment text in the diff (CC-MOD-8).
+        readState: states.readState,
+        stateWarnings: unreadableWarnings,
+        perform: async () => {
+          const fenced = pageTokenFence(
+            sweepFbRequest(ctx.fbRequest, ctx.signal),
+            ctx,
+            resolved.pageId,
+          );
+          // A direct apply (no plan) never ran the snapshot, and the snapshot is
+          // what lets an id already in the target state be skipped without a
+          // write — so take it here. A plan-bound apply reuses the divergence read.
+          if (!states.observed()) await states.readState();
+          return bulkSummary(
+            await runBulk(input.comment_ids, (id) =>
+              states.unread(id)
+                ? Promise.resolve({ ok: false, error: UNREADABLE_NOT_ACTED_ERROR })
+                : likeCommentStep(fenced, {
+                    ...scope,
+                    commentId: id,
+                    liked,
+                    state: states.stateOf(id),
+                  }),
+            ),
+          );
+        },
+        classifyResult: bulkVerdict,
+        metadata: { commentIds: input.comment_ids, unlike: !liked },
+      });
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // facebook_delete_comment (irreversible, bulk)
   // -------------------------------------------------------------------------
   const deleteTool = defineTool({
@@ -1636,7 +1725,7 @@ export function createModerationPackage(): PackageSpec {
     title: 'Moderation',
     description:
       'Read and moderate comments on Page content (list, reply, comment on a post, ' +
-      "edit the Page's own comments, hide, delete, private reply) and maintain the " +
+      "edit the Page's own comments, hide, like, delete, private reply) and maintain the " +
       'blocked-users list.',
     tools: [
       listCommentsTool,
@@ -1645,6 +1734,7 @@ export function createModerationPackage(): PackageSpec {
       commentOnPostTool,
       editCommentTool,
       hideTool,
+      likeTool,
       deleteTool,
       privateReplyTool,
       blockedTool(true),

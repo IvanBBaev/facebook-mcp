@@ -112,7 +112,7 @@ never import `core/http` directly.
    media-photos/video/reels create tools converge here), `insights`,
    `moderation`, `messages`, `ads`. **Default expansion (C5)** — the single
    line the corpus previously left undefined: `FB_TOOL_PACKAGES` unset ⇒
-   **`core + posts + reader + insights + moderation + messages`** (35 tools),
+   **`core + posts + reader + insights + moderation + messages`** (36 tools),
    with **`ads` excluded by default** (Meta ships an official ads MCP; see 02);
    `all` adds `ads`. The expansion table is documented in 06 and
    **snapshot-tested** so the surface can never drift silently. A read-only
