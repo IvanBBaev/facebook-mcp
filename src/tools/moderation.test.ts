@@ -12,7 +12,10 @@
 // injection fixture below is inert data: the assertions prove it leaves the
 // package inside a taint envelope and is never echoed anywhere else.
 
-import { test } from 'node:test';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -204,7 +207,11 @@ interface Harness {
  * the tests run against the mode the package actually ships with.
  */
 function makeHarness(
-  opts: { readonly nowMs?: number; readonly writeMode?: WriteMode } = {},
+  opts: {
+    readonly nowMs?: number;
+    readonly writeMode?: WriteMode;
+    readonly mediaDir?: string;
+  } = {},
 ): Harness {
   const fb = createFakeFbRequest();
   const pages = createFakePageResolver({
@@ -222,7 +229,9 @@ function makeHarness(
     newPlanId: () => `plan-${String(++planSeq)}`,
   });
   const ctx: WriteToolContext = {
-    settings: makeSettings(),
+    settings: makeSettings(
+      opts.mediaDir !== undefined ? { mediaDir: opts.mediaDir } : {},
+    ),
     fbRequest: fb.fn,
     pages,
     logger: makeLogger(),
@@ -979,6 +988,159 @@ test('a reply Facebook refused with an error envelope stays journaled failed', a
 
   assert.equal(journal.entries.length, 1);
   assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+// ---------------------------------------------------------------------------
+// 4a. facebook_reply_to_comment — a photo or GIF on the reply (F8a)
+// ---------------------------------------------------------------------------
+
+const PNG_BYTES = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** A real FB_MEDIA_DIR holding one small PNG. */
+async function photoFixture(t: TestContext): Promise<{ dir: string; name: string }> {
+  const raw = await mkdtemp(join(tmpdir(), 'fbmcp-moderation-'));
+  t.after(() => rm(raw, { recursive: true, force: true }));
+  const dir = await realpath(raw);
+  await writeFile(join(dir, 'pic.png'), Buffer.from([...PNG_BYTES, 1, 2, 3, 4]));
+  return { dir, name: 'pic.png' };
+}
+
+function isValidationRefusal(err: unknown): boolean {
+  return err instanceof GraphApiError && err.action?.category === 'validation';
+}
+
+test('a reply can carry an image URL or a GIF URL instead of text', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({ id: 'c1_r1' }));
+
+  await tool('facebook_reply_to_comment').handler(
+    {
+      comment_id: 'c1',
+      attachment: { kind: 'image_url', url: 'https://cdn.example.com/a.jpg' },
+    },
+    ctx,
+  );
+  await tool('facebook_reply_to_comment').handler(
+    {
+      comment_id: 'c1',
+      message: 'ha',
+      attachment: { kind: 'gif_url', url: 'https://media.giphy.com/x.gif' },
+    },
+    ctx,
+  );
+
+  assert.deepEqual(bodyOf(fb.calls[0] as JsonRequest), {
+    attachment_url: 'https://cdn.example.com/a.jpg',
+  });
+  assert.deepEqual(bodyOf(fb.calls[1] as JsonRequest), {
+    message: 'ha',
+    attachment_share_url: 'https://media.giphy.com/x.gif',
+  });
+  assert.deepEqual(journal.entries[0]?.metadata, {
+    commentId: 'c1',
+    messageChars: 0,
+    attachmentKind: 'image_url',
+  });
+  assert.ok(
+    !JSON.stringify(journal.entries).includes('cdn.example.com'),
+    'the journal names the attachment kind, never its URL',
+  );
+});
+
+test('a reply uploads a local photo as the multipart source part', async (t) => {
+  const media = await photoFixture(t);
+  const { fb, ctx } = makeHarness({ mediaDir: media.dir });
+  fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({ id: 'c1_r1' }));
+
+  const payload = body(
+    await tool('facebook_reply_to_comment').handler(
+      {
+        comment_id: 'c1',
+        message: 'Here',
+        attachment: { kind: 'photo_path', path: media.name },
+      },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'applied');
+  const call = fb.calls[0];
+  assert.ok(call && call.protocol === 'multipart');
+  assert.deepEqual(call.fields, { message: 'Here' });
+  assert.equal(call.files.length, 1);
+  assert.equal(call.files[0]?.name, 'source');
+  assert.equal(call.files[0]?.filename, 'pic.png');
+  assert.equal(call.files[0]?.contentType, 'image/png');
+  assert.equal(call.files[0]?.data.length, PNG_BYTES.length + 4);
+});
+
+test('a planned local photo rewritten before apply is refused, not uploaded', async (t) => {
+  const media = await photoFixture(t);
+  const { fb, ctx } = makeHarness({ mediaDir: media.dir, writeMode: 'plan' });
+  const args = { comment_id: 'c1', attachment: { kind: 'photo_path', path: media.name } };
+
+  const preview = body(await tool('facebook_reply_to_comment').handler(args, ctx));
+  assert.equal(preview.status, 'preview');
+  assert.ok(str(preview.summary).includes('pic.png'));
+
+  await writeFile(join(media.dir, media.name), Buffer.from([...PNG_BYTES, 9, 9, 9, 9]));
+  await assert.rejects(() =>
+    tool('facebook_reply_to_comment').handler(
+      { ...args, apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+  assert.equal(fb.calls.length, 0, 'a different file must never be uploaded');
+});
+
+test('reply attachments are checked locally before anything is sent', async (t) => {
+  const media = await photoFixture(t);
+  const refused: Record<string, unknown>[] = [
+    { comment_id: 'c1' },
+    {
+      comment_id: 'c1',
+      attachment: { kind: 'image_url', url: 'http://cdn.example.com/a.jpg' },
+    },
+    {
+      comment_id: 'c1',
+      attachment: { kind: 'gif_url', url: 'https://user:pw@cdn.example.com/a.gif' },
+    },
+    { comment_id: 'c1', attachment: { kind: 'image_url', path: 'pic.png' } },
+    {
+      comment_id: 'c1',
+      attachment: {
+        kind: 'photo_path',
+        path: 'pic.png',
+        url: 'https://cdn.example.com/a.jpg',
+      },
+    },
+    { comment_id: 'c1', attachment: { kind: 'photo_path', path: '../outside.png' } },
+    { comment_id: 'c1', attachment: { kind: 'photo_path', path: 'missing.png' } },
+  ];
+  for (const args of refused) {
+    const { fb, ctx } = makeHarness({ mediaDir: media.dir });
+    await assert.rejects(
+      () => tool('facebook_reply_to_comment').handler(args, ctx),
+      isValidationRefusal,
+      JSON.stringify(args),
+    );
+    assert.equal(fb.calls.length, 0);
+  }
+
+  // Without FB_MEDIA_DIR no local file is read at all.
+  const { fb, ctx } = makeHarness();
+  await assert.rejects(
+    () =>
+      tool('facebook_reply_to_comment').handler(
+        {
+          comment_id: 'c1',
+          attachment: { kind: 'photo_path', path: join(media.dir, media.name) },
+        },
+        ctx,
+      ),
+    isValidationRefusal,
+  );
+  assert.equal(fb.calls.length, 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,15 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_reply_to_comment` can attach a photo or a GIF** (moderation). The
+  new optional `attachment` takes `{kind:'image_url', url}` (sent as
+  `attachment_url`), `{kind:'gif_url', url}` (sent as `attachment_share_url`) or
+  `{kind:'photo_path', path}`, a local image inside `FB_MEDIA_DIR` uploaded as
+  the multipart `source` part. `message` is now optional when an attachment is
+  given. URLs must be https:// without credentials, and a local photo is hashed
+  at preview time, so a file rewritten before apply is refused rather than
+  uploaded. All of this is checked locally before any request. The journal
+  records only the attachment kind, never its URL or path.
 - **`facebook_like_comment` likes or unlikes comments as the Page** (moderation,
   `reversible`). It takes up to 50 `comment_ids` and sends `POST
 /{comment-id}/likes`, or `DELETE` with `unlike:true`. Each id gets its own

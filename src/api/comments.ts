@@ -34,6 +34,7 @@ import { errorMessageOf, GraphApiError } from '../core/index.js';
 import type {
   FbRequestFn,
   JsonRequest,
+  MultipartPart,
   Page,
   PageRequest,
   ParamValue,
@@ -751,12 +752,29 @@ function ackOf(body: unknown): Record<string, unknown> {
   return isRecord(body) ? body : {};
 }
 
+/** The multipart part name Graph reads a comment's local photo from. */
+const COMMENT_PHOTO_FIELD = 'source';
+
+/**
+ * What a comment carries (V14): text, a photo by URL (`attachment_url`), a GIF
+ * by URL (`attachment_share_url`), a local photo (multipart `source`), or text
+ * plus one attachment. The tool layer enforces "at least one" and "at most one
+ * attachment"; this layer sends what it is given.
+ */
+export interface CommentContent {
+  readonly message?: string;
+  readonly attachmentUrl?: string;
+  readonly attachmentShareUrl?: string;
+  /** Local photo bytes, already read and validated under `FB_MEDIA_DIR`. */
+  readonly photo?: Omit<MultipartPart, 'name'>;
+}
+
 /**
  * Post a PUBLIC comment on any commentable object — a post, photo, video or
  * another comment (`POST /{object-id}/comments`). Additive, so there is no
  * before-state; an object deleted in the meantime is a hard error — there is
- * nothing to comment on (CC-MOD-1). At least one of `message` and
- * `attachmentUrl` must be present; the tools layer enforces that before this
+ * nothing to comment on (CC-MOD-1). At least one of `message` and an
+ * attachment must be present; the tools layer enforces that before this
  * is reached.
  *
  * `id` is ABSENT when Facebook acknowledged the comment without a usable one.
@@ -769,24 +787,40 @@ export async function commentOnObject(
   fbRequest: FbRequestFn,
   input: {
     readonly objectId: string;
-    readonly message?: string;
-    readonly attachmentUrl?: string;
-  } & CommentScope,
+  } & CommentContent &
+    CommentScope,
 ): Promise<{ readonly id?: string }> {
-  const res = await fbRequest<unknown>({
-    protocol: 'json',
-    method: 'POST',
-    host: 'graph',
-    path: `/${input.objectId}/comments`,
-    body: {
-      ...(input.message !== undefined ? { message: input.message } : {}),
-      ...(input.attachmentUrl !== undefined
-        ? { attachment_url: input.attachmentUrl }
-        : {}),
-    },
-    verifyTool: VERIFY_REPLY_TOOL,
-    ...scopeFields(input),
-  });
+  const fields: Record<string, string> = {
+    ...(input.message !== undefined ? { message: input.message } : {}),
+    ...(input.attachmentUrl !== undefined ? { attachment_url: input.attachmentUrl } : {}),
+    ...(input.attachmentShareUrl !== undefined
+      ? { attachment_share_url: input.attachmentShareUrl }
+      : {}),
+  };
+  const path = `/${input.objectId}/comments`;
+  // A local photo rides as the multipart `source` part; the text fields go in
+  // the same form, so text and photo land as ONE comment.
+  const res =
+    input.photo !== undefined
+      ? await fbRequest<unknown>({
+          protocol: 'multipart',
+          method: 'POST',
+          host: 'graph',
+          path,
+          fields,
+          files: [{ ...input.photo, name: COMMENT_PHOTO_FIELD }],
+          verifyTool: VERIFY_REPLY_TOOL,
+          ...scopeFields(input),
+        })
+      : await fbRequest<unknown>({
+          protocol: 'json',
+          method: 'POST',
+          host: 'graph',
+          path,
+          body: fields,
+          verifyTool: VERIFY_REPLY_TOOL,
+          ...scopeFields(input),
+        });
   const id = ackId(ackOf(res.data).id);
   return id !== undefined ? { id } : {};
 }
@@ -797,7 +831,7 @@ export async function commentOnObject(
  */
 export async function replyToComment(
   fbRequest: FbRequestFn,
-  input: { readonly commentId: string; readonly message: string } & CommentScope,
+  input: { readonly commentId: string } & CommentContent & CommentScope,
 ): Promise<{ readonly id?: string }> {
   const { commentId, ...rest } = input;
   return commentOnObject(fbRequest, { ...rest, objectId: commentId });
