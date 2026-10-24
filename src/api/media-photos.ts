@@ -213,6 +213,8 @@ export type MediaSourceErrorReason =
   /** Zero-byte file: Meta would reject it, so it fails fast locally (CC-MEDIA-5). */
   | 'empty_file'
   | 'file_too_large'
+  /** The file is not in a format the target edge accepts (ad images, v2 ads §2). */
+  | 'unsupported_format'
   /**
    * The file's size or content hash at upload time differs from what the plan
    * bound: the bytes about to be uploaded are not the bytes that were approved.

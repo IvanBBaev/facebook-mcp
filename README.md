@@ -435,6 +435,7 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_update_ad_object`       | `ads_management`                                                      |
 | `facebook_archive_ad_object`      | `ads_management`                                                      |
 | `facebook_delete_ad_object`       | `ads_management`                                                      |
+| `facebook_upload_ad_image`        | `ads_management`                                                      |
 
 </details>
 
@@ -464,13 +465,13 @@ A name none of them recognize fails at startup rather than being ignored.
 | `insights`   |       yes       | 5 read            |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                                                                |
 | `moderation` |       yes       | 3 read + 10 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                                                                          |
 | `messages`   |       yes       | 4 read + 3 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window; or ask what is new since the last look; keep local saved replies to send verbatim. Plan-first by default. |
-| `ads`        | **no** (opt-in) | 7 read + 3 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, and single-object archive/delete. Off by default.                           |
+| `ads`        | **no** (opt-in) | 7 read + 4 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, single-object archive/delete, and ad image uploads. Off by default.         |
 
 <!-- END GENERATED -->
 
 <!-- BEGIN GENERATED: tools -->
 
-**55 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**56 tools in 7 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                              |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | --------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -529,6 +530,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `ads`        | `facebook_update_ad_object`       |    `spend`     | Pause or resume an ads object, change its budget, or set a campaign spend cap.                                                                                             |
 | `ads`        | `facebook_archive_ad_object`      | `irreversible` | Archive one campaign, ad set or ad by id.                                                                                                                                  |
 | `ads`        | `facebook_delete_ad_object`       | `irreversible` | Delete one campaign, ad set or ad by id — permanently.                                                                                                                     |
+| `ads`        | `facebook_upload_ad_image`        |  `reversible`  | Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives…     |
 
 <!-- END GENERATED -->
 

@@ -190,6 +190,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_update_ad_object: ['ads_management'],
   facebook_archive_ad_object: ['ads_management'],
   facebook_delete_ad_object: ['ads_management'],
+  facebook_upload_ad_image: ['ads_management'],
 };
 
 /** A token within this window of expiry (or already past it) is "expiring soon". */

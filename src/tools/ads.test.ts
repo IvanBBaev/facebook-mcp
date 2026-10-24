@@ -14,6 +14,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createFakeClock,
@@ -215,6 +218,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
     facebook_update_ad_object: [false, true, true, true],
     facebook_archive_ad_object: [false, true, true, true],
     facebook_delete_ad_object: [false, true, true, true],
+    facebook_upload_ad_image: [false, false, true, true],
   };
 
   assert.equal(PACKAGE.tools.length, Object.keys(expected).length);
@@ -241,7 +245,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
   }
 });
 
-test('only the update and lifecycle tools can write, and none claims to be read-only', () => {
+test('only the update, lifecycle and image upload tools can write, and none claims to be read-only', () => {
   const writers = PACKAGE.tools.filter((t) => t.writeTier !== undefined);
   assert.deepEqual(
     writers.map((t) => t.name),
@@ -249,6 +253,7 @@ test('only the update and lifecycle tools can write, and none claims to be read-
       'facebook_update_ad_object',
       'facebook_archive_ad_object',
       'facebook_delete_ad_object',
+      'facebook_upload_ad_image',
     ],
   );
 });
@@ -293,6 +298,7 @@ test('every log allowlist in the package names real, non-secret arguments', () =
     facebook_update_ad_object: ['object_id', 'level', 'status', 'apply', 'plan_id'],
     facebook_archive_ad_object: ['object_id', 'level', 'apply', 'plan_id'],
     facebook_delete_ad_object: ['object_id', 'level', 'apply', 'plan_id'],
+    facebook_upload_ad_image: ['ad_account_id', 'apply', 'plan_id'],
   };
 
   for (const spec of PACKAGE.tools) {
@@ -2235,4 +2241,160 @@ test('a status change between archive preview and apply diverges', async () => {
   );
   assert.equal(result.status, 'diverged');
   assert.equal(writes(fb).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Ad image upload (v2 ads §2)
+// ---------------------------------------------------------------------------
+
+const PNG_BYTES = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7,
+]);
+
+async function withAdMedia(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'fbmcp-ads-')));
+  try {
+    await writeFile(join(dir, 'banner.png'), PNG_BYTES);
+    await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const AD_IMAGE_RESPONSE = {
+  images: {
+    'banner.png': {
+      hash: 'abc123hash',
+      url: 'https://scontent.example/b.png',
+      width: 10,
+      height: 10,
+      name: 'banner.png',
+    },
+  },
+};
+
+test('upload_ad_image previews the bound file and uploads nothing', async () => {
+  await withAdMedia(async (dir) => {
+    const { fb, ctx, journal } = makeHarness({ mediaDir: dir });
+    stubWriteReads(fb);
+
+    const result = body(
+      await tool('facebook_upload_ad_image').handler({ file_path: 'banner.png' }, ctx),
+    );
+
+    assert.equal(result.status, 'preview');
+    assert.equal(result.tier, 'reversible');
+    assert.match(
+      str(result.summary),
+      /Upload banner\.png \(11 bytes, sha256 [0-9a-f]{12}\) to the image library of act_1234567890/,
+    );
+    assert.ok(
+      arr(result.warnings).some((w) =>
+        str(w).includes('does not create or change any ad'),
+      ),
+    );
+    assert.ok(
+      arr(result.warnings).some((w) => str(w).includes('re-running this upload is safe')),
+    );
+    assert.equal(writes(fb).length, 0);
+    assert.equal(journal.entries.length, 0);
+  });
+});
+
+test('an applied upload POSTs to adimages and journals account, hash and bytes', async () => {
+  await withAdMedia(async (dir) => {
+    const { fb, ctx, journal } = makeHarness({ mediaDir: dir });
+    stubWriteReads(fb);
+    fb.on((r) => r.method === 'POST', fbOk(AD_IMAGE_RESPONSE));
+    const upload = tool('facebook_upload_ad_image');
+
+    const preview = body(
+      await upload.handler({ file_path: 'banner.png', name: 'Hero' }, ctx),
+    );
+    const applied = body(
+      await upload.handler(
+        {
+          file_path: 'banner.png',
+          name: 'Hero',
+          apply: true,
+          plan_id: str(preview.planId),
+        },
+        ctx,
+      ),
+    );
+
+    assert.equal(applied.status, 'applied');
+    assert.equal(obj(obj(applied.result).image).hash, 'abc123hash');
+    const post = writes(fb)[0];
+    assert.ok(post && post.protocol === 'multipart');
+    assert.equal(post.path, `/${ACCOUNT_ID}/adimages`);
+    assert.equal(post.files[0]?.filename, 'Hero');
+    const entry = journal.entries.at(-1);
+    assert.equal(entry?.outcome, 'applied');
+    assert.deepEqual(entry?.metadata, {
+      accountId: ACCOUNT_ID,
+      bytes: 11,
+      hash: 'abc123hash',
+    });
+  });
+});
+
+test('an upload answered without a hash is attempted, with the re-run note', async () => {
+  await withAdMedia(async (dir) => {
+    const { fb, ctx, journal } = makeHarness({ mediaDir: dir });
+    stubWriteReads(fb);
+    fb.on((r) => r.method === 'POST', fbOk({ images: {} }));
+    const upload = tool('facebook_upload_ad_image');
+
+    const preview = body(await upload.handler({ file_path: 'banner.png' }, ctx));
+    const applied = body(
+      await upload.handler(
+        { file_path: 'banner.png', apply: true, plan_id: str(preview.planId) },
+        ctx,
+      ),
+    );
+
+    assert.equal(applied.status, 'not_applied');
+    assert.equal(applied.outcome, 'attempted');
+    assert.match(str(obj(applied.result).unconfirmed), /re-running this upload is safe/);
+    assert.equal(journal.entries.at(-1)?.outcome, 'attempted');
+  });
+});
+
+test('a file rewritten after the preview no longer matches the plan and is not uploaded', async () => {
+  await withAdMedia(async (dir) => {
+    const { fb, ctx } = makeHarness({ mediaDir: dir });
+    stubWriteReads(fb);
+    const upload = tool('facebook_upload_ad_image');
+
+    const preview = body(await upload.handler({ file_path: 'banner.png' }, ctx));
+    const changed = new Uint8Array(PNG_BYTES);
+    changed[10] = 0;
+    await writeFile(join(dir, 'banner.png'), changed);
+
+    await assert.rejects(
+      upload.handler(
+        { file_path: 'banner.png', apply: true, plan_id: str(preview.planId) },
+        ctx,
+      ),
+      /apply params differ from the planned params/,
+    );
+    assert.equal(writes(fb).length, 0);
+  });
+});
+
+test('upload_ad_image refuses a non-image extension and a path outside FB_MEDIA_DIR', async () => {
+  await withAdMedia(async (dir) => {
+    await writeFile(join(dir, 'clip.mp4'), PNG_BYTES);
+    const { fb, ctx } = makeHarness({ mediaDir: dir });
+    stubWriteReads(fb);
+    const upload = tool('facebook_upload_ad_image');
+
+    await assert.rejects(
+      upload.handler({ file_path: 'clip.mp4' }, ctx),
+      /not an ad image format/,
+    );
+    await assert.rejects(upload.handler({ file_path: '../x.png' }, ctx));
+    assert.equal(writes(fb).length, 0);
+  });
 });

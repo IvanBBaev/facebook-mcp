@@ -73,6 +73,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_upload_ad_image` (v2 ads §2).** Upload one local image under
+  `FB_MEDIA_DIR` to an ad account's image library and get back its `hash`, the
+  handle ad creatives reference. Plan-first, tier `reversible`; the preview
+  shows the file, its size and a short sha256, and the plan binds both, so a
+  file changed after the preview is refused. JPEG, PNG, GIF, BMP, TIFF and
+  WEBP are accepted by extension and by content (a renamed non-image is
+  refused), up to 30 MB. Uploading creates or changes no ad, and Meta
+  deduplicates by content hash, so a re-run is safe. Needs `ads_management`;
+  part of the opt-in `ads` package.
+
 - **`facebook_archive_ad_object` and `facebook_delete_ad_object` (v2 ads §3).**
   Retire one campaign, ad set or ad by id. Both are plan-first and tier
   `irreversible`; the preview names the current status, how many ad sets / ads
