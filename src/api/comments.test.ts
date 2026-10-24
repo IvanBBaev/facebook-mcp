@@ -31,7 +31,9 @@ import {
   privateReplyRefusalError,
   privateReplyWindow,
   readCommentStates,
+  editComment,
   readCommentTarget,
+  readEditableComment,
   replyToComment,
   runBulk,
   sendPrivateReply,
@@ -872,6 +874,46 @@ test('commentOnObject reports no id for an acknowledgement without a usable one'
   assert.deepEqual(
     await commentOnObject(fb.fn, { ...SCOPE, objectId: 'p1', message: 'hi' }),
     {},
+  );
+});
+
+test('readEditableComment reads the author id and current text, dropping mistyped fields', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ id: 'c1', from: { id: 'page-1' }, message: 'Old text' }), 1);
+  fb.on(() => true, fbOk({ from: { id: 7 }, message: 42 }));
+
+  const own = await readEditableComment(fb.fn, { ...SCOPE, commentId: 'c1' });
+  const req = fb.lastRequest();
+  assert.equal(req?.method, 'GET');
+  assert.equal(req?.path, '/c1');
+  assert.deepEqual(req?.protocol === 'json' ? req.params : undefined, {
+    fields: 'id,from{id},message',
+  });
+  assert.deepEqual(own, { id: 'c1', fromId: 'page-1', message: 'Old text' });
+
+  assert.deepEqual(await readEditableComment(fb.fn, { ...SCOPE, commentId: 'c1' }), {
+    id: 'c1',
+  });
+});
+
+test('editComment posts the new message to the comment node and reads success', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ success: true }), 1);
+  fb.on(() => true, fbOk({ success: false }));
+
+  assert.equal(
+    await editComment(fb.fn, { ...SCOPE, commentId: 'c1', message: 'New text' }),
+    true,
+  );
+  const req = fb.lastRequest();
+  assert.equal(req?.method, 'POST');
+  assert.equal(req?.path, '/c1');
+  assert.deepEqual(req?.protocol === 'json' ? req.body : undefined, {
+    message: 'New text',
+  });
+  assert.equal(
+    await editComment(fb.fn, { ...SCOPE, commentId: 'c1', message: 'New text' }),
+    false,
   );
 });
 

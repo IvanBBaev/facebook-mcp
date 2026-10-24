@@ -319,6 +319,7 @@ const TOOL_TABLE: readonly (readonly [
   ['facebook_get_comment', true, false, true, undefined],
   ['facebook_reply_to_comment', false, false, false, 'reversible'],
   ['facebook_comment_on_post', false, false, false, 'reversible'],
+  ['facebook_edit_comment', false, false, true, 'reversible'],
   ['facebook_hide_comment', false, false, true, 'reversible'],
   ['facebook_delete_comment', false, true, true, 'irreversible'],
   ['facebook_private_reply', false, true, false, 'irreversible'],
@@ -395,6 +396,7 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     facebook_get_comment: ['profile', 'comment_id'],
     facebook_reply_to_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_comment_on_post: ['profile', 'apply', 'plan_id', 'post_id'],
+    facebook_edit_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_hide_comment: ['profile', 'apply', 'plan_id', 'hidden'],
     facebook_delete_comment: ['profile', 'apply', 'plan_id'],
     facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
@@ -1136,6 +1138,144 @@ test('a comment photo must be an https URL without credentials', () => {
       .success,
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// 4c. facebook_edit_comment — rewrite the Page's own comment (messaging F8b)
+// ---------------------------------------------------------------------------
+
+/** The edit pre-flight / divergence read of comment c1. */
+function isEditRead(r: FbRequest): boolean {
+  return (
+    isJson(r) &&
+    r.method === 'GET' &&
+    r.path === '/c1' &&
+    paramsOf(r).fields === 'id,from{id},message'
+  );
+}
+
+function ownComment(
+  message = 'Thanks for coming — doors open at 7pm',
+): Record<string, unknown> {
+  return { id: 'c1', from: { id: PAGE.pageId }, message };
+}
+
+test('an edit preview quotes the current and the new text inside taint envelopes', async () => {
+  const { fb, ctx, journal } = makeHarness({ writeMode: 'plan' });
+  fb.on(isEditRead, fbOk(ownComment()));
+
+  const result = await tool('facebook_edit_comment').handler(
+    { comment_id: 'c1', message: 'Thanks for coming — doors open at 8pm' },
+    ctx,
+  );
+  const payload = body(result);
+
+  assert.equal(payload.status, 'preview');
+  assert.equal(payload.tier, 'reversible');
+  assert.ok(str(payload.summary).includes('Edit comment c1'));
+  const warnings = arr(payload.warnings).map(str);
+  const current = warnings.find((w) => w.startsWith('Current text:'));
+  const next = warnings.find((w) => w.startsWith('New text:'));
+  assert.ok(current?.includes('doors open at 7pm') && current.includes(TAINT_BEGIN));
+  assert.ok(next?.includes('doors open at 8pm') && next.includes(TAINT_END));
+  assert.equal(
+    jsonCalls(fb).filter(isEditRead).length,
+    1,
+    'the pre-flight doubles as the plan snapshot',
+  );
+  assert.ok(!anyCall(fb, 'POST'), 'a dry run must not edit');
+  assert.equal(journal.entries.length, 0);
+});
+
+test('an applied edit posts the new message and journals only fingerprints', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(isEditRead, fbOk(ownComment()));
+  fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
+
+  const result = await tool('facebook_edit_comment').handler(
+    { comment_id: 'c1', message: 'doors open at 8pm' },
+    ctx,
+  );
+  const payload = body(result);
+
+  assert.equal(payload.status, 'applied');
+  assert.deepEqual(payload.result, { id: 'c1', edited: true });
+  const post = jsonCalls(fb).find((r) => r.method === 'POST');
+  assert.ok(post);
+  assert.deepEqual(bodyOf(post), { message: 'doors open at 8pm' });
+  const metadata = obj(journal.entries[0]?.metadata);
+  assert.equal(journal.entries[0]?.outcome, 'applied');
+  assert.equal(metadata.commentId, 'c1');
+  assert.equal(metadata.messageChars, 17);
+  assert.match(str(metadata.previousFingerprint), /^[0-9a-f]{16}$/);
+  assert.notEqual(metadata.previousFingerprint, metadata.messageFingerprint);
+  assert.ok(!JSON.stringify(journal.entries[0]).includes('doors open'));
+});
+
+test('an edit of a comment the Page did not write is refused before any write', async () => {
+  for (const node of [
+    { id: 'c1', from: { id: 'u1' }, message: INJECTION },
+    { id: 'c1', message: 'author hidden by permissions' },
+  ]) {
+    const { fb, ctx, journal } = makeHarness();
+    fb.on(isEditRead, fbOk(node));
+    await assert.rejects(
+      () =>
+        tool('facebook_edit_comment').handler({ comment_id: 'c1', message: 'x' }, ctx),
+      (err: unknown) =>
+        err instanceof GraphApiError &&
+        err.action?.category === 'validation' &&
+        err.message.includes("Only the Page's own comments") &&
+        !err.message.includes('Ignore all previous'),
+    );
+    assert.ok(!anyCall(fb, 'POST'));
+    assert.equal(journal.entries.length, 0);
+  }
+});
+
+test('an edit of a comment changed after the preview diverges and writes nothing', async () => {
+  const { fb, ctx } = makeHarness({ writeMode: 'plan' });
+  fb.on(isEditRead, fbOk(ownComment('first text')), 1);
+  fb.on(isEditRead, fbOk(ownComment('changed by a colleague')));
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+  const edit = tool('facebook_edit_comment');
+
+  const preview = body(
+    await edit.handler({ comment_id: 'c1', message: 'new text' }, ctx),
+  );
+  const result = await edit.handler(
+    { comment_id: 'c1', message: 'new text', apply: true, plan_id: str(preview.planId) },
+    ctx,
+  );
+  const payload = body(result);
+
+  assert.equal(payload.status, 'diverged');
+  assert.ok(!anyCall(fb, 'POST'));
+  assert.ok(!text(result).includes('changed by a colleague'));
+});
+
+test('an edit Facebook answers with success:false is failed, not applied', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on(isEditRead, fbOk(ownComment()));
+  fb.on((r) => r.method === 'POST', fbOk({ success: false }));
+
+  const payload = body(
+    await tool('facebook_edit_comment').handler({ comment_id: 'c1', message: 'x' }, ctx),
+  );
+
+  assert.notEqual(payload.status, 'applied');
+  assert.equal(obj(payload.result).edited, false);
+  assert.equal(journal.entries[0]?.outcome, 'failed');
+});
+
+test('an edit of a deleted comment surfaces the not-found error and writes nothing', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(isEditRead, fbErr(goneError()));
+  await assert.rejects(
+    () => tool('facebook_edit_comment').handler({ comment_id: 'c1', message: 'x' }, ctx),
+    (err: unknown) => err instanceof GraphApiError && err.code === 100,
+  );
+  assert.ok(!anyCall(fb, 'POST'));
 });
 
 // ---------------------------------------------------------------------------

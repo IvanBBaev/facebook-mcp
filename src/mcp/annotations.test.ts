@@ -14,7 +14,7 @@
 // README table and `manifest.json` agree on tool NAMES. Neither freezes all four
 // booleans for the whole surface in one place, which is what this file does:
 //
-//   * ANNOTATION_MANIFEST below is a frozen literal — 41 rows, one per tool.
+//   * ANNOTATION_MANIFEST below is a frozen literal — 42 rows, one per tool.
 //     Changing a hint anywhere in `src/tools/` fails here until the row is
 //     edited too, which is the point: the edit is the review.
 //   * The table and the registry must agree in BOTH directions, so a new tool
@@ -177,6 +177,7 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_get_comment', true, false, true, true, undefined],
   ['facebook_reply_to_comment', false, false, false, true, 'reversible'],
   ['facebook_comment_on_post', false, false, false, true, 'reversible'],
+  ['facebook_edit_comment', false, false, true, true, 'reversible'],
   ['facebook_hide_comment', false, false, true, true, 'reversible'],
   ['facebook_delete_comment', false, true, true, true, 'irreversible'],
   ['facebook_private_reply', false, true, false, true, 'irreversible'],
@@ -392,7 +393,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 41 tools across 7 packages', () => {
+test('the full surface is 42 tools across 7 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -405,17 +406,17 @@ test('the full surface is 41 tools across 7 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    41,
+    42,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    41,
+    42,
     'the frozen manifest lost or gained a row',
   );
 });
 
-test('the default `core` profile ships 34 tools — everything except `ads`', () => {
+test('the default `core` profile ships 35 tools — everything except `ads`', () => {
   // `toolPackages: undefined` is what an operator who never set FB_TOOL_PACKAGES gets.
   const byDefault = createRegistry(PACKAGES, makeSettings());
   assert.deepEqual(
@@ -425,8 +426,8 @@ test('the default `core` profile ships 34 tools — everything except `ads`', ()
   );
   assert.equal(
     byDefault.tools.length,
-    34,
-    'the out-of-box tool count changed; the README and doc 06 both quote 34',
+    35,
+    'the out-of-box tool count changed; the README and doc 06 both quote 35',
   );
   assert.equal(
     byDefault.has('facebook_list_campaigns'),
@@ -440,12 +441,12 @@ test('the default `core` profile ships 34 tools — everything except `ads`', ()
   );
 });
 
-test('the surface splits 26 read / 15 write (11 reversible, 3 irreversible, 1 spend)', () => {
+test('the surface splits 26 read / 16 write (12 reversible, 3 irreversible, 1 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
   assert.equal(read.length, 26, 'the read-only tool count changed (doc 06 quotes 26)');
-  assert.equal(write.length, 15, 'the write tool count changed (doc 06 quotes 15)');
+  assert.equal(write.length, 16, 'the write tool count changed (doc 06 quotes 16)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 
   const byTier: Record<string, number> = {};
@@ -455,7 +456,7 @@ test('the surface splits 26 read / 15 write (11 reversible, 3 irreversible, 1 sp
   }
   assert.deepEqual(
     byTier,
-    { reversible: 11, irreversible: 3, spend: 1 },
+    { reversible: 12, irreversible: 3, spend: 1 },
     'the write-tier distribution changed. The single `spend` is ' +
       '`facebook_update_ad_object`, which is the only tool in this server that can ' +
       'cost money — resuming delivery or raising a budget. `safe` stays deliberately ' +

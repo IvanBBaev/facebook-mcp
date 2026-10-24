@@ -821,6 +821,66 @@ export async function readCommentTarget(
   };
 }
 
+/** The fields an edit pre-flight reads: who wrote the comment and what it says now. */
+const EDITABLE_COMMENT_FIELDS = 'id,from{id},message';
+
+/** A comment as an edit pre-flight needs it: its author and its current text. */
+export interface EditableComment {
+  readonly id: string;
+  readonly fromId?: string;
+  readonly message?: string;
+}
+
+/**
+ * Read the comment an edit is about to overwrite (`GET /{comment-id}`), so the
+ * caller can refuse a comment the Page did not write and show the text being
+ * replaced. A comment deleted in the meantime throws the Graph not-found error
+ * — there is nothing to edit (CC-MOD-1).
+ */
+export async function readEditableComment(
+  fbRequest: FbRequestFn,
+  input: { readonly commentId: string } & CommentScope,
+): Promise<EditableComment> {
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'GET',
+    host: 'graph',
+    path: `/${input.commentId}`,
+    params: { fields: EDITABLE_COMMENT_FIELDS },
+    ...scopeFields(input),
+  });
+  const node = ackOf(res.data);
+  const from = isRecord(node.from) ? node.from : {};
+  const fromId = ackId(from.id);
+  return {
+    id: ackId(node.id) ?? input.commentId,
+    ...(fromId !== undefined ? { fromId } : {}),
+    ...(typeof node.message === 'string' ? { message: node.message } : {}),
+  };
+}
+
+/**
+ * Replace the text of a comment (`POST /{comment-id}` with `message`). Graph
+ * only lets a Page edit its own comments; the tools layer checks authorship
+ * first so the refusal is local and explicit rather than a Graph permission
+ * error. Returns whether the acknowledgement confirms the edit.
+ */
+export async function editComment(
+  fbRequest: FbRequestFn,
+  input: { readonly commentId: string; readonly message: string } & CommentScope,
+): Promise<boolean> {
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'POST',
+    host: 'graph',
+    path: `/${input.commentId}`,
+    body: { message: input.message },
+    verifyTool: VERIFY_COMMENT_TOOL,
+    ...scopeFields(input),
+  });
+  return confirmsWrite(res.data);
+}
+
 /**
  * Hide or unhide a comment (`is_hidden`). Reversible by design: a hidden comment
  * stays visible to its author and their friends, which is why this is the default

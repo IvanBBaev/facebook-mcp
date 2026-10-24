@@ -70,7 +70,10 @@ import {
   privateReplyWindow,
   readCommentStates,
   commentOnObject,
+  editComment,
+  messageFingerprint,
   readCommentTarget,
+  readEditableComment,
   replyToComment,
   runBulk,
   sendPrivateReply,
@@ -82,6 +85,7 @@ import {
   type CommentTarget,
   type CommentScope,
   type CommentState,
+  type EditableComment,
   type PrivateReplyReceipt,
 } from '../api/comments.js';
 import {
@@ -171,6 +175,7 @@ const PRIVATE_REPLY_ANNOTATIONS: ToolAnnotations = {
 const TIERS = {
   facebook_reply_to_comment: 'reversible',
   facebook_comment_on_post: 'reversible',
+  facebook_edit_comment: 'reversible',
   facebook_hide_comment: 'reversible',
   facebook_delete_comment: 'irreversible',
   facebook_private_reply: 'irreversible',
@@ -348,6 +353,75 @@ function commentTargetWarnings(target: CommentTarget, pageId: string): string[] 
       ? [`The post being commented on: ${renderTainted(taint('visitor_post', excerpt))}`]
       : []),
   ];
+}
+
+/**
+ * The terminal refusal for an edit of a comment the Page did not write. Graph
+ * only lets a Page edit its own comments, so this is decided locally from the
+ * pre-flight read rather than spent on a call that cannot succeed. A comment
+ * whose author the token could not read is refused too: ownership unproven is
+ * not ownership.
+ */
+function notOwnCommentError(
+  commentId: string,
+  fromId: string | undefined,
+): GraphApiError {
+  const why =
+    fromId === undefined
+      ? 'its author could not be read, so it cannot be shown to be the Page'
+      : 'it was written by someone other than the Page';
+  const text =
+    `Edit of comment ${commentId} refused: ${why}. Only the Page's own comments can ` +
+    'be edited — do NOT retry. To act on a visitor comment use facebook_hide_comment ' +
+    'or facebook_reply_to_comment.';
+  return new GraphApiError(text, {
+    code: 0,
+    httpStatus: 400,
+    action: {
+      category: 'validation',
+      retryable: false,
+      nextTool: 'facebook_get_comment',
+      operatorText: text,
+    },
+  });
+}
+
+/** How much of each side an edit preview quotes. */
+const EDIT_EXCERPT_CHARS = 500;
+
+/**
+ * The UGC-free state an edit plan binds to: the comment's fingerprint. A
+ * concurrent edit changes it, so a stale plan diverges instead of overwriting
+ * text nobody reviewed (CC-MOD-6); the text itself stays out (CC-MOD-8).
+ */
+function editableState(comment: EditableComment): CommentState {
+  return {
+    id: comment.id,
+    gone: false,
+    fingerprint: messageFingerprint(comment.message ?? ''),
+  };
+}
+
+/**
+ * What `facebook_edit_comment` returns: the comment id plus whether Facebook
+ * confirmed the edit, with a `note` when it did not.
+ */
+interface EditOutcome {
+  readonly id: string;
+  readonly edited: boolean;
+  readonly note?: string;
+}
+
+const EDIT_REFUSED_NOTE =
+  'Facebook answered the edit with success:false, so the comment text was NOT ' +
+  'changed. Read it with facebook_get_comment before trying again.';
+
+/** An edit Facebook explicitly declined changed nothing: `failed`, not `applied`. */
+function editVerdict(outcome: EditOutcome): {
+  readonly outcome: JournalOutcome;
+  readonly applied: boolean;
+} {
+  return outcome.edited ? APPLIED_VERDICT : { outcome: 'failed', applied: false };
 }
 
 /**
@@ -1138,6 +1212,92 @@ export function createModerationPackage(): PackageSpec {
   });
 
   // -------------------------------------------------------------------------
+  // facebook_edit_comment (reversible)
+  // -------------------------------------------------------------------------
+  const editCommentTool = defineTool({
+    name: 'facebook_edit_comment',
+    title: 'Edit own comment',
+    description:
+      'Replace the text of a comment the Page itself wrote — e.g. fix a typo in a ' +
+      'reply. Comments by anyone else are refused before any write. The plan-mode ' +
+      'preview shows the current and the new text, so the old text can be restored ' +
+      'with a second edit; a comment edited by someone else after the preview makes ' +
+      'the plan diverge. Needs a PAGE token with pages_manage_engagement.',
+    inputSchema: z.object({
+      ...writeArgs,
+      comment_id: commentIdArg,
+      message: messageArg,
+    }),
+    annotations: REVERSIBLE_ANNOTATIONS,
+    writeTier: TIERS.facebook_edit_comment,
+    // Which comment was rewritten and how the call was armed; never the text.
+    logFields: ['profile', 'apply', 'plan_id', 'comment_id'],
+    handler: async (input, ctx) => {
+      const resolved = await ctx.pages.resolvePage(input.profile);
+      const scope = scopeOf(ctx, resolved);
+      const read = () =>
+        readEditableComment(ctx.fbRequest, { ...scope, commentId: input.comment_id });
+      // Ownership is checked on every call, not only in plan mode: under the
+      // package's `apply` default no preview runs, and the refusal must hold there.
+      const current = await read();
+      if (current.fromId !== resolved.pageId) {
+        throw notOwnCommentError(input.comment_id, current.fromId);
+      }
+      const before = current.message ?? '';
+      // The first snapshot is the pre-flight itself; later ones (the gate's
+      // divergence re-read before a plan-bound apply) go back to Facebook.
+      let preflight: EditableComment | undefined = current;
+      return executeWrite(ctx, {
+        tool: 'facebook_edit_comment',
+        tier: TIERS.facebook_edit_comment,
+        pageId: resolved.pageId,
+        resolvedPage: resolved,
+        params: { comment_id: input.comment_id, message: input.message },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          `Edit comment ${input.comment_id} of Page ${resolved.pageId}: ` +
+          `${String(before.length)} → ${String(input.message.length)} chars.`,
+        warnings: [
+          'The edited comment is PUBLIC — everyone who can see the thread sees the new text.',
+          ...(before === input.message
+            ? ['The new text is identical to the current text; the edit changes nothing.']
+            : []),
+        ],
+        notPerformedNotice: 'This was a dry run — the comment was not edited.',
+        readState: async () => {
+          const snapshot = preflight ?? (await read());
+          preflight = undefined;
+          return editableState(snapshot);
+        },
+        stateWarnings: () => [
+          `Current text: ${renderTainted(taint('comment', truncate(before, EDIT_EXCERPT_CHARS)))}`,
+          `New text: ${renderTainted(taint('comment', truncate(input.message, EDIT_EXCERPT_CHARS)))}`,
+        ],
+        perform: async (): Promise<EditOutcome> => {
+          const ok = await editComment(ctx.fbRequest, {
+            ...scope,
+            commentId: input.comment_id,
+            message: input.message,
+          });
+          return ok
+            ? { id: input.comment_id, edited: true }
+            : { id: input.comment_id, edited: false, note: EDIT_REFUSED_NOTE };
+        },
+        classifyOutcome: classifyWriteFailure,
+        classifyResult: editVerdict,
+        // Hashes only: the journal records that the text changed, never what it said.
+        metadata: {
+          commentId: input.comment_id,
+          messageChars: input.message.length,
+          previousFingerprint: messageFingerprint(before),
+          messageFingerprint: messageFingerprint(input.message),
+        },
+      });
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // facebook_hide_comment (reversible, bulk)
   // -------------------------------------------------------------------------
   const hideTool = defineTool({
@@ -1476,12 +1636,14 @@ export function createModerationPackage(): PackageSpec {
     title: 'Moderation',
     description:
       'Read and moderate comments on Page content (list, reply, comment on a post, ' +
-      'hide, delete, private reply) and maintain the blocked-users list.',
+      "edit the Page's own comments, hide, delete, private reply) and maintain the " +
+      'blocked-users list.',
     tools: [
       listCommentsTool,
       getCommentTool,
       replyTool,
       commentOnPostTool,
+      editCommentTool,
       hideTool,
       deleteTool,
       privateReplyTool,

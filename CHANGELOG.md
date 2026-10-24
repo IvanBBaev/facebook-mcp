@@ -37,6 +37,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_edit_comment` rewrites a comment the Page itself wrote** (moderation,
+  `reversible`). It sends `POST /{comment-id}` with the new `message`, e.g. to fix
+  a typo in a reply. A pre-flight read of `from{id}` runs on every call, and
+  anything not written by the Page (or with an unreadable author) is refused
+  locally before any write. The plan-mode preview quotes the current and the new
+  text inside taint envelopes, so the old text can be restored with a second
+  edit. The plan binds to the comment's fingerprint, so a comment edited by
+  someone else after the preview diverges instead of being overwritten. The
+  journal keeps only fingerprints of the old and new text.
+
 - **Messenger replies can quote a message, threads show reactions, and a
   conversation can be found by PSID (messaging F1 send side, F13).**
   `facebook_send_message` takes an optional `reply_to_message_id` (a mid from
