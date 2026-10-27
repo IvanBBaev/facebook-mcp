@@ -446,6 +446,8 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_archive_ad_object`         | `ads_management`                                                      |
 | `facebook_delete_ad_object`          | `ads_management`                                                      |
 | `facebook_upload_ad_image`           | `ads_management`                                                      |
+| `facebook_get_ad_set_targeting`      | `ads_read`                                                            |
+| `facebook_update_ad_set_targeting`   | `ads_management`                                                      |
 | `facebook_update_page_profile`       | `pages_manage_metadata`, `pages_read_engagement`                      |
 
 </details>
@@ -476,14 +478,14 @@ A name none of them recognize fails at startup rather than being ignored.
 | `insights`   |       yes       | 5 read            |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                                                                                                                       |
 | `moderation` |       yes       | 4 read + 11 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list and the Page moderation settings (blocked words, profanity filter).                                                                                              |
 | `messages`   |       yes       | 5 read + 8 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window, or react to a message; or ask what is new since the last look; keep local saved replies to send verbatim; tag threads with custom labels. Plan-first by default. |
-| `ads`        | **no** (opt-in) | 7 read + 4 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, single-object archive/delete, and ad image uploads. Off by default.                                                                |
+| `ads`        | **no** (opt-in) | 8 read + 5 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, single-object archive/delete, ad image uploads, and ad-set targeting reads with a narrow countries/ages edit. Off by default.      |
 | `page_admin` | **no** (opt-in) | 0 read + 1 write  |       `plan`       | Edit the Page itself: its public profile (about, description, website, phone, hours, temporary status). Opt-in; needs pages_manage_metadata.                                                                                                                                                                                                      |
 
 <!-- END GENERATED -->
 
 <!-- BEGIN GENERATED: tools -->
 
-**65 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**67 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                                 |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------------ | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -551,6 +553,8 @@ A name none of them recognize fails at startup rather than being ignored.
 | `ads`        | `facebook_archive_ad_object`         | `irreversible` | Archive one campaign, ad set or ad by id.                                                                                                                                  |
 | `ads`        | `facebook_delete_ad_object`          | `irreversible` | Delete one campaign, ad set or ad by id — permanently.                                                                                                                     |
 | `ads`        | `facebook_upload_ad_image`           |  `reversible`  | Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives…     |
+| `ads`        | `facebook_get_ad_set_targeting`      |     `read`     | Read one ad set's audience and summarise it in plain terms: countries, counts of regions / cities / locales, age range, genders, placements, and flags for detailed…       |
+| `ads`        | `facebook_update_ad_set_targeting`   |    `spend`     | Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is.                                        |
 | `page_admin` | `facebook_update_page_profile`       |  `reversible`  | Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status.                                          |
 
 <!-- END GENERATED -->

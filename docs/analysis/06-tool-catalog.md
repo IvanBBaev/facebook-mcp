@@ -26,8 +26,8 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 34 read tools. The published counts (65 tools / 8 packages, 53 in the default
-> profile, 34 read / 31 write) are asserted there too. `src/metadata.test.ts`
+> the 35 read tools. The published counts (67 tools / 8 packages, 53 in the default
+> profile, 35 read / 32 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
@@ -189,6 +189,8 @@ env-bypassed) and are gated by `FB_ADS_BUDGET_CEILING`.
 | `facebook_archive_ad_object` | false | true | true | true | v2 ads §3, tier **irreversible**. `POST /{id}` `status=ARCHIVED`; children inherit (preview counts them with `level`). Archived objects can only be renamed or deleted. Already archived/deleted is refused locally. At-risk accounts allowed (stops delivery) |
 | `facebook_delete_ad_object` | false | true | true | true | v2 ads §3, tier **irreversible**. Campaign: `DELETE /{id}`; ad set / ad / unknown level: `POST /{id}` `status=DELETED`. Never the account bulk DELETE. Deleting an archived object is allowed. 28-day delivery warning (insights `last_28d` spend or `effective_status` ACTIVE); ambiguous answer is `attempted`, never retried |
 | `facebook_upload_ad_image` | false | false | true | true | v2 ads §2, tier **reversible**. Multipart `POST /act_{id}/adimages` of one local file under `FB_MEDIA_DIR` (same containment/symlink checks as Page photos), JPEG/PNG/GIF/BMP/TIFF/WEBP by extension and magic bytes, at most 30 MB. The plan binds size + sha256, so a file changed after preview is refused. Returns the image `hash` (journaled); no hash in the answer is `attempted`. Creates no ad; Meta deduplicates by hash → `idempotentHint:true`. Needs `ads_management` |
+| `facebook_get_ad_set_targeting` | true | false | true | true | v2 ads §8. `GET /{adset}?fields=id,name,account_id,targeting`, summarised in plain terms (countries, region/city/locale counts, ages, genders, placements, flags for detailed targeting / custom audiences / exclusions / Advantage+ audience) plus `editable_by_this_server` and `not_editable_because`. The raw blob only with `include_raw:true` and only up to 64 KB. Needs `ads_read` |
+| `facebook_update_ad_set_targeting` | false | true | true | true | v2 ads §8, tier **spend** (the audience decides what the budget buys). Read-modify-write of the full blob replacing only `geo_locations.countries`, `age_min`, `age_max`; every other key is sent back unchanged. Refused for custom audiences, detailed targeting, sub-country geography, exclusions or Advantage+ audience on. Adding EU countries to an audience that had none needs DSA payor/beneficiary on the ad set or the account defaults (best-effort read; unreadable ⇒ refused). The plan binds a key-order-insensitive fingerprint of the whole blob, so any concurrent edit diverges. Needs `ads_management` |
 | `facebook_ads_insights` | true | false | true | true | Tried **synchronously first**; when Graph refuses the query for being too large, an async report run is started automatically and the result comes back with `mode:"async"`, a `reportRunId` and **no rows** — the caller polls `facebook_ads_report_status` instead of retrying this tool (CC-ADS-5). Window is either a `date_preset` or a since/until pair (both or neither); breakdowns with row caps + `truncated` |
 | `facebook_ads_report_status` | true | false | true | true | Probes one async report run and, with `fetch_results:true`, reads its rows once complete. **One call, one answer** — it never sleeps and never loops; the phase (pending / running / complete / failed / skipped) and a stop-polling hint come back to the model, which owns the wait. A FAILED or SKIPPED run produced nothing and must be replaced by a narrower run, not re-probed (there is no cancel API) |
 
@@ -233,9 +235,9 @@ wrong `temporary_status` misleads every visitor at once.
 
 **Total as shipped: 53 model-facing tools in the default `core` profile** (core 4
 + posts 9 + reader 7 + insights 5 + moderation 15 + messages 13), with the opt-in
-`ads` package adding 11 more and the opt-in `page_admin` package 1 — **65 across
-all 8 packages**, split 34 read / 31 write (23 reversible, 7 irreversible, 1 spend — the single `spend` tool is
-`facebook_update_ad_object`). Deliberately smaller than the 100+
+`ads` package adding 13 more and the opt-in `page_admin` package 1 — **67 across
+all 8 packages**, split 35 read / 32 write (23 reversible, 7 irreversible, 2 spend — the `spend` tools are
+`facebook_update_ad_object` and `facebook_update_ad_set_targeting`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story
 publishing, Events, Live video, album / photo uploads, organic post targeting, and post boosting are out of

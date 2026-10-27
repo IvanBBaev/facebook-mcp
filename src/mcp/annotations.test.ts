@@ -221,6 +221,8 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_archive_ad_object', false, true, true, true, 'irreversible'],
   ['facebook_delete_ad_object', false, true, true, true, 'irreversible'],
   ['facebook_upload_ad_image', false, false, true, true, 'reversible'],
+  ['facebook_get_ad_set_targeting', true, false, true, true, undefined],
+  ['facebook_update_ad_set_targeting', false, true, true, true, 'spend'],
 
   // package `page_admin` — off by default.
   ['facebook_update_page_profile', false, false, true, true, 'reversible'],
@@ -430,7 +432,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 65 tools across 8 packages', () => {
+test('the full surface is 67 tools across 8 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -443,12 +445,12 @@ test('the full surface is 65 tools across 8 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    65,
+    67,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    65,
+    67,
     'the frozen manifest lost or gained a row',
   );
 });
@@ -473,17 +475,17 @@ test('the default `core` profile ships 53 tools — everything except `ads` and 
   );
   assert.equal(
     REGISTRY.tools.length - byDefault.tools.length,
-    12,
-    'the `ads` (11) and `page_admin` (1) packages no longer account for the gap between all and default',
+    14,
+    'the `ads` (13) and `page_admin` (1) packages no longer account for the gap between all and default',
   );
 });
 
-test('the surface splits 34 read / 31 write (23 reversible, 7 irreversible, 1 spend)', () => {
+test('the surface splits 35 read / 32 write (23 reversible, 7 irreversible, 2 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
-  assert.equal(read.length, 34, 'the read-only tool count changed (doc 06 quotes 34)');
-  assert.equal(write.length, 31, 'the write tool count changed (doc 06 quotes 31)');
+  assert.equal(read.length, 35, 'the read-only tool count changed (doc 06 quotes 35)');
+  assert.equal(write.length, 32, 'the write tool count changed (doc 06 quotes 32)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 
   const byTier: Record<string, number> = {};
@@ -493,10 +495,11 @@ test('the surface splits 34 read / 31 write (23 reversible, 7 irreversible, 1 sp
   }
   assert.deepEqual(
     byTier,
-    { reversible: 23, irreversible: 7, spend: 1 },
-    'the write-tier distribution changed. The single `spend` is ' +
-      '`facebook_update_ad_object`, which is the only tool in this server that can ' +
-      'cost money — resuming delivery or raising a budget. `safe` stays deliberately ' +
+    { reversible: 23, irreversible: 7, spend: 2 },
+    'the write-tier distribution changed. The two `spend` tools are ' +
+      '`facebook_update_ad_object` (resuming delivery or raising a budget) and ' +
+      '`facebook_update_ad_set_targeting` (who the budget is spent on), the only tools ' +
+      'in this server that decide what money buys. `safe` stays deliberately ' +
       'unused: no write here is cheap enough to skip the gate. A new tier in this map ' +
       'is a safety-review event, not a refactor.',
   );
@@ -521,7 +524,7 @@ test('the surface splits 34 read / 31 write (23 reversible, 7 irreversible, 1 sp
  * stderr has been reviewed for stderr, and a key that has not cannot reach it
  * through a package nobody audited.
  *
- * What is in here and why: `profile`/`ad_account_id`/`object_id`/`post_id`/
+ * What is in here and why: `profile`/`ad_account_id`/`adset_id`/`object_id`/`post_id`/
  * `comment_id`/`conversation_id`/`label_id` are opaque Graph handles the log needs in order
  * to be worth keeping at all; `apply`/`plan_id` are the preview-versus-performed
  * distinction, which is the single most valuable thing in the line; `action`/
@@ -538,6 +541,7 @@ test('the surface splits 34 read / 31 write (23 reversible, 7 irreversible, 1 sp
 const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
   'action',
   'ad_account_id',
+  'adset_id',
   'album_id',
   'allow_repeat',
   'apply',

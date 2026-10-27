@@ -73,6 +73,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Ad-set targeting read and narrow edit (v2 ads §8).**
+  `facebook_get_ad_set_targeting` summarises an ad set's audience in plain
+  terms (countries, ages, genders, placements, flags for detailed targeting,
+  custom audiences, exclusions and Advantage+ audience) and says whether this
+  server can edit it; `include_raw:true` adds the raw spec up to 64 KB.
+  `facebook_update_ad_set_targeting` (tier `spend`, plan-first) changes only
+  the countries and/or the age range, sending every other targeting key back
+  unchanged. It refuses audiences more complex than that, refuses adding EU
+  countries when no DSA payor/beneficiary is known, and diverges if any part
+  of the targeting changed after the preview.
 - **Page moderation settings (v2 moderation F12).**
   `facebook_get_moderation_settings` reads the blocked-word list, the
   profanity filter level and whether people can message the Page.

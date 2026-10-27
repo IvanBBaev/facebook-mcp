@@ -306,6 +306,14 @@
       "description": "Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives…"
     },
     {
+      "name": "facebook_get_ad_set_targeting",
+      "description": "Read one ad set's audience and summarise it in plain terms: countries, counts of regions / cities / locales, age range, genders, placements, and flags for detailed…"
+    },
+    {
+      "name": "facebook_update_ad_set_targeting",
+      "description": "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is."
+    },
+    {
       "name": "facebook_update_page_profile",
       "description": "Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status."
     }
