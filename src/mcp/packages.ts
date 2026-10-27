@@ -15,8 +15,8 @@
 import { PACKAGE_NAMES, type PackageName } from '../core/index.js';
 
 /**
- * The default `FB_TOOL_PACKAGES` expansion (C5): the `core` profile. `ads` is
- * excluded by default and must be enabled explicitly. This ordered constant is
+ * The default `FB_TOOL_PACKAGES` expansion (C5): the `core` profile. `ads` and
+ * `page_admin` are excluded by default and must be enabled explicitly. This ordered constant is
  * the single source of truth for the out-of-box surface and is snapshot-tested
  * in `packages.test.ts` so the surface can never drift silently.
  */
@@ -40,8 +40,8 @@ export const DEFAULT_PROFILE: ReadonlySet<PackageName> = new Set(
  * profile name WINS over a same-spelled package name, which is why `core` here
  * expands to the six-package default rather than the single `core` package.
  *
- *  - `core` — the default profile (six packages; `ads` excluded).
- *  - `all`  — every package including `ads`.
+ *  - `core` — the default profile (six packages; `ads` and `page_admin` excluded).
+ *  - `all`  — every package including `ads` and `page_admin`.
  *  - `reader`/`publisher`/`moderator`/`ads` — single-package persona aliases
  *    (doc 06 package headers). `core` is always forced on by the registry, so a
  *    `reader`-only install is still a read-only posture (all `core` tools read).

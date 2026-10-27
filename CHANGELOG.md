@@ -73,6 +73,23 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`facebook_update_page_profile` in the new opt-in `page_admin` package
+  (v2 organic F8).** Change the Page's public business fields: `about`,
+  `description`, `website`, `phone`, opening `hours`, `is_always_open` and
+  `temporary_status`. Only the fields you pass are touched, and only those that
+  differ from the current profile are sent. Tier `reversible`, but the apply
+  needs the preview's `plan_id`. The preview lists each field before → after,
+  so a second call with the before-values undoes the edit, and it warns before
+  a Page is marked `TEMPORARILY_CLOSED`. A profile changed by someone else
+  after the preview makes the plan diverge. `hours` is the full week, with up
+  to two ranges a day; a range that runs past midnight must close by 06:00.
+  After the write the fields are read back: a value Graph shows differently is
+  reported as `attempted` with the differing fields, and `success:false` is
+  `failed`. Needs `pages_manage_metadata` and the EDIT_PROFILE (or MANAGE)
+  task; a permission refusal says so and points to `facebook_whoami`. The
+  package is off by default; enable it with `FB_TOOL_PACKAGES` (or the `all`
+  profile).
+
 - **Insights file export (v2 insights F5).** `facebook_page_insights`,
   `facebook_post_insights`, `facebook_reel_insights` and
   `facebook_get_posts_insights` take an optional

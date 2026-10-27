@@ -642,7 +642,7 @@ export interface PackageSpec {
 }
 
 /**
- * The seven canonical package names. This is a convenience contract constant;
+ * The eight canonical package names. This is a convenience contract constant;
  * F11 (`mcp/packages.ts`) owns the authoritative PACKAGES manifest and the
  * snapshot-tested DEFAULT PROFILE EXPANSION. The default expansion set is
  * intentionally NOT defined here (single source of truth stays with F11's
@@ -657,6 +657,7 @@ export const PACKAGE_NAMES = [
   'moderation',
   'messages',
   'ads',
+  'page_admin',
 ] as const;
 
 export type PackageName = (typeof PACKAGE_NAMES)[number];

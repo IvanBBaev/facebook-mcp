@@ -126,6 +126,7 @@ import {
   createInsightsPackage,
   createMessagesPackage,
   createModerationPackage,
+  createPageAdminPackage,
   createPostsPackage,
   createReaderPackage,
 } from './tools/index.js';
@@ -1479,6 +1480,7 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     createMessagesPackage(),
     createPostsPackage(),
     createAdsPackage(),
+    createPageAdminPackage(),
   ];
 
   // `doctor` subcommand: emit the diagnostic report to STDERR (never stdout) and

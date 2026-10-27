@@ -88,6 +88,7 @@ export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>
     'pages_read_user_content',
   ],
   ads: ['ads_read', 'ads_management'],
+  page_admin: ['pages_manage_metadata', 'pages_read_engagement'],
 };
 
 /**
@@ -191,6 +192,9 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_archive_ad_object: ['ads_management'],
   facebook_delete_ad_object: ['ads_management'],
   facebook_upload_ad_image: ['ads_management'],
+
+  // page_admin (organic F8): the profile POST, plus its snapshot read.
+  facebook_update_page_profile: ['pages_manage_metadata', 'pages_read_engagement'],
 };
 
 /** A token within this window of expiry (or already past it) is "expiring soon". */

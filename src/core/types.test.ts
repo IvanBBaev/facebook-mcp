@@ -74,10 +74,19 @@ test('GraphApiError supports an error cause and minimal construction', () => {
   assert.equal(err.action, undefined);
 });
 
-test('PACKAGE_NAMES lists the seven canonical packages', () => {
+test('PACKAGE_NAMES lists the eight canonical packages', () => {
   assert.deepEqual(
     [...PACKAGE_NAMES],
-    ['core', 'reader', 'posts', 'insights', 'moderation', 'messages', 'ads'],
+    [
+      'core',
+      'reader',
+      'posts',
+      'insights',
+      'moderation',
+      'messages',
+      'ads',
+      'page_admin',
+    ],
   );
 });
 

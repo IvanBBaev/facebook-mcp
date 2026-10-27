@@ -79,6 +79,7 @@ function allPackages(): PackageSpec[] {
     pkg('moderation', [readTool('mod_list'), writeTool('mod_hide')]),
     pkg('messages', [readTool('msg_list'), writeTool('msg_send')]),
     pkg('ads', [readTool('ads_get'), writeTool('ads_spend')]),
+    pkg('page_admin', [writeTool('admin_update')]),
   ];
 }
 

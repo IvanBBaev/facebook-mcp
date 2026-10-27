@@ -46,7 +46,7 @@ test('the `core` profile expands to exactly the default surface', () => {
   ]);
 });
 
-test('the `all` profile adds ads on top of the default surface', () => {
+test('the `all` profile adds ads and page_admin on top of the default surface', () => {
   assert.deepEqual(sortByCanonical(expandSelection(['all'])), [
     'core',
     'reader',
@@ -55,7 +55,13 @@ test('the `all` profile adds ads on top of the default surface', () => {
     'moderation',
     'messages',
     'ads',
+    'page_admin',
   ]);
+});
+
+test('page_admin is opt-in: not in the default profile', () => {
+  assert.equal(DEFAULT_PROFILE.has('page_admin'), false);
+  assert.deepEqual(expandSelection(['page_admin']), ['page_admin']);
 });
 
 // ---------------------------------------------------------------------------

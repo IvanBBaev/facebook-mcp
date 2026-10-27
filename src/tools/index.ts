@@ -33,3 +33,6 @@ export { createPostsPackage } from './posts.js';
 // V09/V10 — ads package: campaign/ad-set/ad reads, insights (sync + async report
 // runs) and plan-gated status/budget control. Off by default.
 export { createAdsPackage } from './ads.js';
+
+// Organic F8 — page_admin package (opt-in): the Page profile update.
+export { createPageAdminPackage } from './page-admin.js';

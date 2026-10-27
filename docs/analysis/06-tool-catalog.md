@@ -18,7 +18,7 @@ per-package write-mode defaults stated in each section below.
 > **As implemented.** This document was written as a proposal and is kept in sync
 > with the code, but the code is the contract. The quadruple is asserted per
 > package in `src/tools/*.test.ts`, and **`src/mcp/annotations.test.ts` freezes all
-> four booleans for all seven packages in one place** — it expands the full surface
+> four booleans for all eight packages in one place** — it expands the full surface
 > through the real registry (`all` profile) and holds it against an in-file table
 > of 40 rows, so any hint or write-tier change fails until the row is edited
 > deliberately. The same file asserts that the table and the registry list exactly
@@ -26,16 +26,16 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 32 read tools. The published counts (56 tools / 7 packages, 45 in the default
-> profile, 32 read / 24 write) are asserted there too. `src/metadata.test.ts`
+> the 32 read tools. The published counts (57 tools / 8 packages, 45 in the default
+> profile, 32 read / 25 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (45 tools as shipped) — the `ads` package is
-**excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
++ insights + moderation + messages** (45 tools as shipped) — the `ads` and
+`page_admin` packages are **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
 
@@ -187,6 +187,18 @@ env-bypassed) and are gated by `FB_ADS_BUDGET_CEILING`.
 Deferred beyond 1.1: custom audiences (TOS gate + hashing pipeline), the ad
 create-chain and `delete_ad_image` — see 08.
 
+## Package `page_admin` (off by default; v2 organic F8)
+
+Edits the Page itself rather than its content. Opt-in because it needs
+`pages_manage_metadata` and the EDIT_PROFILE (or MANAGE) task, which no content
+package does. Write-mode default: **plan-first**, and the tool requires the
+preview's `plan_id` even though it is reversible — the profile is public, and a
+wrong `temporary_status` misleads every visitor at once.
+
+| Tool | RO | D | I | OW | Notes |
+|---|---|---|---|---|---|
+| `facebook_update_page_profile` | false | false | true | true | v2 organic F8, tier **reversible**. `POST /{page-id}` with only the fields that differ from a fresh read: `about` (≤100), `description` (≤5000), `website` (http/https), `phone`, `hours` (the full week, ≤2 ranges a day, overnight close by 06:00, sent as Graph's `{day}_{n}_open/close` JSON), `is_always_open` (not with `hours`), `temporary_status`. The preview lists each field before → after (the undo values) and the ones already set; a profile changed after the preview diverges. The fields are re-read after the write: a value that reads back differently is `attempted`, `success:false` is `failed`. A request where every field already holds its value is refused |
+
 ## Resources & prompts (secondary)
 
 - **Not implemented.** The proposed resources `facebook://usage` (rate-limit
@@ -213,10 +225,10 @@ create-chain and `delete_ad_image` — see 08.
 
 **Total as shipped: 45 model-facing tools in the default `core` profile** (core 4
 + posts 9 + reader 7 + insights 5 + moderation 13 + messages 7), with the opt-in
-`ads` package adding 11 more — **56 across all 7 packages**, split 32 read
-/ 24 write (17 reversible, 6 irreversible, 1 spend — the single `spend` tool is
+`ads` package adding 11 more and the opt-in `page_admin` package 1 — **57 across
+all 8 packages**, split 32 read / 25 write (18 reversible, 6 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story
-publishing, Events, Live video, album / photo uploads, Page profile updates (reads ship via `facebook_get_page`), organic post targeting, and post boosting are out of
+publishing, Events, Live video, album / photo uploads, organic post targeting, and post boosting are out of
 scope for 1.0 (see 01's out-of-scope list and the README scope enumeration).
