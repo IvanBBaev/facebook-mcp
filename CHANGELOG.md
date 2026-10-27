@@ -73,6 +73,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Paused copies of ad objects (v2 ads §7).**
+  `facebook_duplicate_ad_object` (tier `irreversible`, plan-first) copies a
+  campaign, ad set or ad through `/{id}/copies`, always with
+  `status_option=PAUSED` and a rename suffix (default ` [fbmcp copy]`);
+  `deep_copy:true` copies the children too, up to 3 ads. Because the copy
+  carries the source budgets, it is refused for an uncapped campaign, a cap
+  above `FB_ADS_CAMPAIGN_SPEND_CAP_MAX` (or when that maximum is unset), a
+  copied budget above `FB_ADS_BUDGET_CEILING`, special ad categories and
+  Advantage+ shopping/app campaigns. The preview shows the worst-case spend
+  if the copy were activated. Every copied id is read back after the copy and
+  re-paused if it is not PAUSED, with a warning in the answer.
 - **Ad-set targeting read and narrow edit (v2 ads §8).**
   `facebook_get_ad_set_targeting` summarises an ad set's audience in plain
   terms (countries, ages, genders, placements, flags for detailed targeting,

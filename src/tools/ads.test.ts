@@ -221,6 +221,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
     facebook_upload_ad_image: [false, false, true, true],
     facebook_get_ad_set_targeting: [true, false, true, true],
     facebook_update_ad_set_targeting: [false, true, true, true],
+    facebook_duplicate_ad_object: [false, false, false, true],
   };
 
   assert.equal(PACKAGE.tools.length, Object.keys(expected).length);
@@ -247,7 +248,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
   }
 });
 
-test('only the update, lifecycle, image upload and targeting tools can write, and none claims to be read-only', () => {
+test('only the update, lifecycle, image upload, targeting and duplicate tools can write, and none claims to be read-only', () => {
   const writers = PACKAGE.tools.filter((t) => t.writeTier !== undefined);
   assert.deepEqual(
     writers.map((t) => t.name),
@@ -257,6 +258,7 @@ test('only the update, lifecycle, image upload and targeting tools can write, an
       'facebook_delete_ad_object',
       'facebook_upload_ad_image',
       'facebook_update_ad_set_targeting',
+      'facebook_duplicate_ad_object',
     ],
   );
 });
@@ -273,6 +275,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'object_id',
   'adset_id',
   'level',
+  'deep_copy',
   'status',
   'apply',
   'plan_id',
@@ -304,6 +307,7 @@ test('every log allowlist in the package names real, non-secret arguments', () =
     facebook_delete_ad_object: ['object_id', 'level', 'apply', 'plan_id'],
     facebook_upload_ad_image: ['ad_account_id', 'apply', 'plan_id'],
     facebook_update_ad_set_targeting: ['adset_id', 'apply', 'plan_id'],
+    facebook_duplicate_ad_object: ['object_id', 'level', 'deep_copy', 'apply', 'plan_id'],
   };
 
   for (const spec of PACKAGE.tools) {
@@ -2621,4 +2625,156 @@ test('a targeting edit with nothing to change is refused', async () => {
     update.inputSchema.parse({ adset_id: ADSET_ID, countries: ['USA'] }),
   );
   assert.throws(() => update.inputSchema.parse({ adset_id: 'act_1', age_min: 30 }));
+});
+
+// ---------------------------------------------------------------------------
+// Paused copies (v2 ads §7)
+// ---------------------------------------------------------------------------
+
+const COPY_SETTINGS: Partial<Settings> = {
+  adsBudgetCeiling: 10_000,
+  adsCampaignSpendCapMax: 500_000,
+};
+
+/** A capped campaign the copy tool may duplicate. */
+function cappedCampaign(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return campaignNode({
+    spend_cap: '100000',
+    special_ad_categories: [],
+    account_id: BARE_ACCOUNT_ID,
+    ...overrides,
+  });
+}
+
+test('a duplicate is an irreversible preview that copies nothing', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubWriteReads(fb, { object: cappedCampaign() });
+  const dup = tool('facebook_duplicate_ad_object');
+
+  const result = body(
+    await dup.handler(
+      dup.inputSchema.parse({ object_id: CAMPAIGN_ID, level: 'campaign' }),
+      ctx,
+    ),
+  );
+
+  assert.equal(result.status, 'preview');
+  assert.equal(result.tier, 'irreversible');
+  assert.match(str(result.summary), /PAUSED copy/);
+  assert.ok(arr(result.warnings).some((w) => str(w).startsWith('If activated: ')));
+  assert.equal(writes(fb).length, 0, 'a dry run may not copy');
+  assert.equal(journal.entries.length, 0);
+});
+
+test('an applied duplicate sends status_option=PAUSED and verifies the copy', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubWriteReads(fb, { object: cappedCampaign() });
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${CAMPAIGN_ID}/copies`,
+    fbOk({ copied_campaign_id: '900' }),
+  );
+  fb.on((r) => r.method === 'GET' && r.path === '/900', fbOk({ status: 'PAUSED' }));
+  const dup = tool('facebook_duplicate_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign' };
+
+  const preview = body(await dup.handler(dup.inputSchema.parse(args), ctx));
+  const applied = body(
+    await dup.handler(
+      dup.inputSchema.parse({ ...args, apply: true, plan_id: str(preview.planId) }),
+      ctx,
+    ),
+  );
+
+  assert.equal(applied.status, 'applied');
+  const result = obj(applied.result);
+  assert.equal(result.copiedId, '900');
+  assert.equal(result.status, 'PAUSED');
+  assert.equal(result.alert, undefined);
+  const sent = writes(fb);
+  assert.equal(sent.length, 1);
+  const post = sent[0];
+  assert.ok(post && isJson(post));
+  assert.equal(obj(post.body).status_option, 'PAUSED');
+  assert.equal(obj(post.body).deep_copy, false);
+  const entry = journal.entries.at(-1);
+  assert.equal(entry?.outcome, 'applied');
+  assert.equal(entry?.metadata?.copiedCount, 1);
+});
+
+test('a copy that comes back active is re-paused and journaled separately', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubWriteReads(fb, { object: cappedCampaign() });
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${CAMPAIGN_ID}/copies`,
+    fbOk({ copied_campaign_id: '900' }),
+  );
+  fb.on((r) => r.method === 'GET' && r.path === '/900', fbOk({ status: 'ACTIVE' }));
+  fb.on((r) => r.method === 'POST' && r.path === '/900', fbOk({ success: true }));
+  const dup = tool('facebook_duplicate_ad_object');
+  const args = { object_id: CAMPAIGN_ID, level: 'campaign' };
+
+  const preview = body(await dup.handler(dup.inputSchema.parse(args), ctx));
+  const applied = body(
+    await dup.handler(
+      dup.inputSchema.parse({ ...args, apply: true, plan_id: str(preview.planId) }),
+      ctx,
+    ),
+  );
+
+  assert.match(str(obj(applied.result).alert), /^WARNING: status_option=PAUSED was sent/);
+  const repause = journal.entries.find((e) => /Re-paused/.test(e.summary));
+  assert.equal(repause?.outcome, 'applied');
+  assert.equal(journal.entries.at(-1)?.outcome, 'applied');
+});
+
+test('a duplicate of an uncapped campaign, or with no cap maximum set, is refused', async () => {
+  const uncapped = makeHarness(COPY_SETTINGS);
+  stubWriteReads(uncapped.fb, { object: cappedCampaign({ spend_cap: undefined }) });
+  const dup = tool('facebook_duplicate_ad_object');
+  const args: unknown = dup.inputSchema.parse({
+    object_id: CAMPAIGN_ID,
+    level: 'campaign',
+  });
+  await assert.rejects(() => dup.handler(args, uncapped.ctx), /has no spend cap/);
+  assert.equal(writes(uncapped.fb).length, 0);
+
+  const noMax = makeHarness({ adsBudgetCeiling: 10_000 });
+  stubWriteReads(noMax.fb, { object: cappedCampaign() });
+  await assert.rejects(
+    () => dup.handler(args, noMax.ctx),
+    /needs FB_ADS_CAMPAIGN_SPEND_CAP_MAX/,
+  );
+});
+
+test('a duplicate of a campaign in another explicitly named account is refused', async () => {
+  const { fb, ctx } = makeHarness(COPY_SETTINGS);
+  stubWriteReads(fb, { object: cappedCampaign({ account_id: '9876543210' }) });
+  const dup = tool('facebook_duplicate_ad_object');
+  await assert.rejects(
+    () =>
+      dup.handler(
+        dup.inputSchema.parse({
+          object_id: CAMPAIGN_ID,
+          level: 'campaign',
+          ad_account_id: ACCOUNT_ID,
+        }),
+        ctx,
+      ),
+    new RegExp(`belongs to ad account ${OTHER_ACCOUNT_ID}`),
+  );
+  assert.equal(writes(fb).length, 0);
+});
+
+test('a duplicate requires level and bounds the rename suffix', () => {
+  const dup = tool('facebook_duplicate_ad_object');
+  assert.throws(() => dup.inputSchema.parse({ object_id: CAMPAIGN_ID }));
+  assert.throws(() =>
+    dup.inputSchema.parse({
+      object_id: CAMPAIGN_ID,
+      level: 'campaign',
+      rename_suffix: 'x'.repeat(51),
+    }),
+  );
 });

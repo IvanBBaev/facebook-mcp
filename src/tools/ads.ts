@@ -1,9 +1,9 @@
 // The `ads` tool package (tasks V09 read / V10 control) — Marketing API access,
 // deliberately rescoped for 1.1 to READ plus status/budget CONTROL (doc 06,
 // A12), with single-object archive/delete added in 2.0 (v2 ads §3). The ad
-// create-chain is out of scope, so nothing here can bring a new spending object
-// into existence: every write targets an object the operator already created in
-// Ads Manager.
+// create-chain is out of scope: the only new objects come from copying one the
+// operator already created in Ads Manager, always PAUSED and only when the
+// campaign is capped within the configured maximums (v2 ads §7).
 //
 //   * facebook_list_campaigns / _adsets / _ads — one cursor page of objects under
 //     an ad account, at the level the tool name names.
@@ -19,6 +19,9 @@
 //     object (and, by inheritance, its children), plan-gated and irreversible.
 //   * facebook_upload_ad_image    — add a local image to the account's image
 //     library and return its hash; creates no ad.
+//   * facebook_get_ad_set_targeting / facebook_update_ad_set_targeting — read
+//     an ad set's audience; edit only its countries and age range.
+//   * facebook_duplicate_ad_object — copy one object into a PAUSED copy.
 //
 // Division of labour with `../api/ads-read.js` and `../api/ads-control.js`
 // follows the layer rule (core ← api ← mcp ← tools). The api modules own the
@@ -124,6 +127,13 @@ import {
 } from '../api/ads-targeting.js';
 import type { TargetingEditOutcome } from '../api/ads-targeting.js';
 import {
+  MAX_RENAME_SUFFIX_LENGTH,
+  applyCopy,
+  planCopy,
+  readCopyTree,
+} from '../api/ads-copy.js';
+import type { CopyOutcome, CopyTree } from '../api/ads-copy.js';
+import {
   MediaSourceError,
   digestLocalMedia,
   resolveLocalMediaPath,
@@ -181,6 +191,18 @@ const UPLOAD_ANNOTATIONS: ToolAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: true,
+  openWorldHint: true,
+};
+
+/**
+ * `facebook_duplicate_ad_object` (v2 ads §7). Every call creates new objects
+ * and overwrites nothing, so it is neither destructive nor idempotent: a repeat
+ * makes another copy.
+ */
+const COPY_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
   openWorldHint: true,
 };
 
@@ -1060,12 +1082,177 @@ const updateAdSetTargetingTool = defineTool({
   },
 });
 
+/** A copy landed only when the answer named the copied object. */
+function copyVerdict(outcome: CopyOutcome): WriteResultVerdict {
+  return outcome.copiedId !== undefined ? APPLIED_VERDICT : ATTEMPTED_VERDICT;
+}
+
+/** The subset of the copy tree the gate compares for divergence. */
+function copyState(tree: CopyTree): Record<string, unknown> {
+  return {
+    status: tree.source.status ?? null,
+    source_budgets: {
+      daily: tree.source.daily_budget_minor ?? null,
+      lifetime: tree.source.lifetime_budget_minor ?? null,
+    },
+    campaign_budgets: {
+      daily: tree.campaign.daily_budget_minor ?? null,
+      lifetime: tree.campaign.lifetime_budget_minor ?? null,
+    },
+    spend_cap_minor: tree.campaign.spend_cap_minor ?? null,
+    child_ads: tree.childAds ?? null,
+    child_adsets: tree.childAdSets ?? null,
+  };
+}
+
+/**
+ * `facebook_duplicate_ad_object` (v2 ads §7). Copies one campaign, ad set or ad
+ * into a PAUSED copy. The copy carries the source's budgets, so it is refused
+ * when the campaign in the tree is uncapped or over the configured maximums.
+ */
+const duplicateAdObjectTool = defineTool({
+  name: 'facebook_duplicate_ad_object',
+  title: 'Duplicate Ad Object',
+  description:
+    'Copy one campaign, ad set or ad into a new PAUSED copy (an ad set copy stays in its campaign, ' +
+    'an ad copy in its ad set). The copy is ALWAYS created paused; activating it is a separate ' +
+    'facebook_update_ad_object call. deep_copy:true also copies the children (at most 3 ads). ' +
+    'Refused when the campaign has no spend cap or one above FB_ADS_CAMPAIGN_SPEND_CAP_MAX, when a ' +
+    'copied budget is above FB_ADS_BUDGET_CEILING, and for special-ad-category or Advantage+ ' +
+    'shopping/app campaigns. Plan-first: without apply:true this returns a preview (budgets, spend ' +
+    'cap, worst-case spend if activated, children) and creates NOTHING; applying requires apply:true ' +
+    'plus the plan_id. Never retry an apply whose outcome is unknown — every call makes another copy.',
+  inputSchema: z.object({
+    object_id: objectIdArg,
+    level: z
+      .enum(AD_LEVELS)
+      .describe(
+        'Which kind of object this id is: "campaign", "adset" or "ad". Required: it decides which campaign is checked and what the answer names.',
+      ),
+    deep_copy: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Campaign / ad set only: also copy its ad sets and ads (at most 3 ads). Default false.',
+      ),
+    rename_suffix: z
+      .string()
+      .max(MAX_RENAME_SUFFIX_LENGTH)
+      .optional()
+      .describe(
+        'Appended to every copied name. Default " [fbmcp copy]". It is how a copy is found again.',
+      ),
+    ad_account_id: adAccountIdArg,
+    apply: applyArg,
+    plan_id: planIdArg,
+    confirm_token: confirmTokenArg,
+  }),
+  annotations: COPY_ANNOTATIONS,
+  writeTier: 'irreversible',
+  logFields: ['object_id', 'level', 'deep_copy', 'apply', 'plan_id'],
+  handler: async (input, ctx) => {
+    // A copy is created PAUSED and spends nothing until someone activates it,
+    // but it still mints new objects: an account in payment trouble is not
+    // let through (CC-ADS-6).
+    const intent: AdWriteIntent = { stopsDelivery: false };
+    const configured = await accountForWrite(ctx, input.ad_account_id, intent);
+    const readTree = () =>
+      readCopyTree(ctx.fbRequest, {
+        objectId: input.object_id,
+        level: input.level,
+        deepCopy: input.deep_copy,
+        ...signalOf(ctx),
+      });
+    const tree = await readTree();
+    assertObjectInAccount(input.object_id, tree.source, configured);
+    const account = configured ?? (await ownerAccountForWrite(ctx, tree.source, intent));
+
+    // Pure: every refusal happens before anything is created.
+    const plan = planCopy({
+      objectId: input.object_id,
+      level: input.level,
+      deepCopy: input.deep_copy,
+      ...(input.rename_suffix !== undefined ? { renameSuffix: input.rename_suffix } : {}),
+      tree,
+      ...(account?.currency !== undefined ? { currency: account.currency } : {}),
+      ...(ctx.settings.adsBudgetCeiling !== undefined
+        ? { budgetCeilingMinor: ctx.settings.adsBudgetCeiling }
+        : {}),
+      ...(ctx.settings.adsCampaignSpendCapMax !== undefined
+        ? { spendCapMaxMinor: ctx.settings.adsCampaignSpendCapMax }
+        : {}),
+      now: ctx.clock.now(),
+    });
+
+    let pending: CopyTree | undefined = tree;
+    const readState = async (): Promise<unknown> => {
+      if (pending !== undefined) {
+        const snapshot = pending;
+        pending = undefined;
+        return copyState(snapshot);
+      }
+      return copyState(await readTree());
+    };
+
+    let cancelledBeforeSend = false;
+
+    return executeWrite(ctx, {
+      tool: 'facebook_duplicate_ad_object',
+      tier: 'irreversible',
+      params: {
+        ...(account !== undefined ? { ad_account_id: account.id } : {}),
+        object_id: input.object_id,
+        level: input.level,
+        deep_copy: input.deep_copy,
+        rename_suffix: plan.renameSuffix,
+      },
+      ...gateArgs(input),
+      summary: plan.summary,
+      warnings: [...plan.warnings, ADS_RATE_LIMIT_NOTE],
+      notPerformedNotice: 'This was a dry run — nothing was copied.',
+      readState,
+      perform: async () => {
+        cancelledBeforeSend = ctx.signal?.aborted === true;
+        const outcome = await applyCopy(ctx.fbRequest, plan, ctx.signal);
+        const { repaused } = outcome.verification;
+        if (repaused.length > 0) {
+          // Its own journal entry: a status write the operator did not ask for.
+          await ctx.journal.append({
+            tool: 'facebook_duplicate_ad_object',
+            tier: 'irreversible',
+            outcome: repaused.every((entry) => entry.repaused) ? 'applied' : 'failed',
+            summary: `Re-paused copies of ${input.object_id} that came back not PAUSED after the copy.`,
+            metadata: {
+              sourceId: input.object_id,
+              repaused: repaused.map((entry) => ({
+                id: entry.id,
+                found: entry.found,
+                repaused: entry.repaused,
+              })),
+            },
+          });
+        }
+        return outcome;
+      },
+      classifyResult: copyVerdict,
+      classifyOutcome: (err) =>
+        cancelledBeforeSend ? 'failed' : classifyUpdateFailure(err),
+      metadata: {
+        sourceId: input.object_id,
+        level: input.level,
+        deepCopy: input.deep_copy,
+        copiedCount: plan.copiedCount,
+      },
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // 5. Package factory
 // ---------------------------------------------------------------------------
 
 /**
- * Build the `ads` package: eight read tools and five write tools. OFF by default
+ * Build the `ads` package: eight read tools and six write tools. OFF by default
  * (doc 06 — `ads` is excluded from the `core` profile and reached through the
  * `ads`/`all` profiles or an explicit `FB_TOOL_PACKAGES`), because a server that
  * can move money should be opted into rather than out of.
@@ -1537,7 +1724,8 @@ export function createAdsPackage(): PackageSpec {
       'Marketing API access: campaign / ad-set / ad listings with delivery truth, ' +
       'single-object reads, placement previews, insights with async report runs, plan-gated ' +
       'status, budget and campaign spend-cap control, single-object archive/delete, ad image ' +
-      'uploads, and ad-set targeting reads with a narrow countries/ages edit. Off by default.',
+      'uploads, ad-set targeting reads with a narrow countries/ages edit, and paused copies of ' +
+      'campaigns, ad sets and ads. Off by default.',
     tools: [
       listCampaigns,
       listAdsets,
@@ -1552,6 +1740,7 @@ export function createAdsPackage(): PackageSpec {
       uploadAdImageTool,
       getAdSetTargetingTool,
       updateAdSetTargetingTool,
+      duplicateAdObjectTool,
     ],
     enabledByDefault: false,
     // `writeModeDefault: 'plan'` is only the default for a server that did not

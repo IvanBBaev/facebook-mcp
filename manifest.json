@@ -314,6 +314,10 @@
       "description": "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is."
     },
     {
+      "name": "facebook_duplicate_ad_object",
+      "description": "Copy one campaign, ad set or ad into a new PAUSED copy (an ad set copy stays in its campaign, an ad copy in its ad set)."
+    },
+    {
       "name": "facebook_update_page_profile",
       "description": "Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status."
     }
