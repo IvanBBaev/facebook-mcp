@@ -121,6 +121,17 @@ export const DRAFT_TRANSITION_NOTE =
 export const EDIT_OWN_APP_NOTE =
   'Facebook only lets an app edit posts that the SAME app created. Editing a post published by another app, or by a human in the Page UI, fails no matter what permissions the token carries (CC-PUB-4).';
 
+/**
+ * Docs drift (organic F7): the Post reference no longer documents `POST
+ * /{post-id}` updates or `is_pinned`, so pin/unpin rides the long-standing
+ * undocumented behaviour.
+ */
+export const PIN_UNDOCUMENTED_NOTE =
+  'Pinning and unpinning use an update Graph no longer documents. It works on posts this app created; if Graph rejects it, its error is passed through as-is.';
+
+/** How many feed rows the single-pin probe reads (organic F7). */
+export const PINNED_PROBE_LIMIT = 25;
+
 export const DELETE_PERMANENT_NOTE =
   'Deleting a Page post is permanent: there is no undo and no trash to restore it from.';
 
@@ -1224,6 +1235,7 @@ export function planUpdatePost(
       ...(input.isPinned !== undefined ? { is_pinned: input.isPinned } : {}),
     };
     if (input.message !== undefined) warnings.push(UNICODE_PASSTHROUGH_NOTE);
+    if (input.isPinned !== undefined) warnings.push(PIN_UNDOCUMENTED_NOTE);
     return {
       params,
       summary: `Edit post ${input.postId} (${Object.keys(params).join(', ')}).`,
@@ -1398,6 +1410,58 @@ export function postStateRequest(postId: string, scope: RequestScope = {}): Json
     params: { fields: POST_STATE_FIELDS },
     ...scopeOf(scope),
   };
+}
+
+/** `GET /{page-id}/feed?fields=id,is_pinned` — which post is pinned now (organic F7). */
+export function pinnedPostProbeRequest(
+  pageId: string,
+  scope: RequestScope = {},
+): JsonRequest {
+  return {
+    protocol: 'json',
+    method: 'GET',
+    host: 'graph',
+    path: `/${pageId}/${FEED_EDGE}`,
+    params: { fields: 'id,is_pinned', limit: PINNED_PROBE_LIMIT },
+    ...scopeOf(scope),
+  };
+}
+
+/**
+ * The id of the post pinned on the Page right now, or `undefined` when none of
+ * the newest {@link PINNED_PROBE_LIMIT} feed posts reports `is_pinned:true`.
+ * Best-effort: the probe only feeds a warning, so a failed read (or a Graph
+ * that no longer exposes `is_pinned` on the feed) also yields `undefined`
+ * rather than blocking the edit.
+ */
+export async function readPinnedPostId(
+  fbRequest: FbRequestFn,
+  pageId: string,
+  scope: RequestScope = {},
+): Promise<string | undefined> {
+  try {
+    const res = await fbRequest<unknown>(pinnedPostProbeRequest(pageId, scope));
+    const node = res.data;
+    const rows =
+      typeof node === 'object' && node !== null
+        ? (node as Record<string, unknown>)['data']
+        : undefined;
+    if (!Array.isArray(rows)) return undefined;
+    for (const row of rows) {
+      if (typeof row !== 'object' || row === null) continue;
+      const rec = row as Record<string, unknown>;
+      if (
+        rec['is_pinned'] === true &&
+        typeof rec['id'] === 'string' &&
+        rec['id'] !== ''
+      ) {
+        return rec['id'];
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** `GET /{page-id}?fields=timezone` — display-only Page metadata (CC-SCHED-2). */

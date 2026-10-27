@@ -2377,6 +2377,117 @@ test('update_post detects divergence when the post changed after the preview', a
   );
 });
 
+/** Stub the F7 single-pin probe (`GET /{page-id}/feed?fields=id,is_pinned`). */
+function stubFeedPins(
+  fb: FakeFbRequest,
+  rows: readonly Record<string, unknown>[],
+  times?: number,
+): void {
+  fb.on(
+    (req) => req.method === 'GET' && req.path === `/${PAGE_ID}/feed`,
+    fbOk({ data: rows }),
+    times,
+  );
+}
+
+test('update_post pinning names the post it replaces and journals it', async () => {
+  const { fb, ctx, journal } = makeCtx();
+  stubPostState(fb, { id: POST_ID, message: 'hi', is_published: true });
+  stubFeedPins(fb, [
+    { id: POST_ID, is_pinned: false },
+    { id: '100_444', is_pinned: true },
+  ]);
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${POST_ID}`,
+    fbOk({ success: true }),
+  );
+  const args = { post_id: POST_ID, action: 'edit', is_pinned: true };
+
+  const preview = body(await tool('facebook_update_post').handler(args, ctx));
+  const warnings = strings(preview['warnings']);
+  assert.ok(
+    warnings.some((w) => w.includes('replaces the currently pinned post 100_444')),
+  );
+  assert.ok(warnings.some((w) => /no longer documents/.test(w)));
+  const probe = findJson(fb, (req) => req.path === `/${PAGE_ID}/feed`);
+  assert.equal(probe.params?.['fields'], 'id,is_pinned');
+  assert.equal(probe.params?.['limit'], 25);
+
+  const applied = body(
+    await tool('facebook_update_post').handler(
+      { ...args, apply: true, plan_id: 'plan-1' },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'applied');
+  assert.deepEqual(jsonBody(findJson(fb, (req) => req.method === 'POST')), {
+    is_pinned: true,
+  });
+  assert.equal(journal.entries.at(-1)?.metadata?.['previouslyPinnedPostId'], '100_444');
+});
+
+test('update_post pinning warns about nothing when no other post is pinned', async () => {
+  const { fb, ctx } = makeCtx();
+  stubPostState(fb, { id: POST_ID, is_published: true });
+  stubFeedPins(fb, [
+    { id: POST_ID, is_pinned: true },
+    { id: '100_444', is_pinned: false },
+  ]);
+  const preview = body(
+    await tool('facebook_update_post').handler(
+      { post_id: POST_ID, action: 'edit', is_pinned: true },
+      ctx,
+    ),
+  );
+  assert.ok(
+    !strings(preview['warnings']).some((w) => w.includes('replaces the currently')),
+  );
+});
+
+test('update_post pinning survives a failed pin probe', async () => {
+  const { fb, ctx } = makeCtx();
+  stubPostState(fb, { id: POST_ID, is_published: true });
+  fb.on(
+    (req) => req.method === 'GET' && req.path === `/${PAGE_ID}/feed`,
+    fbErr(new GraphApiError('nope', { code: 100, httpStatus: 400 })),
+  );
+  const preview = body(
+    await tool('facebook_update_post').handler(
+      { post_id: POST_ID, action: 'edit', is_pinned: true },
+      ctx,
+    ),
+  );
+  assert.equal(preview['status'], 'preview');
+});
+
+test('update_post diverges when another post was pinned after the preview', async () => {
+  const { fb, ctx } = makeCtx();
+  stubPostState(fb, { id: POST_ID, is_published: true });
+  stubFeedPins(fb, [{ id: '100_444', is_pinned: true }], 1);
+  stubFeedPins(fb, [{ id: '100_333', is_pinned: true }]);
+  const args = { post_id: POST_ID, action: 'edit', is_pinned: true };
+
+  await tool('facebook_update_post').handler(args, ctx);
+  const applied = body(
+    await tool('facebook_update_post').handler(
+      { ...args, apply: true, plan_id: 'plan-1' },
+      ctx,
+    ),
+  );
+  assert.equal(applied['status'], 'diverged');
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+});
+
+test('update_post unpinning does not probe the feed', async () => {
+  const { fb, ctx } = makeCtx();
+  stubPostState(fb, { id: POST_ID, is_published: true });
+  await tool('facebook_update_post').handler(
+    { post_id: POST_ID, action: 'edit', is_pinned: false },
+    ctx,
+  );
+  assert.equal(fb.calls.filter((req) => req.path === `/${PAGE_ID}/feed`).length, 0);
+});
+
 test('update_post publish_now flips is_published and warns about the race', async () => {
   const { fb, ctx } = makeCtx();
   stubPostState(fb, {

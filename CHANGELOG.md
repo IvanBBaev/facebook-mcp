@@ -73,6 +73,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Pin replacement warning on `facebook_update_post` (v2 organic F7).**
+  `is_pinned:true` now first reads the Page's most recent feed
+  (`id,is_pinned`, limit 25). When another post is pinned, the preview warns
+  that pinning replaces it and names its id, so pinning that id again undoes
+  the change. The id is recorded as `previouslyPinnedPostId` in the journal
+  metadata. A pin that changes between the preview and the apply makes the
+  plan diverge. The probe is best-effort: if the feed read fails, you still get
+  a preview, just without the warning. Every pin or unpin preview also notes
+  that Graph no longer documents the `is_pinned` update.
+
 - **`album_id` on `facebook_create_photo_post` (v2 organic F4).** Publish the
   photo into one of the Page's albums instead of Timeline Photos. The upload
   goes to `POST /{album-id}/photos`; the deprecated `aid` param is never used.

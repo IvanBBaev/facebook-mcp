@@ -109,6 +109,7 @@ import {
   planUpdatePost,
   planVideoPost,
   readPageTimezone,
+  readPinnedPostId,
   readPostState,
   resolvePageTimezone,
   scheduledPostsEdge,
@@ -2044,7 +2045,8 @@ function buildUpdatePost() {
       'publishes a draft or scheduled post immediately; "reschedule" moves the publish ' +
       'time; "cancel_schedule" is not a Graph transition and is answered with the ' +
       'delete path to use instead. Dry run by default; an edit OVERWRITES the previous ' +
-      'text, which Graph does not keep.',
+      'text, which Graph does not keep. Pinning is undocumented Graph behaviour and ' +
+      'replaces the currently pinned post; the dry run names that post.',
     inputSchema: z.object({
       ...writeArgs,
       post_id: postIdArg,
@@ -2147,6 +2149,25 @@ function buildUpdatePost() {
           },
         );
 
+        // F7: a Page holds one pinned post, so pinning replaces the current one.
+        // Its id joins the before-state (a different pin at apply time diverges)
+        // and the journal metadata (what to re-pin to undo).
+        const probesPin = action === 'edit' && input.is_pinned === true;
+        const readPinned = () => readPinnedPostId(ctx.fbRequest, base.page.pageId, scope);
+        const pinnedNow = probesPin ? await readPinned() : undefined;
+        const replacedPin =
+          pinnedNow !== undefined && pinnedNow !== input.post_id ? pinnedNow : undefined;
+        const readPostOnly = memoizedPostState(ctx, input.post_id, scope, before);
+        let pinnedCached = probesPin;
+        const readState = probesPin
+          ? async () => {
+              const post = await readPostOnly();
+              const pinned = pinnedCached ? pinnedNow : await readPinned();
+              pinnedCached = false;
+              return { ...post, pinnedPostId: pinned ?? null };
+            }
+          : readPostOnly;
+
         const echo = plan.schedule !== undefined ? toTimeEcho(plan.schedule) : undefined;
         return executeWrite(ctx, {
           tool: 'facebook_update_post',
@@ -2162,11 +2183,21 @@ function buildUpdatePost() {
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
           summary: plan.summary,
-          warnings: planWarnings(plan, echo),
+          warnings: [
+            ...planWarnings(plan, echo),
+            ...(replacedPin !== undefined
+              ? [
+                  `Pinning replaces the currently pinned post ${replacedPin}; pin it again to undo.`,
+                ]
+              : []),
+          ],
           resolvedPage: base.page,
           notPerformedNotice: 'This was a dry run — the post was NOT changed.',
-          metadata: { action },
-          readState: memoizedPostState(ctx, input.post_id, scope, before),
+          metadata: {
+            action,
+            ...(replacedPin !== undefined ? { previouslyPinnedPostId: replacedPin } : {}),
+          },
+          readState,
           classifyOutcome: classifyMutationFailure,
           classifyResult: updatePostVerdict,
           perform: async (): Promise<UpdatePostOutcome> => {
