@@ -985,6 +985,56 @@ test('create_post rejects an unrecognised page_timezone rather than degrading si
 // facebook_create_post — the multi-photo carousel
 // ---------------------------------------------------------------------------
 
+test('create_post accepts photos as strings and {source, alt_text} objects', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/photos`,
+    fbOk({ id: 'ph-1' }),
+    1,
+  );
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/photos`,
+    fbOk({ id: 'ph-2' }),
+    1,
+  );
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/feed`,
+    fbOk({ id: '100_900' }),
+  );
+
+  const photos = [
+    'https://cdn.example/a.jpg',
+    { source: 'https://cdn.example/b.jpg', alt_text: 'A lemon tart' },
+  ];
+  const preview = body(
+    await tool('facebook_create_post').handler({ message: 'Gallery', photos }, ctx),
+  );
+  assert.match(String(preview['summary']), /Alt text: 1 of 2 photos\./);
+
+  await tool('facebook_create_post').handler(
+    { message: 'Gallery', photos, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+  const uploads = jsonCalls(fb).filter((req) => req.path === `/${PAGE_ID}/photos`);
+  assert.equal(uploads.length, 2);
+  assert.equal(jsonBody(uploads[0]!)['url'], 'https://cdn.example/a.jpg');
+  assert.equal(jsonBody(uploads[0]!)['alt_text_custom'], undefined);
+  assert.equal(jsonBody(uploads[1]!)['url'], 'https://cdn.example/b.jpg');
+  assert.equal(jsonBody(uploads[1]!)['alt_text_custom'], 'A lemon tart');
+});
+
+test('create_post refuses alt_text longer than 1000 characters', () => {
+  const schema = tool('facebook_create_post').inputSchema;
+  const ok = schema.safeParse({
+    photos: [{ source: 'https://cdn.example/a.jpg', alt_text: 'x'.repeat(1000) }],
+  });
+  assert.equal(ok.success, true);
+  const tooLong = schema.safeParse({
+    photos: [{ source: 'https://cdn.example/a.jpg', alt_text: 'x'.repeat(1001) }],
+  });
+  assert.equal(tooLong.success, false);
+});
+
 test('create_post uploads carousel children unpublished and attaches them to one post', async () => {
   const { fb, ctx, progress } = makeCtx();
   fb.on(
@@ -1307,6 +1357,49 @@ test('create_photo_post posts one remote photo and reports both ids', async () =
   const upload = findJson(fb, (req) => req.path === `/${PAGE_ID}/photos`);
   assert.equal(jsonBody(upload)['caption'], 'Look');
   assert.equal(jsonBody(upload)['published'], true);
+});
+
+test('create_photo_post sends alt_text as alt_text_custom and marks it in the summary', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/photos`,
+    fbOk({ id: 'ph-9', post_id: '100_909' }),
+  );
+  const altText = 'Plate of grilled sea bass with lemon';
+  const input = { photo: 'https://cdn.example/a.jpg', alt_text: altText };
+
+  const preview = body(await tool('facebook_create_photo_post').handler(input, ctx));
+  assert.match(String(preview['summary']), /Alt text: yes \(36 chars\)\./);
+  assert.equal(
+    strings(preview['warnings']).some((w) => /alt/i.test(w)),
+    false,
+    'alt text never warns',
+  );
+
+  await tool('facebook_create_photo_post').handler(
+    { ...input, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+  const upload = findJson(fb, (req) => req.path === `/${PAGE_ID}/photos`);
+  assert.equal(jsonBody(upload)['alt_text_custom'], altText);
+});
+
+test('create_photo_post without alt_text sends none and does not mention it', async () => {
+  const { fb, ctx } = makeCtx();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/photos`,
+    fbOk({ id: 'ph-9', post_id: '100_909' }),
+  );
+  const input = { photo: 'https://cdn.example/a.jpg' };
+  const preview = body(await tool('facebook_create_photo_post').handler(input, ctx));
+  assert.doesNotMatch(String(preview['summary']), /alt text/i);
+
+  await tool('facebook_create_photo_post').handler(
+    { ...input, apply: true, plan_id: 'plan-1' },
+    ctx,
+  );
+  const upload = findJson(fb, (req) => req.path === `/${PAGE_ID}/photos`);
+  assert.equal(jsonBody(upload)['alt_text_custom'], undefined);
 });
 
 test('create_photo_post keeps a scheduled photo unpublished and passes the epoch through', async () => {

@@ -120,6 +120,8 @@ export const FALLBACK_CONTENT_TYPE = 'application/octet-stream';
  *   * `access_token` / `appsecret_proof` are credentials owned by the HTTP
  *     client and the per-Page resolver (C1/C3); a caller-supplied one would act
  *     as somebody else.
+ *   * `alt_text_custom` is set from `altText`; a second copy in `extraParams`
+ *     would make the wire value depend on spread order.
  */
 export const RESERVED_PHOTO_PARAMS: readonly string[] = [
   'url',
@@ -128,6 +130,7 @@ export const RESERVED_PHOTO_PARAMS: readonly string[] = [
   'attached_media',
   'access_token',
   'appsecret_proof',
+  'alt_text_custom',
 ];
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1089,8 @@ export interface PhotoUploadRequest {
   readonly targetEdge?: PhotoTargetEdge;
   /** Photo caption. For a multi-photo post the CAPTION belongs on the feed post. */
   readonly caption?: string;
+  /** Screen-reader description of the image; sent as `alt_text_custom`. */
+  readonly altText?: string;
   /**
    * `true` (default) publishes the photo as a Page post immediately. `false`
    * creates an unpublished child to reference from `attached_media` on a
@@ -1192,12 +1197,14 @@ function photoVerifyTool(
 /** Merge the shared photo params; `undefined` values are dropped by the client. */
 function photoParams(req: {
   readonly caption?: string;
+  readonly altText?: string;
   readonly published: boolean;
   readonly extraParams?: Readonly<Record<string, ParamValue>>;
 }): Record<string, ParamValue> {
   return {
     ...(req.extraParams ?? {}),
     ...(req.caption !== undefined ? { caption: req.caption } : {}),
+    ...(req.altText !== undefined ? { alt_text_custom: req.altText } : {}),
     published: req.published,
   };
 }
@@ -1272,6 +1279,7 @@ async function uploadPreparedPhoto(
   const published = req.published ?? true;
   const params = photoParams({
     ...(req.caption !== undefined ? { caption: req.caption } : {}),
+    ...(req.altText !== undefined ? { altText: req.altText } : {}),
     published,
     ...(req.extraParams !== undefined ? { extraParams: req.extraParams } : {}),
   });
@@ -1510,6 +1518,8 @@ export interface UnpublishedPhotosRequest {
   readonly pageId: string;
   /** At least one source; uploaded sequentially so ordering is deterministic. */
   readonly sources: readonly PhotoSource[];
+  /** Alt text per source, by index; a missing entry uploads that photo without one. */
+  readonly altTexts?: readonly (string | undefined)[];
   readonly token?: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
@@ -1626,10 +1636,12 @@ export async function uploadUnpublishedPhotos(
   // Phase 2 — sequential uploads, tracking what must be cleaned up on failure.
   const children: UnpublishedPhotoChild[] = [];
   for (const [index, source] of prepared.entries()) {
+    const altText = req.altTexts?.[index];
     try {
       const uploaded = await uploadPreparedPhoto(deps, source, {
         pageId: req.pageId,
         published: false,
+        ...(altText !== undefined ? { altText } : {}),
         ...(req.token !== undefined ? { token: req.token } : {}),
         ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
         ...(req.signal !== undefined ? { signal: req.signal } : {}),

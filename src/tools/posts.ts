@@ -223,6 +223,33 @@ const publishedArg = z
     'false ⇒ create the post UNPUBLISHED (a draft that stays invisible until facebook_update_post action:"publish_now"). Omitted or true ⇒ publish immediately. Must be omitted when scheduled_publish_time is set.',
   );
 
+/** F10: Graph's `alt_text_custom` on a photo upload. */
+const altTextArg = z
+  .string()
+  .min(1)
+  .max(1000)
+  .optional()
+  .describe(
+    'Alt text for screen readers, up to 1000 characters. Omitted ⇒ no custom alt text is sent.',
+  );
+
+function altTextLine(text: string): string {
+  return `Alt text: yes (${String(text.length)} chars).`;
+}
+
+/** Undefined when no photo carries alt text, so the summary stays unchanged. */
+function carouselAltTextLine(
+  altTexts: readonly (string | undefined)[],
+): string | undefined {
+  const withAlt = altTexts.filter((text) => text !== undefined).length;
+  if (withAlt === 0) return undefined;
+  return `Alt text: ${String(withAlt)} of ${String(altTexts.length)} photos.`;
+}
+
+function withAltTextLine(summary: string, line: string | undefined): string {
+  return line === undefined ? summary : `${summary} ${line}`;
+}
+
 /**
  * The post id argument for the two lifecycle writes. The SHAPE is the shared one
  * (`./shared.js`): `/{post_id}` is built by interpolation, so an id carrying a
@@ -1061,11 +1088,24 @@ function buildCreatePost() {
           "A URL to attach. Facebook renders its own preview from the URL's Open Graph tags — the title/image cannot be overridden here. Cannot be combined with photos.",
         ),
       photos: z
-        .array(z.string().min(1))
+        .array(
+          z.union([
+            z.string().min(1),
+            z
+              .object({
+                source: z
+                  .string()
+                  .min(1)
+                  .describe('The photo source, as in the string form.'),
+                alt_text: altTextArg,
+              })
+              .strict(),
+          ]),
+        )
         .min(1)
         .optional()
         .describe(
-          'Photo sources for a photo post: each is an https:// URL Meta fetches itself, or a local file path inside FB_MEDIA_DIR. Uploaded sequentially as UNPUBLISHED children, then attached to one feed post. Cannot be combined with link or child_attachments.',
+          'Photo sources for a photo post: each is an https:// URL Meta fetches itself, or a local file path inside FB_MEDIA_DIR — either as a plain string or as {source, alt_text}. Uploaded sequentially as UNPUBLISHED children, then attached to one feed post. Cannot be combined with link or child_attachments.',
         ),
       child_attachments: z
         .array(
@@ -1106,7 +1146,13 @@ function buildCreatePost() {
         const base = await prepareBase(ctx, input, {
           needTimezone: input.scheduled_publish_time !== undefined,
         });
-        const sources: PhotoSource[] = (input.photos ?? []).map(toMediaSource);
+        const photoEntries = (input.photos ?? []).map((entry) =>
+          typeof entry === 'string' ? { source: entry } : entry,
+        );
+        const sources: PhotoSource[] = photoEntries.map((entry) =>
+          toMediaSource(entry.source),
+        );
+        const altTexts = photoEntries.map((entry) => entry.alt_text);
 
         const plan: PostPlan = planCreatePost(
           {
@@ -1160,7 +1206,7 @@ function buildCreatePost() {
           },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
-          summary: plan.summary,
+          summary: withAltTextLine(plan.summary, carouselAltTextLine(altTexts)),
           warnings: planWarnings(plan, echo),
           resolvedPage: base.page,
           notPerformedNotice:
@@ -1181,6 +1227,7 @@ function buildCreatePost() {
               const uploaded = await uploadUnpublishedPhotos(media, {
                 pageId: base.page.pageId,
                 sources: boundSources,
+                ...(altTexts.some((text) => text !== undefined) ? { altTexts } : {}),
                 token: base.page.token,
                 ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
                 onProgress: (done, total) => {
@@ -1267,6 +1314,7 @@ function buildCreatePhotoPost() {
         .string()
         .optional()
         .describe('Text shown with the photo. Unicode and emoji pass through unchanged.'),
+      alt_text: altTextArg,
       published: publishedArg,
       scheduled_publish_time: scheduledPublishTimeArg,
       page_timezone: pageTimezoneArg,
@@ -1363,15 +1411,18 @@ function buildCreatePhotoPost() {
           params: {
             ...plan.params,
             photo: input.photo,
+            ...(input.alt_text !== undefined ? { alt_text: input.alt_text } : {}),
             ...(photoSha256 !== undefined ? { photo_sha256: photoSha256 } : {}),
             ...(album !== undefined ? { album_id: album.albumId } : {}),
           },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
-          summary:
+          summary: withAltTextLine(
             albumLabel === undefined
               ? plan.summary
               : `Publish a photo to album ${albumLabel} on Page ${base.page.pageId}. ${plan.summary}`,
+            input.alt_text !== undefined ? altTextLine(input.alt_text) : undefined,
+          ),
           warnings: [
             ...planWarnings(plan, echo),
             ...(album !== undefined && plan.schedule !== undefined
@@ -1394,6 +1445,7 @@ function buildCreatePhotoPost() {
                 ? { targetEdge: { kind: 'album' as const, albumId: album.albumId } }
                 : {}),
               ...(input.caption !== undefined ? { caption: input.caption } : {}),
+              ...(input.alt_text !== undefined ? { altText: input.alt_text } : {}),
               published: plan.publishState === 'published',
               token: base.page.token,
               ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),

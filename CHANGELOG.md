@@ -73,6 +73,16 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Photo alt text (v2 organic F10).** `facebook_create_photo_post` takes an
+  optional `alt_text` (up to 1000 characters). Each item of
+  `facebook_create_post` `photos[]` may now be `{source, alt_text}`, and the
+  plain string form still works. The text is sent as `alt_text_custom` on the
+  photo upload; `extraParams` can no longer set that param. The preview
+  summary shows `Alt text: yes (n chars)` (or `n of m photos` for a
+  multi-photo post). A missing alt text gives no warning. It is not yet
+  verified live whether alt text on an unpublished carousel child survives
+  into the published post.
+
 - **Pin replacement warning on `facebook_update_post` (v2 organic F7).**
   `is_pinned:true` now first reads the Page's most recent feed
   (`id,is_pinned`, limit 25). When another post is pinned, the preview warns

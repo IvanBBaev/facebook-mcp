@@ -1150,7 +1150,13 @@ test('CC-MEDIA-4: extraParams cannot smuggle a url/source past the scheme allowl
 
 test('extraParams cannot override the credentials or the published flag', async () => {
   const fb = createFakeFbRequest();
-  for (const key of ['access_token', 'appsecret_proof', 'published', 'attached_media']) {
+  for (const key of [
+    'access_token',
+    'appsecret_proof',
+    'published',
+    'attached_media',
+    'alt_text_custom',
+  ]) {
     await rejectsMediaSourceError(
       uploadPhoto(makeDeps(fb), {
         pageId: PAGE_ID,
@@ -1167,6 +1173,52 @@ test('extraParams cannot override the credentials or the published flag', async 
   assertNoReservedPhotoParams(undefined);
   assertNoReservedPhotoParams({ scheduled_publish_time: 1 });
   assert.equal(fb.calls.length, 0);
+});
+
+test('single photo: altText is sent as alt_text_custom on both protocols', async (t) => {
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'shot.png'), pngBytes());
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1', post_id: '777_888' })).enqueue(
+    fbOk({ id: 'photo-2', post_id: '777_889' }),
+  );
+  const deps = makeDeps(fb, { mediaDir: fx.mediaDir });
+  const altText = 'Plate of grilled sea bass with lemon';
+
+  await uploadPhoto(deps, { pageId: PAGE_ID, source: url(REMOTE), altText });
+  await uploadPhoto(deps, { pageId: PAGE_ID, source: local('shot.png'), altText });
+
+  assert.deepEqual(jsonAt(fb, 0).body, {
+    alt_text_custom: altText,
+    published: true,
+    url: REMOTE,
+  });
+  assert.deepEqual(multipartAt(fb, 1).fields, {
+    alt_text_custom: altText,
+    published: 'true',
+  });
+});
+
+test('multi photo: altTexts are applied per child by index', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'ph1' }))
+    .enqueue(fbOk({ id: 'ph2' }))
+    .enqueue(fbOk({ id: 'ph3' }));
+
+  await uploadUnpublishedPhotos(makeDeps(fb), {
+    pageId: PAGE_ID,
+    sources: [
+      url(REMOTE),
+      url('https://cdn.example.com/b.jpg'),
+      url('https://cdn.example.com/c.jpg'),
+    ],
+    altTexts: ['first', undefined, 'third'],
+  });
+
+  assert.equal(jsonAt(fb, 0).body?.alt_text_custom, 'first');
+  assert.equal(jsonAt(fb, 1).body?.alt_text_custom, undefined);
+  assert.equal(jsonAt(fb, 2).body?.alt_text_custom, 'third');
+  assert.equal(jsonAt(fb, 2).body?.published, false);
 });
 
 test('extraParams: legitimate Graph params ride along on both protocols', async (t) => {
