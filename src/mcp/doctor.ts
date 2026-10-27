@@ -178,6 +178,11 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
     'pages_read_user_content',
     'pages_messaging',
   ],
+  // v2 F11 custom labels: pages_manage_metadata per Meta's docs (scope still probe P-6).
+  facebook_list_labels: ['pages_manage_metadata'],
+  facebook_create_label: ['pages_manage_metadata'],
+  facebook_assign_label: ['pages_manage_metadata'],
+  facebook_delete_label: ['pages_manage_metadata'],
   // Local saved replies: a file on this machine, no Graph call.
   facebook_list_saved_replies: [],
   facebook_save_reply: [],

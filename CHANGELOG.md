@@ -73,6 +73,13 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Custom labels on Messenger conversations (v2 messaging F11).**
+  `facebook_list_labels` lists the Page's labels, or the labels on one person.
+  `facebook_create_label`, `facebook_assign_label` (`remove:true` takes a
+  label off) and `facebook_delete_label` (irreversible, plan-bound) manage
+  them. The person is never notified, and the PSID is never logged or
+  journaled. A refusal because the Page has not accepted the Page Contact
+  Terms is reported as a `permission` error with what to do.
 - **Private reply to a visitor post, with attachments (v2 messaging F4).**
   `facebook_private_reply` takes `post_id` as an alternative to `comment_id`
   (exactly one), for a post a visitor wrote on the Page; the same 7-day window

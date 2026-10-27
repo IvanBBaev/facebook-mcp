@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 32 read tools. The published counts (59 tools / 8 packages, 47 in the default
-> profile, 32 read / 27 write) are asserted there too. `src/metadata.test.ts`
+> the 33 read tools. The published counts (63 tools / 8 packages, 51 in the default
+> profile, 33 read / 30 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (47 tools as shipped) — the `ads` and
++ insights + moderation + messages** (51 tools as shipped) — the `ads` and
 `page_admin` packages are **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -155,6 +155,10 @@ gates as `irreversible`.
 | `facebook_list_saved_replies` | true | false | true | false | v2 F10. The Page's local saved replies (`saved-replies.json` in the config dir, 0600, keyed by Page id), optional `tag` filter. No Graph call, so the only closed-world tools. Templates are operator-authored text and are not taint-wrapped |
 | `facebook_save_reply` | false | false | true | false | v2 F10. Create or update a template (`id` slug derived from the title when omitted; an existing id needs `overwrite:true` and returns the replaced record). The only placeholder is `{{page_name}}`, filled from the resolved Page; unknown placeholders are refused at save time. Local write, tier `reversible`, applied directly without the plan gate; a corrupt file is a `config_error` and is never overwritten |
 | `facebook_delete_saved_reply` | false | false | true | false | v2 F10. Delete one template and return it, so it can be re-saved. Local write, tier `reversible` |
+| `facebook_list_labels` | true | false | true | true | v2 F11. The Page's custom Messenger labels (`id`, `name`), or with `psid` the labels on one person. Label names are Page-authored and not taint-wrapped. No `logFields` (the PSID stays off stderr). Needs `pages_manage_metadata`, the MESSAGING task and accepted Page Contact Terms (exact scope: probe P-6) |
+| `facebook_create_label` | false | false | false | true | v2 F11. Create a Page label (`name`, 1–64 chars) and return its id. Labels are invisible to the person → tier `reversible`, not plan-bound; each call creates a new label → `idempotentHint:false`. Without an id in the answer the write is `attempted` |
+| `facebook_assign_label` | false | false | true | true | v2 F11. Put a label on one person (`psid`), or `remove:true` to take it off. The preview names the label (fails open with a warning). Tier `reversible`, not plan-bound. The PSID is never logged, journaled or put in a summary. An answer without `success:true` is not `applied` |
+| `facebook_delete_label` | false | true | true | true | v2 F11. Permanently delete a label; it leaves every person it was on. Tier `irreversible` (plan + confirmation). The spec's single `facebook_manage_label` is split into create / assign / delete so each verb carries its own tier. A Page Contact Terms refusal is a `permission` error with guidance (matched by wording until P-6) |
 
 `saved_reply_id` is accepted by `facebook_send_message`, `facebook_reply_to_comment`
 and `facebook_private_reply` in place of `message` (exactly one of the two). The
@@ -225,10 +229,10 @@ wrong `temporary_status` misleads every visitor at once.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 47 model-facing tools in the default `core` profile** (core 4
-+ posts 9 + reader 7 + insights 5 + moderation 13 + messages 9), with the opt-in
-`ads` package adding 11 more and the opt-in `page_admin` package 1 — **59 across
-all 8 packages**, split 32 read / 27 write (20 reversible, 6 irreversible, 1 spend — the single `spend` tool is
+**Total as shipped: 51 model-facing tools in the default `core` profile** (core 4
++ posts 9 + reader 7 + insights 5 + moderation 13 + messages 13), with the opt-in
+`ads` package adding 11 more and the opt-in `page_admin` package 1 — **63 across
+all 8 packages**, split 33 read / 30 write (22 reversible, 7 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story

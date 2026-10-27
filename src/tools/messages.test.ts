@@ -414,6 +414,10 @@ test('createMessagesPackage builds the plan-first messages package', () => {
       'facebook_list_saved_replies',
       'facebook_save_reply',
       'facebook_delete_saved_reply',
+      'facebook_list_labels',
+      'facebook_create_label',
+      'facebook_assign_label',
+      'facebook_delete_label',
     ],
   );
   for (const spec of pkg.tools) {
@@ -522,6 +526,8 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   // the template text or anything a visitor wrote.
   'id',
   'overwrite',
+  // A Page label's id — never the PSID it is put on.
+  'label_id',
 ]);
 
 test('every messages log allowlist names real, non-content arguments', () => {
@@ -537,6 +543,9 @@ test('every messages log allowlist names real, non-content arguments', () => {
     [TOOL_UPLOAD]: ['profile', 'apply', 'plan_id', 'type'],
     facebook_save_reply: ['profile', 'id', 'overwrite'],
     facebook_delete_saved_reply: ['profile', 'id'],
+    facebook_create_label: ['profile', 'apply', 'plan_id'],
+    facebook_assign_label: ['profile', 'apply', 'plan_id', 'label_id', 'remove'],
+    facebook_delete_label: ['profile', 'apply', 'plan_id', 'label_id'],
   };
 
   for (const spec of createMessagesPackage().tools) {

@@ -21,6 +21,8 @@
 //     reusable attachment id (about 90 days) to send to many people.
 //   * facebook_get_activity_since — new comments and new / unread conversations
 //     since a local high-water mark, in one call (`./activity.ts`).
+//   * facebook_list_labels / create / assign / delete — custom inbox labels on
+//     a person's thread (`./labels.ts`).
 //
 // Two design commitments run through the whole module.
 //
@@ -96,6 +98,7 @@ import {
   outboundAttachmentOf,
 } from './message-attachment.js';
 import { createActivitySinceTool } from './activity.js';
+import { createLabelTools } from './labels.js';
 import {
   createSavedReplyTools,
   messageOrSavedReply,
@@ -1331,7 +1334,7 @@ export function createMessagesPackage(): PackageSpec {
       'content wrapped, attachments as placeholders) and send one private reply ' +
       'inside the 24-hour window, or react to a message; or ask what is new since the ' +
       'last look; keep local ' +
-      'saved replies to send verbatim. ' +
+      'saved replies to send verbatim; tag threads with custom labels. ' +
       'Plan-first by default.',
     tools: [
       listConversationsTool,
@@ -1341,6 +1344,7 @@ export function createMessagesPackage(): PackageSpec {
       uploadMessageAttachmentTool,
       createActivitySinceTool(),
       ...createSavedReplyTools(),
+      ...createLabelTools(),
     ],
     enabledByDefault: true,
     writeModeDefault: 'plan',

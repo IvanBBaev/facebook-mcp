@@ -238,6 +238,22 @@
       "description": "Delete one local saved reply (no Facebook call)."
     },
     {
+      "name": "facebook_list_labels",
+      "description": "List the Page’s custom Messenger labels (id and name), or — with psid — the labels on one person."
+    },
+    {
+      "name": "facebook_create_label",
+      "description": "Create a custom Messenger label on the Page (for example \"vip\" or \"refund-pending\") and return its id, to put on people with facebook_assign_label."
+    },
+    {
+      "name": "facebook_assign_label",
+      "description": "Put a custom label on one person (their PSID from a conversation), so the thread shows in the Page inbox label view; remove:true takes it off."
+    },
+    {
+      "name": "facebook_delete_label",
+      "description": "PERMANENTLY delete a custom label from the Page."
+    },
+    {
       "name": "facebook_list_campaigns",
       "description": "List campaigns under one ad account, a cursor page at a time."
     },
