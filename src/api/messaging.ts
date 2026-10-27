@@ -1077,3 +1077,104 @@ export async function sendMessage(
     throw explainSendFailure(err, { replyTo: input.replyToMessageId !== undefined });
   }
 }
+
+export interface SendReactionInput {
+  readonly pageId: string;
+  /** The recipient's page-scoped ID (PSID). */
+  readonly recipientId: string;
+  /** The mid the Page reacts to. */
+  readonly messageId: string;
+  /** The emoji to set; absent ⇒ the Page's reaction is removed (`unreact`). */
+  readonly reaction?: string;
+  readonly token?: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface SendReactionResult {
+  readonly recipientId?: string;
+}
+
+function reactionRejectedAction(): ErrorAction {
+  return {
+    category: 'validation',
+    retryable: false,
+    nextTool: 'facebook_get_conversation',
+    operatorText:
+      'Facebook rejected the reaction, so nothing changed: either the message id was ' +
+      'not found for this recipient (take the mid from facebook_get_conversation of the ' +
+      'same thread) or Meta rejected this reaction emoji (try a common one such as ❤️).',
+  };
+}
+
+/**
+ * Turn a raw reaction failure into an actionable one: the window, recipient and
+ * ambiguous cases exactly as for a send ({@link explainSendFailure}), plus
+ * Graph's invalid-parameter code, which covers both an unknown mid and an emoji
+ * Meta does not accept — the two cannot be told apart from the envelope.
+ */
+function explainReactionFailure(err: unknown): Error {
+  const explained = explainSendFailure(err);
+  if (
+    explained === err &&
+    err instanceof GraphApiError &&
+    err.code === INVALID_PARAMETER_CODE
+  ) {
+    return reclassify(
+      err,
+      `Reaction NOT applied — Facebook rejected the message id or the emoji. ${err.message}`,
+      reactionRejectedAction(),
+    );
+  }
+  return explained;
+}
+
+/**
+ * React to one message as the Page (`sender_action: react`), or remove the
+ * Page's reaction (`unreact`) when no emoji is given. No `messaging_type` is
+ * sent: a sender action is not a message. Like a send, there is no idempotency
+ * key, so failures keep the send classification ({@link classifySendOutcome})
+ * and the acknowledgement is judged by {@link classifyReactionOutcome}.
+ */
+export async function sendReaction(
+  fbRequest: FbRequestFn,
+  input: SendReactionInput,
+): Promise<SendReactionResult> {
+  const req: JsonRequest = {
+    protocol: 'json',
+    method: 'POST',
+    host: 'graph',
+    path: `/${input.pageId}/messages`,
+    body: {
+      recipient: { id: input.recipientId },
+      sender_action: input.reaction !== undefined ? 'react' : 'unreact',
+      payload: {
+        message_id: input.messageId,
+        ...(input.reaction !== undefined ? { reaction: input.reaction } : {}),
+      },
+    },
+    pageId: input.pageId,
+    ...(input.token !== undefined ? { token: input.token } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
+  };
+  try {
+    const res = await fbRequest<RawSendResponse>(req);
+    const ack: RawSendResponse =
+      typeof res.data === 'object' && res.data !== null ? res.data : {};
+    const recipientId = sendId(ack.recipient_id);
+    return recipientId !== undefined ? { recipientId } : {};
+  } catch (err) {
+    throw explainReactionFailure(err);
+  }
+}
+
+/**
+ * Journal verdict for an acknowledged reaction. Only an ack that names the
+ * requested recipient proves Facebook acted on it; a 2xx without one (or naming
+ * somebody else) is `attempted` — the reaction may or may not be showing (C2).
+ */
+export function classifyReactionOutcome(
+  result: SendReactionResult,
+  requestedRecipientId: string,
+): 'applied' | 'attempted' {
+  return result.recipientId === requestedRecipientId ? 'applied' : 'attempted';
+}

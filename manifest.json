@@ -214,6 +214,10 @@
       "description": "Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE)."
     },
     {
+      "name": "facebook_react_to_message",
+      "description": "React to ONE Messenger message as the Page with a single emoji (for example \"❤️\" or \"👍\"), or remove the Page’s reaction with remove:true — an acknowledgement without a…"
+    },
+    {
       "name": "facebook_get_activity_since",
       "description": "What is new on a Page since a point in time, in one call: new comments (and replies) on the most recent published posts, and Messenger conversations updated since then…"
     },

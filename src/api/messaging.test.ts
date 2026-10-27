@@ -30,6 +30,7 @@ import {
   STANDARD_MESSAGING_WINDOW_MS,
   attachmentKind,
   attachmentNames,
+  classifyReactionOutcome,
   classifySendOutcome,
   evaluateMessagingWindow,
   explainSendFailure,
@@ -43,6 +44,7 @@ import {
   messagingWindowClosedError,
   parseGraphTime,
   sendMessage,
+  sendReaction,
   shapeConversation,
   shapeMessage,
   summariseAttachments,
@@ -1237,4 +1239,104 @@ test('listConversations sends user_id only when asked', async () => {
 
   await listConversations(fb.fn, { pageId: PAGE_ID });
   assert.equal(jsonOf(fb.lastRequest()).params?.user_id, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// sendReaction (v2 F2)
+// ---------------------------------------------------------------------------
+
+test('sendReaction POSTs a react sender action with the mid and the emoji', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbOk({ recipient_id: PSID }));
+
+  const result = await sendReaction(fb.fn, {
+    pageId: PAGE_ID,
+    recipientId: PSID,
+    messageId: 'm_1',
+    reaction: '❤️',
+    token: PAGE_TOKEN,
+  });
+
+  assert.deepEqual(result, { recipientId: PSID });
+  const req = jsonOf(fb.lastRequest());
+  assert.equal(req.path, `/${PAGE_ID}/messages`);
+  assert.equal(req.token, PAGE_TOKEN);
+  // A sender action is not a message: no messaging_type.
+  assert.deepEqual(req.body, {
+    recipient: { id: PSID },
+    sender_action: 'react',
+    payload: { message_id: 'm_1', reaction: '❤️' },
+  });
+});
+
+test('sendReaction without an emoji unreacts and tolerates an empty ack', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbOk(undefined));
+
+  const result = await sendReaction(fb.fn, {
+    pageId: PAGE_ID,
+    recipientId: PSID,
+    messageId: 'm_1',
+  });
+
+  assert.deepEqual(result, {});
+  assert.deepEqual(jsonOf(fb.lastRequest()).body, {
+    recipient: { id: PSID },
+    sender_action: 'unreact',
+    payload: { message_id: 'm_1' },
+  });
+});
+
+test('sendReaction maps Graph 100 to a reaction-specific validation error', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.method === 'POST',
+    fbErr(graphError('(#100) Invalid parameter', { code: 100 })),
+  );
+
+  await assert.rejects(
+    sendReaction(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      messageId: 'm_x',
+      reaction: '👍',
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /Reaction NOT applied/);
+      assert.equal(err.action?.category, 'validation');
+      assert.match(String(err.action?.operatorText), /message id .*emoji/s);
+      return true;
+    },
+  );
+});
+
+test('sendReaction keeps the window mapping of a send', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.method === 'POST',
+    fbErr(
+      graphError('This message is sent outside of allowed window.', { subcode: 2018278 }),
+    ),
+  );
+
+  await assert.rejects(
+    sendReaction(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      messageId: 'm_1',
+      reaction: '👍',
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.equal(err.action?.operatorText, MESSAGE_TAG_GUIDANCE);
+      return true;
+    },
+  );
+});
+
+test('classifyReactionOutcome applies only an ack naming the requested recipient', () => {
+  assert.equal(classifyReactionOutcome({ recipientId: PSID }, PSID), 'applied');
+  assert.equal(classifyReactionOutcome({}, PSID), 'attempted');
+  assert.equal(classifyReactionOutcome({ recipientId: '999' }, PSID), 'attempted');
 });

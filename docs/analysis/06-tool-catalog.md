@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 32 read tools. The published counts (57 tools / 8 packages, 45 in the default
-> profile, 32 read / 25 write) are asserted there too. `src/metadata.test.ts`
+> the 32 read tools. The published counts (58 tools / 8 packages, 46 in the default
+> profile, 32 read / 26 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (45 tools as shipped) — the `ads` and
++ insights + moderation + messages** (46 tools as shipped) — the `ads` and
 `page_admin` packages are **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -149,6 +149,7 @@ gates as `irreversible`.
 | `facebook_list_conversations` | true | false | true | true | Polling-friendly: `updated_time`, `unread_count`, `snippet` |
 | `facebook_get_conversation` | true | false | true | true | Messages with `from`, `created_time`, attachments. The candidate opt-in `mark_seen` parameter (G-TOOL-4) was **decided against and does not ship**: a read tool must not mutate read receipts on a real person's conversation as a side effect of the model looking at it. A test pins the rejection |
 | `facebook_send_message` | false | true | false | true | RESPONSE type; 24-hour-window errors explained in the error mapping. Externally visible with no unsend → `destructiveHint:true`; a lost-response retry can double-message a real customer → `idempotentHint:false` |
+| `facebook_react_to_message` | false | false | true | true | v2 F2. Emoji reaction on one message (`reaction`), or `remove:true` to take the Page's reaction back; exactly one of the two. `conversation_id` (preferred) or `recipient_id`. Tier `reversible`, but plan-bound like the send and gated by the same 24-hour window. Re-applying the same reaction is a no-op → `idempotentHint:true`; it can be undone → `destructiveHint:false`. A target outside the last 10 messages gives a warning |
 | `facebook_get_activity_since` | true | false | false | true | v2 F3. New comments on the recent published posts (`posts` 1–25) plus conversations updated since `since` or still unread, in one call. `since` omitted ⇒ the local per-Page, per-section high-water mark (`FB_ACTIVITY_STATE_PATH`, 0600), first call ⇒ now − 24h, at most 90 days back. `mark_seen` (default true) advances the mark to the read's horizon only for a complete section; a truncated or failed section keeps its mark. Not idempotent because of that local mark; no Graph write. Comment and message text inside the taint envelope |
 | `facebook_list_saved_replies` | true | false | true | false | v2 F10. The Page's local saved replies (`saved-replies.json` in the config dir, 0600, keyed by Page id), optional `tag` filter. No Graph call, so the only closed-world tools. Templates are operator-authored text and are not taint-wrapped |
 | `facebook_save_reply` | false | false | true | false | v2 F10. Create or update a template (`id` slug derived from the title when omitted; an existing id needs `overwrite:true` and returns the replaced record). The only placeholder is `{{page_name}}`, filled from the resolved Page; unknown placeholders are refused at save time. Local write, tier `reversible`, applied directly without the plan gate; a corrupt file is a `config_error` and is never overwritten |
@@ -223,10 +224,10 @@ wrong `temporary_status` misleads every visitor at once.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 45 model-facing tools in the default `core` profile** (core 4
-+ posts 9 + reader 7 + insights 5 + moderation 13 + messages 7), with the opt-in
-`ads` package adding 11 more and the opt-in `page_admin` package 1 — **57 across
-all 8 packages**, split 32 read / 25 write (18 reversible, 6 irreversible, 1 spend — the single `spend` tool is
+**Total as shipped: 46 model-facing tools in the default `core` profile** (core 4
++ posts 9 + reader 7 + insights 5 + moderation 13 + messages 8), with the opt-in
+`ads` package adding 11 more and the opt-in `page_admin` package 1 — **58 across
+all 8 packages**, split 32 read / 26 write (19 reversible, 6 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story

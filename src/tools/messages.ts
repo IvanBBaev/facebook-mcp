@@ -13,6 +13,8 @@
 //     is not enough on its own — an explicitly-set `FB_WRITE_MODE=apply`
 //     overrides a package default — and a DM lands in a real person's inbox with
 //     no unsend.
+//   * facebook_react_to_message  — react to one message of a thread as the Page,
+//     or remove the Page's reaction. Plan-bound like a send, same window gate.
 //   * facebook_get_activity_since — new comments and new / unread conversations
 //     since a local high-water mark, in one call (`./activity.ts`).
 //
@@ -56,6 +58,7 @@ import {
   MESSAGE_TAG_GUIDANCE,
   POLLING_NOTE,
   STANDARD_MESSAGING_WINDOW_MS,
+  classifyReactionOutcome,
   classifySendOutcome,
   evaluateMessagingWindow,
   findLastInboundAtMs,
@@ -63,10 +66,12 @@ import {
   listConversations,
   messagingWindowClosedError,
   sendMessage,
+  sendReaction,
   windowStatusFromLastActivity,
   type ConversationRecord,
   type MessageRecord,
   type MessagingWindow,
+  type SendReactionResult,
 } from '../api/messaging.js';
 import {
   APPLIED_VERDICT,
@@ -91,6 +96,7 @@ import { executeWrite, graphNodeIdArg, listArgs, shapeFor, writeArgs } from './s
 const TOOL_LIST_CONVERSATIONS = 'facebook_list_conversations';
 const TOOL_GET_CONVERSATION = 'facebook_get_conversation';
 const TOOL_SEND_MESSAGE = 'facebook_send_message';
+const TOOL_REACT_TO_MESSAGE = 'facebook_react_to_message';
 
 /**
  * Appended to the shared rejection message on both `conversation_id` arguments.
@@ -123,6 +129,17 @@ const SEND_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: true,
 };
 
+/**
+ * A reaction is visible to the person but a later `remove:true` takes it back,
+ * and setting the same emoji twice leaves one reaction (doc 06, v2 F2).
+ */
+const REACT_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
 /** Messenger's plain-text limit; rejected client-side rather than at the wire. */
 const MAX_MESSAGE_CHARS = 2000;
 
@@ -139,6 +156,78 @@ const MAX_MESSAGE_ID_CHARS = 200;
 
 /** How much of the quoted mid the preview summary shows. */
 const REPLY_TO_PREVIEW_CHARS = 8;
+
+const MAX_REACTION_CHARS = 16;
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+/**
+ * One emoji: exactly one grapheme cluster that contains an Extended_Pictographic
+ * code point. No allowlist — whether Meta restricts the set is still an open
+ * probe (P-2), and Graph's own rejection is mapped to a clear error.
+ */
+function isSingleEmoji(value: string): boolean {
+  const graphemes = [...graphemeSegmenter.segment(value)];
+  return graphemes.length === 1 && /\p{Extended_Pictographic}/u.test(value);
+}
+
+const emojiArg = z
+  .string()
+  .min(1)
+  .max(MAX_REACTION_CHARS)
+  .refine(isSingleEmoji, 'reaction must be a single emoji, for example "❤️".');
+
+const REACTION_TARGET_UNSEEN_WARNING =
+  `The message to react to is not among the last ${String(WINDOW_PROBE_LIMIT)} ` +
+  'messages of this conversation; Meta may reject the reaction.';
+
+const REACT_VISIBILITY_WARNING =
+  'The reaction is visible to the person in their Messenger thread. A later call ' +
+  'with remove:true takes it back.';
+
+const REACT_ARGUMENTS_MESSAGE =
+  'Nothing was changed: pass exactly one of `reaction` (an emoji to set) or ' +
+  '`remove: true` (take the Page’s reaction back).';
+
+const REACT_MISSING_TARGET_MESSAGE =
+  'Nothing was changed: facebook_react_to_message needs conversation_id (preferred — ' +
+  'it also lets the 24-hour messaging window be checked) or recipient_id (the PSID). ' +
+  'Call facebook_list_conversations first.';
+
+const REACTION_CONFIRMED_NOTE = 'Facebook acknowledged the reaction for this recipient.';
+
+const REACTION_UNCONFIRMED_NOTE =
+  'Facebook accepted the request but did not name the recipient, so the reaction is ' +
+  'UNCONFIRMED. Check the thread with facebook_get_conversation before repeating it.';
+
+/** What `perform` returns for a reaction, and what an applied one reports. */
+interface ReactionOutcome {
+  readonly recipientId: string;
+  readonly action: 'react' | 'unreact';
+  readonly reaction?: string;
+  readonly confirmed: boolean;
+  readonly note: string;
+}
+
+function reactionOutcomeOf(
+  ack: SendReactionResult,
+  recipientId: string,
+  reaction: string | undefined,
+): ReactionOutcome {
+  const confirmed = classifyReactionOutcome(ack, recipientId) === 'applied';
+  return {
+    recipientId,
+    action: reaction !== undefined ? 'react' : 'unreact',
+    ...(reaction !== undefined ? { reaction } : {}),
+    confirmed,
+    note: confirmed ? REACTION_CONFIRMED_NOTE : REACTION_UNCONFIRMED_NOTE,
+  };
+}
+
+/** Same rule as a send: only an ack naming the recipient is `applied`. */
+function reactionVerdict(outcome: ReactionOutcome) {
+  return outcome.confirmed ? APPLIED_VERDICT : ATTEMPTED_VERDICT;
+}
 
 const REPLY_TARGET_UNSEEN_WARNING =
   `The reply target is not among the last ${String(WINDOW_PROBE_LIMIT)} messages of ` +
@@ -416,13 +505,14 @@ async function resolveSendTarget(
 }
 
 /**
- * True when the thread was probed and the quoted mid is not in it. Older mids
+ * True when the thread was probed and the named mid (a reply target or a
+ * reaction target) is not in it. Older mids
  * are valid, so this warns instead of refusing; without a probe (bare
  * recipient_id) there is nothing to compare against.
  */
-function replyTargetUnseen(target: SendTarget, replyTo: string | undefined): boolean {
-  if (replyTo === undefined || target.thread === undefined) return false;
-  return !target.thread.some((message) => message.id === replyTo);
+function messageUnseen(target: SendTarget, messageId: string | undefined): boolean {
+  if (messageId === undefined || target.thread === undefined) return false;
+  return !target.thread.some((message) => message.id === messageId);
 }
 
 /**
@@ -906,7 +996,7 @@ export function createMessagesPackage(): PackageSpec {
           SEND_VISIBILITY_WARNING,
           SEND_UNKNOWN_OUTCOME_WARNING,
           window.explanation,
-          ...(replyTargetUnseen(target, replyTo) ? [REPLY_TARGET_UNSEEN_WARNING] : []),
+          ...(messageUnseen(target, replyTo) ? [REPLY_TARGET_UNSEEN_WARNING] : []),
         ],
         resolvedPage: resolved,
         notPerformedNotice:
@@ -962,19 +1052,153 @@ export function createMessagesPackage(): PackageSpec {
     },
   });
 
+  const reactToMessageTool = defineTool({
+    name: TOOL_REACT_TO_MESSAGE,
+    title: 'React to message',
+    description:
+      'React to ONE Messenger message as the Page with a single emoji (for example ' +
+      '"❤️" or "👍"), or remove the Page’s reaction with remove:true — an ' +
+      'acknowledgement without a text reply. Dry run by default; apply:true must ' +
+      'carry the plan_id of a preview. Pass conversation_id so the recipient and the ' +
+      '24-hour standard messaging window can be checked first; a closed window is ' +
+      'refused locally. Take message_id from facebook_get_conversation.',
+    inputSchema: z.object({
+      ...writeArgs,
+      conversation_id: graphNodeIdArg({
+        hint: CONVERSATION_ID_HINT,
+        description:
+          'Conversation id from facebook_list_conversations. Preferred: it identifies ' +
+          'the recipient and lets the 24-hour window be checked first.',
+      }).optional(),
+      recipient_id: z
+        .string()
+        .regex(PSID_SHAPE, 'recipient_id must be a PSID (digits only).')
+        .optional()
+        .describe(
+          "The person's page-scoped ID (PSID). One of conversation_id or recipient_id " +
+            'is required.',
+        ),
+      message_id: z
+        .string()
+        .regex(MESSAGE_ID_SHAPE, 'message_id must be a Messenger mid.')
+        .max(MAX_MESSAGE_ID_CHARS)
+        .describe('Message id (mid, from facebook_get_conversation) to react to.'),
+      reaction: emojiArg
+        .optional()
+        .describe(
+          'A single emoji, for example "❤️". Omit it and pass remove:true to remove ' +
+            'the reaction.',
+        ),
+      remove: z
+        .boolean()
+        .default(false)
+        .describe('true removes the Page’s reaction (unreact).'),
+    }),
+    annotations: REACT_ANNOTATIONS,
+    // Visible to the person, but `remove:true` takes it back — and, like a send,
+    // plan-bound below so no write mode reacts on a bare apply.
+    writeTier: 'reversible',
+    // The PSID, the mid and the emoji all describe a private exchange with a real
+    // person, so only the thread and the direction of the change are logged.
+    logFields: ['profile', 'apply', 'plan_id', 'conversation_id', 'remove'],
+    handler: async (input, ctx) => {
+      const reaction = input.reaction;
+      if (input.remove === (reaction !== undefined)) {
+        throw new Error(REACT_ARGUMENTS_MESSAGE);
+      }
+      if (input.conversation_id === undefined && input.recipient_id === undefined) {
+        throw new Error(REACT_MISSING_TARGET_MESSAGE);
+      }
+      const resolved: ResolvedPage = await ctx.pages.resolvePage(input.profile);
+      const target = await resolveSendTarget(ctx, resolved, input);
+      // Until probe P-2 shows whether Meta lets a reaction through outside the
+      // window, it is gated exactly like a send — re-checked on every call.
+      const window = windowInput(target, ctx.clock.now());
+      if (window.status === 'closed') {
+        throw messagingWindowClosedError(window);
+      }
+      const messageId = input.message_id;
+      const action = reaction !== undefined ? 'react' : 'unreact';
+      const where =
+        `message ${messageId.slice(0, REPLY_TO_PREVIEW_CHARS)}…` +
+        (target.conversationId !== undefined
+          ? ` in conversation ${target.conversationId}`
+          : ` from recipient ${target.recipientId}`);
+      return executeWrite<ReactionOutcome>(ctx, {
+        tool: TOOL_REACT_TO_MESSAGE,
+        tier: 'reversible',
+        requirePlanId: true,
+        pageId: resolved.pageId,
+        params: {
+          recipientId: target.recipientId,
+          messageId,
+          action,
+          reaction: reaction ?? null,
+        },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          reaction !== undefined
+            ? `React ${reaction} to ${where}, as Page ${resolved.pageId} (${resolved.name}).`
+            : `Remove the Page’s reaction from ${where}, as Page ${resolved.pageId} ` +
+              `(${resolved.name}).`,
+        warnings: [
+          REACT_VISIBILITY_WARNING,
+          window.explanation,
+          ...(messageUnseen(target, messageId) ? [REACTION_TARGET_UNSEEN_WARNING] : []),
+        ],
+        resolvedPage: resolved,
+        notPerformedNotice:
+          'This was a dry run — NO reaction was changed and the person saw nothing.',
+        // Ids and the direction only: the emoji is the Page's choice but stays out
+        // with the mid, as the log line does.
+        metadata: {
+          recipientId: target.recipientId,
+          ...(target.conversationId !== undefined
+            ? { conversationId: target.conversationId }
+            : {}),
+          action,
+          windowStatus: window.status,
+        },
+        perform: async (): Promise<ReactionOutcome> => {
+          let ack: SendReactionResult;
+          try {
+            ack = await sendReaction(ctx.fbRequest, {
+              pageId: resolved.pageId,
+              recipientId: target.recipientId,
+              messageId,
+              ...(reaction !== undefined ? { reaction } : {}),
+              token: resolved.token,
+              ...signalOf(ctx),
+            });
+          } catch (err) {
+            throw finalizeSendError(err, target.conversationId);
+          }
+          return reactionOutcomeOf(ack, target.recipientId, reaction);
+        },
+        // A Graph envelope proves the reaction was refused; anything else (a lost
+        // response, a timeout) leaves it unknown — `attempted`, as for a send.
+        classifyOutcome: classifySendOutcome,
+        classifyResult: reactionVerdict,
+      });
+    },
+  });
+
   return {
     name: 'messages',
     title: 'Messages',
     description:
       'Messenger conversations for a Page: poll the inbox, read a thread (untrusted ' +
       'content wrapped, attachments as placeholders) and send one private reply ' +
-      'inside the 24-hour window; or ask what is new since the last look; keep local ' +
+      'inside the 24-hour window, or react to a message; or ask what is new since the ' +
+      'last look; keep local ' +
       'saved replies to send verbatim. ' +
       'Plan-first by default.',
     tools: [
       listConversationsTool,
       getConversationTool,
       sendMessageTool,
+      reactToMessageTool,
       createActivitySinceTool(),
       ...createSavedReplyTools(),
     ],

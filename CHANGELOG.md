@@ -73,6 +73,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **React to a Messenger message (v2 messaging F2).** New
+  `facebook_react_to_message` puts an emoji reaction on a message in a
+  conversation (`sender_action: react`), or removes the Page's reaction with
+  `remove: true` (`unreact`). Pass exactly one of `reaction` (a single emoji)
+  or `remove: true`, and `conversation_id` (preferred) or `recipient_id`. The
+  tool is tier `reversible` but plan-bound like `facebook_send_message`, and it
+  respects the same 24-hour window. The preview warns when the target message
+  is not among the last 10 messages of the conversation. A Graph code 100 is
+  reported as "Reaction NOT applied" (an unknown message id or a rejected
+  emoji). An ack without a recipient id is reported as `attempted`.
+
 - **Photo alt text (v2 organic F10).** `facebook_create_photo_post` takes an
   optional `alt_text` (up to 1000 characters). Each item of
   `facebook_create_post` `photos[]` may now be `{source, alt_text}`, and the
