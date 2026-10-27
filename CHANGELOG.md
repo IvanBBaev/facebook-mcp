@@ -73,6 +73,19 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Boost a Page post as a paused create-chain (v2 ads §1).**
+  `facebook_boost_post` (tier `irreversible`, plan-first) creates a campaign,
+  ad set, ad creative and ad that promote one existing Page post, all PAUSED;
+  nothing spends until the campaign is activated with
+  `facebook_update_ad_object`. A campaign `spend_cap_minor` within
+  `FB_ADS_CAMPAIGN_SPEND_CAP_MAX` is mandatory, the budget (exactly one of
+  daily/lifetime) must fit `FB_ADS_BUDGET_CEILING`, no special ad category is
+  ever declared, and the audience is countries plus an age range. EU/EEA
+  targeting needs DSA payor/beneficiary. Every name carries a plan tag; a
+  rejected step deletes what was already created, and a lost answer is
+  reconciled by that tag before anything is reported. The dry run lists the
+  four requests and the worst-case spend and points to
+  `facebook_get_ad_preview` for the rendered ad.
 - **Paused copies of ad objects (v2 ads §7).**
   `facebook_duplicate_ad_object` (tier `irreversible`, plan-first) copies a
   campaign, ad set or ad through `/{id}/copies`, always with

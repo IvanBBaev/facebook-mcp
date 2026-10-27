@@ -222,6 +222,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
     facebook_get_ad_set_targeting: [true, false, true, true],
     facebook_update_ad_set_targeting: [false, true, true, true],
     facebook_duplicate_ad_object: [false, false, false, true],
+    facebook_boost_post: [false, false, false, true],
   };
 
   assert.equal(PACKAGE.tools.length, Object.keys(expected).length);
@@ -248,7 +249,7 @@ test('every tool carries the annotation quadruple doc 06 pins', () => {
   }
 });
 
-test('only the update, lifecycle, image upload, targeting and duplicate tools can write, and none claims to be read-only', () => {
+test('only the update, lifecycle, image upload, targeting, duplicate and boost tools can write, and none claims to be read-only', () => {
   const writers = PACKAGE.tools.filter((t) => t.writeTier !== undefined);
   assert.deepEqual(
     writers.map((t) => t.name),
@@ -259,6 +260,7 @@ test('only the update, lifecycle, image upload, targeting and duplicate tools ca
       'facebook_upload_ad_image',
       'facebook_update_ad_set_targeting',
       'facebook_duplicate_ad_object',
+      'facebook_boost_post',
     ],
   );
 });
@@ -283,6 +285,9 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'since',
   'until',
   'force_async',
+  'page_id',
+  'post_id',
+  'objective',
 ]);
 
 test('every log allowlist in the package names real, non-secret arguments', () => {
@@ -308,6 +313,7 @@ test('every log allowlist in the package names real, non-secret arguments', () =
     facebook_upload_ad_image: ['ad_account_id', 'apply', 'plan_id'],
     facebook_update_ad_set_targeting: ['adset_id', 'apply', 'plan_id'],
     facebook_duplicate_ad_object: ['object_id', 'level', 'deep_copy', 'apply', 'plan_id'],
+    facebook_boost_post: ['page_id', 'post_id', 'objective', 'apply', 'plan_id'],
   };
 
   for (const spec of PACKAGE.tools) {
@@ -2777,4 +2783,160 @@ test('a duplicate requires level and bounds the rename suffix', () => {
       rename_suffix: 'x'.repeat(51),
     }),
   );
+});
+
+// ---------------------------------------------------------------------------
+// 13. Boost a Page post (v2 ads §1) — the PAUSED create-chain
+// ---------------------------------------------------------------------------
+
+const BOOST_PAGE_ID = '111222333';
+const BOOST_STORY_ID = `${BOOST_PAGE_ID}_444555666`;
+
+/** The post read, as Graph answers it (hand-written — re-check after first live probe). */
+function stubBoostReads(fb: FakeFbRequest, post: Record<string, unknown> = {}): void {
+  stubWriteReads(fb, { currency: 'USD' });
+  fb.on(
+    (r) => r.method === 'GET' && r.path === `/${BOOST_STORY_ID}`,
+    fbOk({
+      id: BOOST_STORY_ID,
+      message: 'Autumn menu',
+      is_eligible_for_promotion: true,
+      ...post,
+    }),
+  );
+}
+
+const BOOST_ARGS = {
+  page_id: BOOST_PAGE_ID,
+  post_id: '444555666',
+  daily_budget_minor: 1000,
+  spend_cap_minor: 10_000,
+  countries: ['US'],
+};
+
+test('a boost is an irreversible preview that creates nothing', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubBoostReads(fb);
+  const boost = tool('facebook_boost_post');
+
+  const result = body(await boost.handler(boost.inputSchema.parse(BOOST_ARGS), ctx));
+
+  assert.equal(result.status, 'preview');
+  assert.equal(result.tier, 'irreversible');
+  assert.match(str(result.summary), /PAUSED campaign, ad set, creative and ad/);
+  assert.match(str(result.summary), /Step 4: POST \/act_1234567890\/ads \(ad, PAUSED\)/);
+  assert.match(
+    str(result.summary),
+    new RegExp(`facebook_get_ad_preview .*${BOOST_STORY_ID}`),
+  );
+  assert.equal(writes(fb).length, 0, 'a dry run may not create anything');
+  assert.equal(journal.entries.length, 0);
+  const postRead = fb.calls.find((r) => r.path === `/${BOOST_STORY_ID}`);
+  assert.equal(
+    postRead?.token,
+    'EAA-PAGE-TOKEN-01234',
+    'the post is read with the Page token',
+  );
+});
+
+test('an applied boost runs the four POSTs and journals every step under the plan tag', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubBoostReads(fb);
+  const edge = (e: string) => (r: FbRequest) =>
+    r.method === 'POST' && r.path === `/${ACCOUNT_ID}/${e}`;
+  fb.on(edge('campaigns'), fbOk({ id: '100' }));
+  fb.on(edge('adsets'), fbOk({ id: '200' }));
+  fb.on(edge('adcreatives'), fbOk({ id: '300' }));
+  fb.on(edge('ads'), fbOk({ id: '400' }));
+  const boost = tool('facebook_boost_post');
+
+  const preview = body(await boost.handler(boost.inputSchema.parse(BOOST_ARGS), ctx));
+  const applied = body(
+    await boost.handler(
+      boost.inputSchema.parse({
+        ...BOOST_ARGS,
+        apply: true,
+        plan_id: str(preview.planId),
+      }),
+      ctx,
+    ),
+  );
+
+  assert.equal(applied.status, 'applied');
+  const result = obj(applied.result);
+  assert.equal(result.outcome, 'applied');
+  assert.equal(result.ad_id, '400');
+  assert.match(str(result.report), /^Created a PAUSED campaign 100/);
+  const sent = writes(fb);
+  assert.equal(sent.length, 4);
+  for (const req of sent) {
+    assert.ok(isJson(req));
+    const sentBody = obj(req.body);
+    if ('status' in sentBody) assert.equal(sentBody.status, 'PAUSED');
+    assert.match(str(sentBody.name), /\[fbmcp:plan1\]$/);
+  }
+  const steps = journal.entries.filter((e) => e.metadata?.chain === 'boost');
+  assert.equal(steps.length, 8);
+  assert.ok(steps.every((e) => e.metadata?.planTag === 'fbmcp:plan1'));
+  assert.equal(journal.entries.at(-1)?.outcome, 'applied');
+});
+
+test('a boost whose ad step is refused rolls back and reports it as not applied', async () => {
+  const { fb, ctx, journal } = makeHarness(COPY_SETTINGS);
+  stubBoostReads(fb);
+  const edge = (e: string) => (r: FbRequest) =>
+    r.method === 'POST' && r.path === `/${ACCOUNT_ID}/${e}`;
+  fb.on(edge('campaigns'), fbOk({ id: '100' }));
+  fb.on(edge('adsets'), fbOk({ id: '200' }));
+  fb.on(edge('adcreatives'), fbOk({ id: '300' }));
+  fb.on(
+    edge('ads'),
+    fbErr(new GraphApiError('Invalid creative', { code: 100, httpStatus: 400 })),
+  );
+  fb.on((r) => r.path === '/200' || r.path === '/100', fbOk({ success: true }));
+  const boost = tool('facebook_boost_post');
+
+  const preview = body(await boost.handler(boost.inputSchema.parse(BOOST_ARGS), ctx));
+  const applied = body(
+    await boost.handler(
+      boost.inputSchema.parse({
+        ...BOOST_ARGS,
+        apply: true,
+        plan_id: str(preview.planId),
+      }),
+      ctx,
+    ),
+  );
+
+  const result = obj(applied.result);
+  assert.equal(result.outcome, 'rolled_back');
+  assert.equal(arr(result.rolled_back).length, 2);
+  assert.ok(
+    journal.entries.some(
+      (e) => e.metadata?.step === 'rollback:campaign' && e.outcome === 'applied',
+    ),
+  );
+});
+
+test('a boost is refused before any write when the inputs are unsafe', async () => {
+  const boost = tool('facebook_boost_post');
+  const refusals: [
+    Partial<Settings>,
+    Record<string, unknown>,
+    Record<string, unknown>,
+    RegExp,
+  ][] = [
+    [COPY_SETTINGS, { lifetime_budget_minor: 5000 }, {}, /exactly one of/],
+    [{ adsBudgetCeiling: 10_000 }, {}, {}, /FB_ADS_CAMPAIGN_SPEND_CAP_MAX/],
+    [COPY_SETTINGS, { countries: ['DE'] }, {}, /EU\/EEA/],
+    [COPY_SETTINGS, {}, { is_eligible_for_promotion: false }, /not eligible/],
+    [COPY_SETTINGS, { post_id: '999_444555666' }, {}, /belongs to Page 999/],
+  ];
+  for (const [settings, extra, post, pattern] of refusals) {
+    const { fb, ctx } = makeHarness(settings);
+    stubBoostReads(fb, post);
+    const args: unknown = boost.inputSchema.parse({ ...BOOST_ARGS, ...extra });
+    await assert.rejects(() => boost.handler(args, ctx), pattern);
+    assert.equal(writes(fb).length, 0);
+  }
 });

@@ -318,6 +318,10 @@
       "description": "Copy one campaign, ad set or ad into a new PAUSED copy (an ad set copy stays in its campaign, an ad copy in its ad set)."
     },
     {
+      "name": "facebook_boost_post",
+      "description": "Boost one existing Page post: create a campaign, ad set, ad creative and ad that promote it."
+    },
+    {
       "name": "facebook_update_page_profile",
       "description": "Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status."
     }

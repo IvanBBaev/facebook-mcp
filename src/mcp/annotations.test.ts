@@ -224,6 +224,7 @@ const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
   ['facebook_get_ad_set_targeting', true, false, true, true, undefined],
   ['facebook_update_ad_set_targeting', false, true, true, true, 'spend'],
   ['facebook_duplicate_ad_object', false, false, false, true, 'irreversible'],
+  ['facebook_boost_post', false, false, false, true, 'irreversible'],
 
   // package `page_admin` — off by default.
   ['facebook_update_page_profile', false, false, true, true, 'reversible'],
@@ -433,7 +434,7 @@ test('the read-only posture drops exactly the tools that are not readOnlyHint', 
 // 5. The counts doc 06 and the README publish
 // ---------------------------------------------------------------------------
 
-test('the full surface is 68 tools across 8 packages', () => {
+test('the full surface is 69 tools across 8 packages', () => {
   assert.deepEqual(
     [...REGISTRY.packageNames],
     [...PACKAGE_NAMES],
@@ -446,12 +447,12 @@ test('the full surface is 68 tools across 8 packages', () => {
   );
   assert.equal(
     REGISTRY.tools.length,
-    68,
+    69,
     'the tool count changed; doc 06, the README table and manifest.json all publish it',
   );
   assert.equal(
     ANNOTATION_MANIFEST.length,
-    68,
+    69,
     'the frozen manifest lost or gained a row',
   );
 });
@@ -476,17 +477,17 @@ test('the default `core` profile ships 53 tools — everything except `ads` and 
   );
   assert.equal(
     REGISTRY.tools.length - byDefault.tools.length,
-    15,
-    'the `ads` (14) and `page_admin` (1) packages no longer account for the gap between all and default',
+    16,
+    'the `ads` (15) and `page_admin` (1) packages no longer account for the gap between all and default',
   );
 });
 
-test('the surface splits 35 read / 33 write (23 reversible, 8 irreversible, 2 spend)', () => {
+test('the surface splits 35 read / 34 write (23 reversible, 9 irreversible, 2 spend)', () => {
   const read = REGISTRY.tools.filter((tool) => hintsOf(tool)['readOnlyHint'] === true);
   const write = REGISTRY.tools.filter((tool) => tool.writeTier !== undefined);
 
   assert.equal(read.length, 35, 'the read-only tool count changed (doc 06 quotes 35)');
-  assert.equal(write.length, 33, 'the write tool count changed (doc 06 quotes 33)');
+  assert.equal(write.length, 34, 'the write tool count changed (doc 06 quotes 34)');
   assert.equal(read.length + write.length, REGISTRY.tools.length, 'a tool is neither');
 
   const byTier: Record<string, number> = {};
@@ -496,7 +497,7 @@ test('the surface splits 35 read / 33 write (23 reversible, 8 irreversible, 2 sp
   }
   assert.deepEqual(
     byTier,
-    { reversible: 23, irreversible: 8, spend: 2 },
+    { reversible: 23, irreversible: 9, spend: 2 },
     'the write-tier distribution changed. The two `spend` tools are ' +
       '`facebook_update_ad_object` (resuming delivery or raising a budget) and ' +
       '`facebook_update_ad_set_targeting` (who the budget is spent on), the only tools ' +
@@ -530,7 +531,7 @@ test('the surface splits 35 read / 33 write (23 reversible, 8 irreversible, 2 sp
  * to be worth keeping at all; `apply`/`plan_id` are the preview-versus-performed
  * distinction, which is the single most valuable thing in the line; `action`/
  * `status`/`level`/`edge`/`filter`/`order`/`type`/`video_state`/`media_type`/`published`/
- * `hidden`/`is_hidden`/`is_pinned`/`force_async`/`allow_repeat`/`deep_copy`/`profanity_filter` are closed enums or booleans
+ * `hidden`/`is_hidden`/`is_pinned`/`force_async`/`allow_repeat`/`deep_copy`/`objective`/`profanity_filter` are closed enums or booleans
  * the author declared; `since`/`until`/`date_preset`/`scheduled_publish_time`
  * are timestamps and windows.
  *
@@ -562,8 +563,10 @@ const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
   'level',
   'media_type',
   'object_id',
+  'objective',
   'order',
   'overwrite',
+  'page_id',
   'plan_id',
   'post_id',
   'posts',

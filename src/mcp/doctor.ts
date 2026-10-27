@@ -89,7 +89,8 @@ export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>
     'pages_read_engagement',
     'pages_read_user_content',
   ],
-  ads: ['ads_read', 'ads_management'],
+  // pages_read_engagement is facebook_boost_post's read of the post it promotes.
+  ads: ['ads_read', 'ads_management', 'pages_read_engagement'],
   page_admin: ['pages_manage_metadata', 'pages_read_engagement'],
 };
 
@@ -209,6 +210,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_get_ad_set_targeting: ['ads_read'],
   facebook_update_ad_set_targeting: ['ads_management'],
   facebook_duplicate_ad_object: ['ads_management'],
+  facebook_boost_post: ['ads_management', 'pages_read_engagement'],
 
   // page_admin (organic F8): the profile POST, plus its snapshot read.
   facebook_update_page_profile: ['pages_manage_metadata', 'pages_read_engagement'],

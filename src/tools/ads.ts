@@ -1,9 +1,10 @@
 // The `ads` tool package (tasks V09 read / V10 control) — Marketing API access,
 // deliberately rescoped for 1.1 to READ plus status/budget CONTROL (doc 06,
-// A12), with single-object archive/delete added in 2.0 (v2 ads §3). The ad
-// create-chain is out of scope: the only new objects come from copying one the
-// operator already created in Ads Manager, always PAUSED and only when the
-// campaign is capped within the configured maximums (v2 ads §7).
+// A12), with single-object archive/delete added in 2.0 (v2 ads §3). New objects
+// come only from copying one the operator already created in Ads Manager
+// (v2 ads §7) or from the narrow boost chain for one Page post (v2 ads §1,
+// `./ads-create.ts`): always PAUSED and only when the campaign is capped within
+// the configured maximums. A general ad create-chain stays out of scope.
 //
 //   * facebook_list_campaigns / _adsets / _ads — one cursor page of objects under
 //     an ad account, at the level the tool name names.
@@ -22,6 +23,8 @@
 //   * facebook_get_ad_set_targeting / facebook_update_ad_set_targeting — read
 //     an ad set's audience; edit only its countries and age range.
 //   * facebook_duplicate_ad_object — copy one object into a PAUSED copy.
+//   * facebook_boost_post          — boost one Page post as a PAUSED campaign,
+//     ad set, creative and ad, rolled back if a step fails.
 //
 // Division of labour with `../api/ads-read.js` and `../api/ads-control.js`
 // follows the layer rule (core ← api ← mcp ← tools). The api modules own the
@@ -52,7 +55,7 @@
 
 import { z } from 'zod';
 
-import { GraphApiError, classifyGraphError, isProvablyNotSent } from '../core/index.js';
+import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type {
   PackageSpec,
   ToolAnnotations,
@@ -156,6 +159,13 @@ import {
   planIdArg,
   shapeFor,
 } from './shared.js';
+import {
+  accountForWrite,
+  adAccountIdArg,
+  classifyUpdateFailure,
+  signalOf,
+} from './ads-shared.js';
+import { boostPostTool } from './ads-create.js';
 
 // ---------------------------------------------------------------------------
 // 1. Annotation quadruples (doc 06, one line per tool)
@@ -209,15 +219,6 @@ const COPY_ANNOTATIONS: ToolAnnotations = {
 // ---------------------------------------------------------------------------
 // 2. Input fields
 // ---------------------------------------------------------------------------
-
-const adAccountIdArg = z
-  .string()
-  .trim()
-  .min(1)
-  .optional()
-  .describe(
-    'Ad account to read, as "act_1234567890" or the bare digits. Omitted ⇒ the account configured in FB_AD_ACCOUNT_ID. A Page id or a Business id will not work here.',
-  );
 
 /**
  * Object ids are interpolated into `/{objectId}` and `/{objectId}/insights`, so
@@ -438,11 +439,6 @@ interface ListAdInput {
 // 4. Handlers
 // ---------------------------------------------------------------------------
 
-/** `signal` spread, present only when the call carries an abort seam. */
-function signalOf(ctx: ToolContext): { signal?: AbortSignal } {
-  return ctx.signal !== undefined ? { signal: ctx.signal } : {};
-}
-
 /**
  * Tell the write gate whether a resolved `POST /{object-id}` actually changed
  * the ads object (`WriteAction.classifyResult`). `applyAdObjectUpdate` RETURNS
@@ -454,29 +450,6 @@ function signalOf(ctx: ToolContext): { signal?: AbortSignal } {
  */
 function adUpdateVerdict(outcome: AdUpdateOutcome): WriteResultVerdict {
   return outcome.success ? APPLIED_VERDICT : REFUSED_VERDICT;
-}
-
-/**
- * Journal classification for an update whose `perform` REJECTED (C2 /
- * CC-LIFE-2), the same rule `moderation.ts` applies to its writes. A received
- * Graph error envelope proves Facebook processed the POST and refused it, so
- * nothing landed (`failed`). An `ambiguous` error (the answer was lost after
- * the request went out), a 5xx or status-0 fault, or anything that is not a
- * Graph error at all (an abort, a transport fault) leaves the outcome UNKNOWN:
- * the resume or budget raise may be live and spending, so the honest entry is
- * `attempted`. Without this hook the gate journals every rejection `failed`,
- * telling the operator reconciling spend that nothing moved. An abort whose
- * signal had already fired before the POST was issued is the exception, and
- * the handler (which alone can see that moment) journals it `failed`.
- */
-function classifyUpdateFailure(err: unknown): 'attempted' | 'failed' {
-  if (!(err instanceof GraphApiError)) return 'attempted';
-  if (err.action?.category === 'ambiguous') return 'attempted';
-  // A connect-phase fault (DNS, ECONNREFUSED) provably put no byte of the POST
-  // on the wire — the http layer retries it for exactly that reason — so the
-  // write cannot have landed and "may be live" would be false.
-  if (err.httpStatus === 0 && isProvablyNotSent(err.cause)) return 'failed';
-  return err.httpStatus === 0 || err.httpStatus >= 500 ? 'attempted' : 'failed';
 }
 
 /**
@@ -559,30 +532,6 @@ function divergenceState(record: AdRecord): Record<string, unknown> {
     lifetime_budget_minor: record.lifetime_budget_minor ?? null,
     spend_cap_minor: record.spend_cap_minor ?? null,
   };
-}
-
-/**
- * Read the ad account behind a write, when one is known: it carries the currency
- * every `*_minor` value is denominated in, and its health decides whether the
- * write is attempted at all (CC-ADS-6). An unconfigured account is NOT an error
- * here — the object id alone is enough to write; only the currency echo is lost.
- */
-async function accountForWrite(
-  ctx: ToolContext,
-  explicit: string | undefined,
-  intent: AdWriteIntent,
-): Promise<AdAccountInfo | undefined> {
-  const chosen = explicit ?? ctx.settings.adAccountId;
-  if (chosen === undefined || chosen.trim() === '') return undefined;
-  const info = await readAdAccount(ctx.fbRequest, {
-    accountId: normalizeAdAccountId(chosen),
-    ...signalOf(ctx),
-  });
-  // Refuse before the wire when the account cannot serve. Throws for a blocked
-  // account in DRY RUN too, which is the point: "would this work?" is answered
-  // honestly rather than with a preview that could never be applied.
-  assertAdAccountUsable(info, intent);
-  return info;
 }
 
 /**
@@ -1252,7 +1201,7 @@ const duplicateAdObjectTool = defineTool({
 // ---------------------------------------------------------------------------
 
 /**
- * Build the `ads` package: eight read tools and six write tools. OFF by default
+ * Build the `ads` package: eight read tools and seven write tools. OFF by default
  * (doc 06 — `ads` is excluded from the `core` profile and reached through the
  * `ads`/`all` profiles or an explicit `FB_TOOL_PACKAGES`), because a server that
  * can move money should be opted into rather than out of.
@@ -1724,8 +1673,8 @@ export function createAdsPackage(): PackageSpec {
       'Marketing API access: campaign / ad-set / ad listings with delivery truth, ' +
       'single-object reads, placement previews, insights with async report runs, plan-gated ' +
       'status, budget and campaign spend-cap control, single-object archive/delete, ad image ' +
-      'uploads, ad-set targeting reads with a narrow countries/ages edit, and paused copies of ' +
-      'campaigns, ad sets and ads. Off by default.',
+      'uploads, ad-set targeting reads with a narrow countries/ages edit, paused copies of ' +
+      'campaigns, ad sets and ads, and paused boosts of Page posts. Off by default.',
     tools: [
       listCampaigns,
       listAdsets,
@@ -1741,6 +1690,7 @@ export function createAdsPackage(): PackageSpec {
       getAdSetTargetingTool,
       updateAdSetTargetingTool,
       duplicateAdObjectTool,
+      boostPostTool,
     ],
     enabledByDefault: false,
     // `writeModeDefault: 'plan'` is only the default for a server that did not
