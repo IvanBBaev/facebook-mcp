@@ -1328,3 +1328,53 @@ test('a rotation lock that cannot be released is reported, and the rotation stil
     await realRm(dir, { recursive: true, force: true });
   }
 });
+
+test('history reads the rotated generation then the live file, skipping torn lines', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    const journalPath = path.join(dir, 'journal.ndjson');
+    const older = JSON.stringify({ ...entry({ summary: 'older' }), timestamp: 1 });
+    await writeFile(rotatedJournalPath(journalPath), `${older}\n{"tool":`, 'utf8');
+    const clock = createFakeClock(5);
+    const journal = createJournal({ clock, redactor: createFakeRedactor(), journalPath });
+    await journal.append(entry({ summary: 'newer', metadata: { commentId: '42' } }));
+
+    const history = await journal.history?.();
+    assert.ok(history !== undefined && history !== 'unreadable', 'expected entries');
+    assert.deepEqual(
+      history.map((e) => [e.summary, e.timestamp]),
+      [
+        ['older', 1],
+        ['newer', 5],
+      ],
+    );
+    assert.equal(history[1]?.metadata?.commentId, '42');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('history of a journal never written is empty, and an unreadable one says so', async () => {
+  const dir = await tmpJournalDir();
+  try {
+    const clock = createFakeClock(1);
+    const missing = createJournal({
+      clock,
+      redactor: createFakeRedactor(),
+      journalPath: path.join(dir, 'none.ndjson'),
+    });
+    assert.deepEqual(await missing.history?.(), []);
+
+    // A directory where the file should be: reading it fails with EISDIR.
+    const blocked = path.join(dir, 'blocked.ndjson');
+    await mkdir(blocked);
+    const unreadable = createJournal({
+      clock,
+      redactor: createFakeRedactor(),
+      journalPath: blocked,
+    });
+    assert.equal(await unreadable.history?.(), 'unreadable');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

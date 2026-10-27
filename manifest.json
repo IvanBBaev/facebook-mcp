@@ -191,7 +191,7 @@
     },
     {
       "name": "facebook_private_reply",
-      "description": "Send a private message to the author of a comment."
+      "description": "Send a private message to the author of a comment, or of a visitor post on the Page (post_id)."
     },
     {
       "name": "facebook_block_user",

@@ -39,6 +39,12 @@ import type {
   PageRequest,
   ParamValue,
 } from '../core/index.js';
+import {
+  attachmentSourceOf,
+  explainAttachmentFailure,
+  messageBody,
+  type OutboundContent,
+} from './messaging.js';
 import { fetchPage, type EdgeRequest } from './shared.js';
 
 // ---------------------------------------------------------------------------
@@ -1104,7 +1110,7 @@ async function commentStillThere(
 // 8. Private reply — one shot, 7-day window (CC-MOD-2)
 // ---------------------------------------------------------------------------
 
-/** Whether the 7-day private-reply window is still open for a comment. */
+/** Whether the 7-day private-reply window is still open for a comment or post. */
 export type PrivateReplyWindow =
   | { readonly open: true; readonly ageMs: number; readonly closesAtMs: number }
   | {
@@ -1115,8 +1121,8 @@ export type PrivateReplyWindow =
     };
 
 /**
- * Evaluate the 7-day window from the comment's `created_time` against the
- * injected clock. An absent or unparseable timestamp fails CLOSED: refusing is
+ * Evaluate the 7-day window from the comment's or visitor post's `created_time`
+ * against the injected clock. An absent or unparseable timestamp fails CLOSED: refusing is
  * recoverable, gambling the single irreversible attempt is not.
  */
 export function privateReplyWindow(
@@ -1163,24 +1169,53 @@ export function classifyPrivateReplyFailure(
   return undefined;
 }
 
-const REFUSAL_TEXT: Readonly<Record<PrivateReplyRefusal, string>> = {
-  exhausted:
-    'the single private reply allowed for this comment has already been used. ' +
-    'Facebook permits exactly ONE private reply per comment and there is no way to ' +
-    'send a second one, so this can never succeed — do NOT retry. Reply publicly ' +
-    'with facebook_reply_to_comment instead, or continue the existing thread with ' +
-    'the messages package.',
-  window_closed:
-    'the 7-day private-reply window for this comment has closed. A private reply ' +
-    'is only possible within 7 days of the comment, so this can never succeed — do ' +
-    'NOT retry. Reply publicly with facebook_reply_to_comment, or wait for the user ' +
-    'to message the Page and answer inside the 24-hour messaging window.',
-  unknown_age:
-    "the comment's creation time could not be read, so the 7-day private-reply " +
-    'window cannot be verified. The single private reply is not spent on a guess. ' +
-    'Re-read the comment with facebook_get_comment and retry only once its ' +
-    'created time is known.',
-};
+/**
+ * Who a private reply goes to: the author of a comment, or the visitor who wrote
+ * a post on the Page. Exactly one id; Graph puts it in `recipient`.
+ */
+export type PrivateReplyRecipient =
+  { readonly commentId: string } | { readonly postId: string };
+
+/** `comment c1` / `visitor post p_1` — the target as refusals name it. */
+export function privateReplyTargetLabel(recipient: PrivateReplyRecipient): string {
+  return 'commentId' in recipient
+    ? `comment ${recipient.commentId}`
+    : `visitor post ${recipient.postId}`;
+}
+
+function refusalText(
+  refusal: PrivateReplyRefusal,
+  recipient: PrivateReplyRecipient,
+): string {
+  const kind = 'commentId' in recipient ? 'comment' : 'post';
+  const reread =
+    'commentId' in recipient
+      ? 'Re-read the comment with facebook_get_comment'
+      : 'Re-read the post with facebook_get_post';
+  switch (refusal) {
+    case 'exhausted':
+      return (
+        `the single private reply allowed for this ${kind} has already been used. ` +
+        `Facebook permits exactly ONE private reply per ${kind} and there is no way to ` +
+        'send a second one, so this can never succeed — do NOT retry. Reply publicly ' +
+        'with facebook_reply_to_comment instead, or continue the existing thread with ' +
+        'the messages package.'
+      );
+    case 'window_closed':
+      return (
+        `the 7-day private-reply window for this ${kind} has closed. A private reply ` +
+        `is only possible within 7 days of the ${kind}, so this can never succeed — do ` +
+        'NOT retry. Reply publicly with facebook_reply_to_comment, or wait for the user ' +
+        'to message the Page and answer inside the 24-hour messaging window.'
+      );
+    case 'unknown_age':
+      return (
+        `the ${kind}'s creation time could not be read, so the 7-day private-reply ` +
+        'window cannot be verified. The single private reply is not spent on a guess. ' +
+        `${reread} and retry only once its created time is known.`
+      );
+  }
+}
 
 /**
  * Build the terminal, non-retryable refusal for a private reply. Carries the
@@ -1189,11 +1224,13 @@ const REFUSAL_TEXT: Readonly<Record<PrivateReplyRefusal, string>> = {
  */
 export function privateReplyRefusalError(
   refusal: PrivateReplyRefusal,
-  commentId: string,
+  recipient: PrivateReplyRecipient,
   cause?: unknown,
 ): GraphApiError {
   const graph = cause instanceof GraphApiError ? cause : undefined;
-  const text = `Private reply to comment ${commentId} refused: ${REFUSAL_TEXT[refusal]}`;
+  const text =
+    `Private reply to ${privateReplyTargetLabel(recipient)} refused: ` +
+    refusalText(refusal, recipient);
   return new GraphApiError(text, {
     code: graph?.code ?? 0,
     ...(graph?.subcode !== undefined ? { subcode: graph.subcode } : {}),
@@ -1208,6 +1245,44 @@ export function privateReplyRefusalError(
   });
 }
 
+/**
+ * What the private-reply pre-flight needs from a visitor post. Any field Graph
+ * leaves out stays absent: the window check fails closed on a missing time, and
+ * the other two only ever add a refusal or a warning when they are present.
+ */
+export interface PrivateReplyPostFacts {
+  readonly createdTime?: string;
+  readonly authorId?: string;
+  readonly canReplyPrivately?: boolean;
+}
+
+/**
+ * Read the facts the private-reply pre-flight checks on a post
+ * (`GET /{post}?fields=id,created_time,from{id},can_reply_privately`).
+ */
+export async function getPrivateReplyPostFacts(
+  fbRequest: FbRequestFn,
+  input: { readonly postId: string } & CommentScope,
+): Promise<PrivateReplyPostFacts> {
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'GET',
+    host: 'graph',
+    path: `/${input.postId}`,
+    params: { fields: 'id,created_time,from{id},can_reply_privately' },
+    ...scopeFields(input),
+  });
+  const raw = isRecord(res.data) ? res.data : {};
+  const from = isRecord(raw.from) ? raw.from : {};
+  return {
+    ...(typeof raw.created_time === 'string' ? { createdTime: raw.created_time } : {}),
+    ...(typeof from.id === 'string' && from.id !== '' ? { authorId: from.id } : {}),
+    ...(typeof raw.can_reply_privately === 'boolean'
+      ? { canReplyPrivately: raw.can_reply_privately }
+      : {}),
+  };
+}
+
 /** Receipt of a delivered private reply (ids only — no message content echoed). */
 export interface PrivateReplyReceipt {
   readonly messageId?: string;
@@ -1215,20 +1290,22 @@ export interface PrivateReplyReceipt {
 }
 
 /**
- * Send the one allowed private reply to a comment
- * (`POST /{page-id}/messages` with `recipient={"comment_id":…}`). Externally
- * visible with no unsend, so a lost response must NOT be retried blindly — the
- * client's ambiguous-write classification covers that; the two hard constraints
- * are mapped here to terminal, self-explaining refusals (CC-MOD-2).
+ * Send the one allowed private reply to a comment or a visitor post
+ * (`POST /{page-id}/messages` with `recipient={"comment_id":…}` or
+ * `{"post_id":…}`), carrying text or one attachment. Externally visible with no
+ * unsend, so a lost response must NOT be retried blindly — the client's
+ * ambiguous-write classification covers that; the two hard constraints are
+ * mapped here to terminal, self-explaining refusals (CC-MOD-2).
  */
 export async function sendPrivateReply(
   fbRequest: FbRequestFn,
   input: {
     readonly pageId: string;
-    readonly commentId: string;
-    readonly message: string;
+    readonly recipient: PrivateReplyRecipient;
+    readonly content: OutboundContent;
   } & CommentScope,
 ): Promise<PrivateReplyReceipt> {
+  const { recipient, content } = input;
   try {
     const res = await fbRequest<unknown>({
       protocol: 'json',
@@ -1236,8 +1313,11 @@ export async function sendPrivateReply(
       host: 'graph',
       path: `/${input.pageId}/messages`,
       body: {
-        recipient: { comment_id: input.commentId },
-        message: { text: input.message },
+        recipient:
+          'commentId' in recipient
+            ? { comment_id: recipient.commentId }
+            : { post_id: recipient.postId },
+        message: messageBody(content),
       },
       verifyTool: VERIFY_PRIVATE_REPLY_TOOL,
       ...scopeFields(input),
@@ -1256,7 +1336,14 @@ export async function sendPrivateReply(
   } catch (err) {
     const refusal = classifyPrivateReplyFailure(err);
     if (refusal !== undefined) {
-      throw privateReplyRefusalError(refusal, input.commentId, err);
+      throw privateReplyRefusalError(refusal, recipient, err);
+    }
+    if ('attachment' in content && err instanceof GraphApiError) {
+      const explained = explainAttachmentFailure(
+        err,
+        attachmentSourceOf(content.attachment),
+      );
+      if (explained !== undefined) throw explained;
     }
     throw err instanceof Error ? err : new Error(errorMessageOf(err), { cause: err });
   }

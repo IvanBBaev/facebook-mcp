@@ -519,7 +519,7 @@ test('the surface splits 32 read / 27 write (20 reversible, 6 irreversible, 1 sp
  * to be worth keeping at all; `apply`/`plan_id` are the preview-versus-performed
  * distinction, which is the single most valuable thing in the line; `action`/
  * `status`/`level`/`edge`/`filter`/`order`/`type`/`video_state`/`media_type`/`published`/
- * `hidden`/`is_hidden`/`is_pinned`/`force_async` are closed enums or booleans
+ * `hidden`/`is_hidden`/`is_pinned`/`force_async`/`allow_repeat` are closed enums or booleans
  * the author declared; `since`/`until`/`date_preset`/`scheduled_publish_time`
  * are timestamps and windows.
  *
@@ -532,6 +532,7 @@ const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
   'action',
   'ad_account_id',
   'album_id',
+  'allow_repeat',
   'apply',
   'comment_id',
   'conversation_id',

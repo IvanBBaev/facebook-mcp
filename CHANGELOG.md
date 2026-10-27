@@ -73,6 +73,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Private reply to a visitor post, with attachments (v2 messaging F4).**
+  `facebook_private_reply` takes `post_id` as an alternative to `comment_id`
+  (exactly one), for a post a visitor wrote on the Page; the same 7-day window
+  and own-author refusal apply. The reply can carry one `attachment` (`url` or
+  `attachment_id`, as in `facebook_send_message`) instead of text. Before
+  sending, the tool reads the local write journal: a private reply already
+  recorded as applied for the same target is refused, and one recorded as
+  attempted is refused until `allow_repeat: true` is passed after checking the
+  inbox. The journal only knows this install's sends; when it cannot be read,
+  the preview warns instead.
+
 - **Send attachments in Messenger (v2 messaging F3).**
   `facebook_send_message` takes an optional `attachment` — `type` (`image`,
   `audio`, `video` or `file`) and exactly one of `url` (a public HTTPS URL

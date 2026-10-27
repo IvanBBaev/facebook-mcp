@@ -777,6 +777,13 @@ export interface JournalEntry extends JournalEntryInput {
  */
 export interface Journal {
   append(entry: JournalEntryInput): Promise<JournalStatus>;
+  /**
+   * The entries still kept (the rotated generation, then the live file), oldest
+   * first, as recorded — so already redacted. Optional: a journal that cannot be
+   * read back leaves it out. Like `append` it NEVER throws: `'unreadable'` when
+   * the journal exists but cannot be read. Lines that do not parse are skipped.
+   */
+  history?(): Promise<readonly JournalEntry[] | 'unreadable'>;
 }
 
 /**

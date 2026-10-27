@@ -57,7 +57,6 @@ import type {
   ToolContext,
 } from '../core/index.js';
 import { GraphApiError } from '../core/index.js';
-import { MediaSourceError, resolveRemoteMediaUrl } from '../api/media-photos.js';
 import {
   ATTACHMENT_URL_NOTE,
   MESSAGE_TAG_GUIDANCE,
@@ -77,7 +76,6 @@ import {
   type ConversationRecord,
   type MessageRecord,
   type MessagingWindow,
-  type OutboundAttachment,
   type OutboundAttachmentType,
   type SendReactionResult,
 } from '../api/messaging.js';
@@ -89,6 +87,14 @@ import {
   taint,
 } from '../mcp/index.js';
 import { malformedRowsNote } from '../api/shared.js';
+import {
+  ATTACHMENT_FETCH_WARNING,
+  attachmentArg,
+  attachmentTypeArg,
+  attachmentUrlArg,
+  checkedAttachmentUrl,
+  outboundAttachmentOf,
+} from './message-attachment.js';
 import { createActivitySinceTool } from './activity.js';
 import {
   createSavedReplyTools,
@@ -152,8 +158,6 @@ const REACT_ANNOTATIONS: ToolAnnotations = {
 /** Messenger's plain-text limit; rejected client-side rather than at the wire. */
 const MAX_MESSAGE_CHARS = 2000;
 
-const ATTACHMENT_TYPES = ['image', 'audio', 'video', 'file'] as const;
-const MAX_ATTACHMENT_URL_CHARS = 2048;
 /** Meta keeps a reusable attachment id for about 90 days (V8); an estimate. */
 const ATTACHMENT_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -164,81 +168,9 @@ const UPLOAD_ANNOTATIONS: ToolAnnotations = {
   openWorldHint: true,
 };
 
-const attachmentTypeArg = z
-  .enum(ATTACHMENT_TYPES)
-  .describe('Attachment kind: image, audio, video or file (for example a PDF).');
-
-const attachmentUrlArg = z
-  .string()
-  .url()
-  .max(MAX_ATTACHMENT_URL_CHARS)
-  .describe(
-    'A public https:// URL Meta fetches itself (no credentials in it). Meta gives up ' +
-      'after about 10 s (75 s for video); images up to 8 MB, other files up to 25 MB.',
-  );
-
-const attachmentArg = z
-  .object({
-    type: attachmentTypeArg,
-    url: attachmentUrlArg.optional(),
-    attachment_id: z
-      .string()
-      .regex(/^\d{1,32}$/, 'attachment_id must be the numeric id an upload returned.')
-      .optional()
-      .describe(
-        'A reusable attachment id from facebook_upload_message_attachment (valid for ' +
-          'about 90 days, this Page only).',
-      ),
-  })
-  .strict()
-  .describe(
-    'ONE attachment instead of text: exactly one of url / attachment_id. A message ' +
-      'carries text or one attachment, never both.',
-  );
-
-const ATTACHMENT_SOURCE_MESSAGE =
-  'Nothing was sent: give the attachment exactly one of `url` or `attachment_id`.';
-
 const SEND_CONTENT_MESSAGE =
   'Nothing was sent: pass exactly one of `message`, `saved_reply_id` or `attachment` ' +
   '(a message carries text or one attachment, never both).';
-
-const ATTACHMENT_FETCH_WARNING =
-  'Meta fetches the attachment URL when the message is sent: it must be public and ' +
-  'answer within 10 s (75 s for video); images ≤ 8 MB, other files ≤ 25 MB.';
-
-/**
- * Validates an attachment URL locally (HTTPS, no embedded credentials) so a bad
- * one never reaches Meta. The URL itself is not echoed back: it can carry a
- * signed query string.
- */
-function checkedAttachmentUrl(raw: string, nothingDone: string): string {
-  try {
-    return resolveRemoteMediaUrl(raw);
-  } catch (err) {
-    if (err instanceof MediaSourceError) {
-      throw new Error(
-        `${nothingDone}: the attachment URL must be a public https:// URL without ` +
-          `credentials (${err.reason}).`,
-        { cause: err },
-      );
-    }
-    throw err;
-  }
-}
-
-/** The send's attachment, validated; `undefined` for a text send. */
-function outboundAttachmentOf(
-  arg: z.infer<typeof attachmentArg> | undefined,
-): OutboundAttachment | undefined {
-  if (arg === undefined) return undefined;
-  if ((arg.url === undefined) === (arg.attachment_id === undefined)) {
-    throw new Error(ATTACHMENT_SOURCE_MESSAGE);
-  }
-  return arg.url !== undefined
-    ? { type: arg.type, url: checkedAttachmentUrl(arg.url, 'Nothing was sent') }
-    : { type: arg.type, attachmentId: arg.attachment_id ?? '' };
-}
 
 /** Messages read to locate the last inbound one before a send (CC-MSG-1). */
 const WINDOW_PROBE_LIMIT = 10;

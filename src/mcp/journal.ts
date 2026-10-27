@@ -496,5 +496,63 @@ export function createJournal(deps: JournalDeps): Journal {
     }
   }
 
-  return { append };
+  /**
+   * Read one generation back. A missing file is an empty history; any other
+   * failure makes the whole read `'unreadable'`.
+   */
+  async function readGeneration(file: string): Promise<JournalEntry[] | 'unreadable'> {
+    let text: string;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch (err) {
+      return errnoOf(err) === 'ENOENT' ? [] : 'unreadable';
+    }
+    const entries: JournalEntry[] = [];
+    for (const line of text.split('\n')) {
+      const entry = parseEntryLine(line);
+      if (entry !== undefined) entries.push(entry);
+    }
+    return entries;
+  }
+
+  async function history(): Promise<readonly JournalEntry[] | 'unreadable'> {
+    try {
+      // Queued behind pending appends, so an entry whose append already
+      // resolved is always in the answer, and a rotation never runs mid-read.
+      return await enqueue(async () => {
+        const older = await readGeneration(rotatedJournalPath(filePath));
+        const live = await readGeneration(filePath);
+        return older === 'unreadable' || live === 'unreadable'
+          ? 'unreadable'
+          : [...older, ...live];
+      });
+    } catch {
+      return 'unreadable';
+    }
+  }
+
+  return { append, history };
+}
+
+/**
+ * One NDJSON line as a journal entry, or `undefined` for a blank, torn or
+ * foreign line: the reader is best-effort and must never throw over one record.
+ */
+function parseEntryLine(line: string): JournalEntry | undefined {
+  if (line.trim() === '') return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.tool === 'string' &&
+    typeof record.outcome === 'string' &&
+    typeof record.timestamp === 'number'
+    ? (record as unknown as JournalEntry)
+    : undefined;
 }

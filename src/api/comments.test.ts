@@ -1350,7 +1350,7 @@ test('classifyPrivateReplyFailure leaves an unrelated failure unlabeled', () => 
 });
 
 test('privateReplyRefusalError is terminal, names the comment and points at a fallback', () => {
-  const err = privateReplyRefusalError('exhausted', 'c1');
+  const err = privateReplyRefusalError('exhausted', { commentId: 'c1' });
 
   assert.equal(err.code, 0, 'a client-side refusal carries no Graph code');
   assert.equal(err.httpStatus, 400);
@@ -1368,7 +1368,7 @@ test('privateReplyRefusalError keeps the originating Graph code when it maps one
     httpStatus: 400,
   });
 
-  const err = privateReplyRefusalError('exhausted', 'c1', cause);
+  const err = privateReplyRefusalError('exhausted', { commentId: 'c1' }, cause);
 
   assert.equal(err.code, 10903);
   assert.equal(err.subcode, 2018278);
@@ -1382,8 +1382,8 @@ test('sendPrivateReply posts the comment_id recipient envelope to the page inbox
   const receipt = await sendPrivateReply(fb.fn, {
     ...SCOPE,
     pageId: 'p1',
-    commentId: 'c1',
-    message: 'sorry about that',
+    recipient: { commentId: 'c1' },
+    content: { text: 'sorry about that' },
   });
 
   const req = fb.lastRequest();
@@ -1407,8 +1407,8 @@ test('sendPrivateReply treats an empty 200 body as an id-less receipt', async ()
     await sendPrivateReply(fb.fn, {
       ...SCOPE,
       pageId: 'p1',
-      commentId: 'c1',
-      message: 'sorry about that',
+      recipient: { commentId: 'c1' },
+      content: { text: 'sorry about that' },
     }),
     {},
   );
@@ -1428,7 +1428,12 @@ test('sendPrivateReply maps a used-up one-shot to a terminal refusal', async () 
 
   await assert.rejects(
     () =>
-      sendPrivateReply(fb.fn, { ...SCOPE, pageId: 'p1', commentId: 'c1', message: 'hi' }),
+      sendPrivateReply(fb.fn, {
+        ...SCOPE,
+        pageId: 'p1',
+        recipient: { commentId: 'c1' },
+        content: { text: 'hi' },
+      }),
     (err: unknown) => {
       assert.ok(err instanceof GraphApiError);
       assert.equal(err.action?.retryable, false);
@@ -1445,7 +1450,12 @@ test('sendPrivateReply propagates an unrelated failure untouched', async () => {
 
   await assert.rejects(
     () =>
-      sendPrivateReply(fb.fn, { ...SCOPE, pageId: 'p1', commentId: 'c1', message: 'hi' }),
+      sendPrivateReply(fb.fn, {
+        ...SCOPE,
+        pageId: 'p1',
+        recipient: { commentId: 'c1' },
+        content: { text: 'hi' },
+      }),
     (err: unknown) => err === original,
   );
 });
@@ -1827,8 +1837,8 @@ test('sendPrivateReply keeps the text of a non-Error rejection and never throws 
         sendPrivateReply(fb.fn, {
           ...SCOPE,
           pageId: 'p1',
-          commentId: 'c1',
-          message: 'hi',
+          recipient: { commentId: 'c1' },
+          content: { text: 'hi' },
         }),
       (err: unknown) => err instanceof Error && err.message === expected,
     );
@@ -1908,8 +1918,8 @@ test('sendPrivateReply names facebook_list_conversations as the verify tool', as
   await sendPrivateReply(fb.fn, {
     ...SCOPE,
     pageId: 'p1',
-    commentId: 'c1',
-    message: 'sorry about that',
+    recipient: { commentId: 'c1' },
+    content: { text: 'sorry about that' },
   });
 
   // The one-shot private reply lands in the Page inbox as a conversation with the

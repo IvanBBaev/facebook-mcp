@@ -141,7 +141,7 @@ Each comment allows exactly one private reply, forever.
 6. Ask the helper whether the private reply arrived in their Messenger inbox.
 
 **Verify by:** the helper receives the private message, and the journal entry for
-`facebook_private_reply` records `commentId`, `messageChars` and `commentAgeMs` —
+`facebook_private_reply` records `commentId` (or `postId`), `messageChars` (or the attachment type and source) and `commentAgeMs` (or `postAgeMs`) —
 and **not** the message text.
 
 Also confirm the two client-side refusals, each on a comment you do not mind

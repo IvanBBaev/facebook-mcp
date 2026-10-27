@@ -400,6 +400,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'posts',
   'status',
   'include_replies',
+  'allow_repeat',
 ]);
 
 test('every moderation log allowlist names real, non-content arguments', () => {
@@ -420,7 +421,14 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     facebook_reply_and_hide_comment: ['profile', 'apply', 'plan_id', 'comment_id'],
     facebook_like_comment: ['profile', 'apply', 'plan_id', 'unlike'],
     facebook_delete_comment: ['profile', 'apply', 'plan_id'],
-    facebook_private_reply: ['profile', 'apply', 'plan_id', 'comment_id'],
+    facebook_private_reply: [
+      'profile',
+      'apply',
+      'plan_id',
+      'comment_id',
+      'post_id',
+      'allow_repeat',
+    ],
     facebook_block_user: ['profile', 'apply', 'plan_id'],
     facebook_unblock_user: ['profile', 'apply', 'plan_id'],
   };
@@ -2214,6 +2222,243 @@ test("a private reply to the Page's own comment is refused before anything is se
   );
   assert.ok(!anyCall(fb, 'POST'), 'nothing may be sent');
   assert.equal(journal.entries.length, 0);
+});
+
+// --- Private reply to a visitor post, attachments, one-shot journal (F4) ---
+
+const POST_REPLY_ARGS = { post_id: '123_456', message: 'Thanks for the post — DM us.' };
+
+/** The fields a private-reply pre-flight reads from a visitor post. */
+function rawVisitorPost(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: '123_456',
+    created_time: CREATED,
+    from: { id: 'u1' },
+    can_reply_privately: true,
+    ...overrides,
+  };
+}
+
+test('a private reply to a visitor post sends recipient.post_id and journals the post', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET' && r.path === '/123_456', fbOk(rawVisitorPost()));
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/messages`,
+    fbOk({ message_id: 'm_2', recipient_id: 'psid_2' }),
+  );
+  const pr = tool('facebook_private_reply');
+
+  const preview = body(await pr.handler(POST_REPLY_ARGS, ctx));
+  assert.equal(preview.status, 'preview');
+  assert.ok(str(preview.summary).includes('visitor post 123_456'), str(preview.summary));
+  const payload = body(
+    await pr.handler(
+      { ...POST_REPLY_ARGS, apply: true, plan_id: str(preview.planId) },
+      ctx,
+    ),
+  );
+
+  assert.equal(payload.status, 'applied');
+  const post = jsonCalls(fb).find((r) => r.method === 'POST');
+  assert.ok(post);
+  assert.deepEqual(bodyOf(post), {
+    recipient: { post_id: '123_456' },
+    message: { text: POST_REPLY_ARGS.message },
+  });
+  const metadata = obj(journal.entries[0]?.metadata);
+  assert.equal(metadata.postId, '123_456');
+  assert.equal(metadata.postAgeMs, 2 * DAY_MS);
+  assert.equal(metadata.commentId, undefined);
+});
+
+test('a private reply needs exactly one of comment_id or post_id', async () => {
+  const { fb, ctx } = makeHarness();
+  const pr = tool('facebook_private_reply');
+
+  await assert.rejects(
+    () => pr.handler({ ...PRIVATE_REPLY_ARGS, post_id: '123_456' }, ctx),
+    /exactly one of `comment_id` or `post_id`/,
+  );
+  await assert.rejects(
+    () => pr.handler({ message: 'hi' }, ctx),
+    /exactly one of `comment_id` or `post_id`/,
+  );
+  assert.equal(fb.calls.length, 0, 'refused before any Graph call');
+});
+
+test("a private reply to the Page's own post is refused before anything is sent", async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawVisitorPost({ from: { id: PAGE.pageId } })));
+
+  await assert.rejects(
+    () => tool('facebook_private_reply').handler(POST_REPLY_ARGS, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.ok(err.message.includes('post 123_456'), err.message);
+      assert.equal(err.action?.retryable, false);
+      return true;
+    },
+  );
+  assert.ok(!anyCall(fb, 'POST'));
+  assert.equal(journal.entries.length, 0);
+});
+
+test('a visitor post outside the 7-day window is refused with a post-specific message', async () => {
+  const { fb, ctx } = makeHarness({ nowMs: CREATED_MS + PRIVATE_REPLY_WINDOW_MS + 1 });
+  fb.on((r) => r.method === 'GET', fbOk(rawVisitorPost()));
+
+  await assert.rejects(
+    () => tool('facebook_private_reply').handler(POST_REPLY_ARGS, ctx),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.ok(err.message.includes('7-day private-reply window'), err.message);
+      assert.ok(err.message.includes('post'), err.message);
+      return true;
+    },
+  );
+  assert.ok(!anyCall(fb, 'POST'));
+});
+
+/** Record an earlier private reply in the journal, as a real send would. */
+async function seedPriorPrivateReply(
+  h: Harness,
+  outcome: 'applied' | 'attempted' | 'failed',
+  metadata: Record<string, unknown> = { commentId: 'c1' },
+): Promise<void> {
+  await h.journal.append({
+    tool: 'facebook_private_reply',
+    tier: 'irreversible',
+    pageId: PAGE.pageId,
+    outcome,
+    summary: 'earlier private reply',
+    metadata,
+  });
+}
+
+test('a private reply the journal records as delivered is refused, even with allow_repeat', async () => {
+  const h = makeHarness();
+  h.fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  await seedPriorPrivateReply(h, 'applied');
+
+  for (const args of [
+    PRIVATE_REPLY_ARGS,
+    { ...PRIVATE_REPLY_ARGS, allow_repeat: true },
+  ]) {
+    await assert.rejects(
+      () => tool('facebook_private_reply').handler(args, h.ctx),
+      (err: unknown) => {
+        assert.ok(err instanceof GraphApiError);
+        assert.ok(err.message.includes('already sent (or attempted)'), err.message);
+        assert.ok(err.message.includes('do NOT retry'), err.message);
+        assert.ok(err.message.includes(new Date(NOW_MS).toISOString()), err.message);
+        assert.equal(err.action?.nextTool, 'facebook_list_conversations');
+        return true;
+      },
+    );
+  }
+  assert.ok(!anyCall(h.fb, 'POST'));
+});
+
+test('an attempted private reply in the journal needs allow_repeat to try again', async () => {
+  const h = makeHarness();
+  h.fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  await seedPriorPrivateReply(h, 'attempted');
+  const pr = tool('facebook_private_reply');
+
+  await assert.rejects(() => pr.handler(PRIVATE_REPLY_ARGS, h.ctx), /allow_repeat:true/);
+
+  const preview = body(
+    await pr.handler({ ...PRIVATE_REPLY_ARGS, allow_repeat: true }, h.ctx),
+  );
+  assert.equal(preview.status, 'preview');
+  assert.ok(
+    arr(preview.warnings)
+      .map(str)
+      .some((w) => w.includes('allow_repeat')),
+  );
+});
+
+test('journal entries for other targets, other Pages or failed sends do not block', async () => {
+  const h = makeHarness();
+  h.fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  await seedPriorPrivateReply(h, 'applied', { commentId: 'c2' });
+  await seedPriorPrivateReply(h, 'applied', { postId: 'c1' });
+  await seedPriorPrivateReply(h, 'failed');
+  await h.journal.append({
+    tool: 'facebook_private_reply',
+    tier: 'irreversible',
+    pageId: SECOND_PAGE.pageId,
+    outcome: 'applied',
+    summary: 'other Page',
+    metadata: { commentId: 'c1' },
+  });
+
+  const preview = body(
+    await tool('facebook_private_reply').handler(PRIVATE_REPLY_ARGS, h.ctx),
+  );
+  assert.equal(preview.status, 'preview');
+});
+
+test('an unreadable journal warns instead of refusing', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  journal.failHistory();
+
+  const preview = body(
+    await tool('facebook_private_reply').handler(PRIVATE_REPLY_ARGS, ctx),
+  );
+  assert.equal(preview.status, 'preview');
+  assert.ok(
+    arr(preview.warnings)
+      .map(str)
+      .some((w) => w.includes('local journal could not be read')),
+  );
+});
+
+test('a private reply can carry one attachment instead of text', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET', fbOk(rawComment()));
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${PAGE.pageId}/messages`,
+    fbOk({ message_id: 'm_3', recipient_id: 'psid_1' }),
+  );
+  const pr = tool('facebook_private_reply');
+  const args = {
+    comment_id: 'c1',
+    attachment: { type: 'image', attachment_id: '1857777774821032' },
+  };
+
+  const preview = body(await pr.handler(args, ctx));
+  assert.ok(str(preview.summary).includes('a image attachment (by attachment id)'));
+  await pr.handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx);
+
+  const post = jsonCalls(fb).find((r) => r.method === 'POST');
+  assert.ok(post);
+  assert.deepEqual(bodyOf(post), {
+    recipient: { comment_id: 'c1' },
+    message: {
+      attachment: { type: 'image', payload: { attachment_id: '1857777774821032' } },
+    },
+  });
+  const metadata = obj(journal.entries[0]?.metadata);
+  assert.equal(metadata.attachmentType, 'image');
+  assert.equal(metadata.attachmentSource, 'id');
+  assert.equal(metadata.messageChars, undefined);
+});
+
+test('a private reply refuses an attachment combined with a message', async () => {
+  const { fb, ctx } = makeHarness();
+  await assert.rejects(
+    () =>
+      tool('facebook_private_reply').handler(
+        { ...PRIVATE_REPLY_ARGS, attachment: { type: 'image', attachment_id: '1' } },
+        ctx,
+      ),
+    /exactly one of/,
+  );
+  assert.equal(fb.calls.length, 0);
 });
 
 // ---------------------------------------------------------------------------

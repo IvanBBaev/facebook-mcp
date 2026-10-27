@@ -946,26 +946,11 @@ export function explainSendFailure(
       recipientUnavailableAction(),
     );
   }
-  if (
-    options.attachmentSource === 'id' &&
-    err.subcode === ATTACHMENT_ID_REJECTED_SUBCODE
-  ) {
-    return reclassify(
-      err,
-      `Message NOT sent — the attachment id was rejected. ${err.message}`,
-      attachmentIdAction(),
-    );
-  }
-  if (
-    options.attachmentSource === 'url' &&
-    err.subcode === ATTACHMENT_FETCH_FAILED_SUBCODE
-  ) {
-    return reclassify(
-      err,
-      `Message NOT sent — Meta could not fetch the attachment URL. ${err.message}`,
-      attachmentFetchAction(),
-    );
-  }
+  const attachmentFailure =
+    options.attachmentSource !== undefined
+      ? explainAttachmentFailure(err, options.attachmentSource)
+      : undefined;
+  if (attachmentFailure !== undefined) return attachmentFailure;
   if (options.replyTo === true && err.code === INVALID_PARAMETER_CODE) {
     return reclassify(
       err,
@@ -974,6 +959,32 @@ export function explainSendFailure(
     );
   }
   return err;
+}
+
+/**
+ * Explain a Graph refusal of a message's attachment: a rejected reusable id, or
+ * a URL Meta could not fetch. `undefined` when the error is about something
+ * else. Shared by the Messenger send and the private reply.
+ */
+export function explainAttachmentFailure(
+  err: GraphApiError,
+  source: AttachmentSource,
+): GraphApiError | undefined {
+  if (source === 'id' && err.subcode === ATTACHMENT_ID_REJECTED_SUBCODE) {
+    return reclassify(
+      err,
+      `Message NOT sent — the attachment id was rejected. ${err.message}`,
+      attachmentIdAction(),
+    );
+  }
+  if (source === 'url' && err.subcode === ATTACHMENT_FETCH_FAILED_SUBCODE) {
+    return reclassify(
+      err,
+      `Message NOT sent — Meta could not fetch the attachment URL. ${err.message}`,
+      attachmentFetchAction(),
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -1075,7 +1086,8 @@ export function attachmentSourceOf(attachment: OutboundAttachment): AttachmentSo
 export type OutboundContent =
   { readonly text: string } | { readonly attachment: OutboundAttachment };
 
-function messageBody(content: OutboundContent): Record<string, unknown> {
+/** The Send API `message` object for some content: `{text}` or `{attachment}`. */
+export function messageBody(content: OutboundContent): Record<string, unknown> {
   if ('text' in content) return { text: content.text };
   const { attachment } = content;
   return {
