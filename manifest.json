@@ -202,6 +202,14 @@
       "description": "Remove up to 50 PSIDs from the Page's blocked list, restoring their ability to comment and message."
     },
     {
+      "name": "facebook_get_moderation_settings",
+      "description": "Read the Page's moderation settings: the blocked-word list (comments containing one are hidden automatically), the profanity filter level (OFF, MEDIUM, STRONG) and…"
+    },
+    {
+      "name": "facebook_set_moderation_settings",
+      "description": "Change the Page's blocked words and profanity filter."
+    },
+    {
       "name": "facebook_list_conversations",
       "description": "List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet."
     },

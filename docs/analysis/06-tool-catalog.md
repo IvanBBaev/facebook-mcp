@@ -26,15 +26,15 @@ per-package write-mode defaults stated in each section below.
 > partial object is worse than none, per the defaults above), that `openWorldHint`
 > is `true` for every tool except the three local saved-reply tools, and that `readOnlyHint: true` and a write tier are mutually
 > exclusive — checked against the real read-only posture, which must retain exactly
-> the 33 read tools. The published counts (63 tools / 8 packages, 51 in the default
-> profile, 33 read / 30 write) are asserted there too. `src/metadata.test.ts`
+> the 34 read tools. The published counts (65 tools / 8 packages, 53 in the default
+> profile, 34 read / 31 write) are asserted there too. `src/metadata.test.ts`
 > remains the gate on tool _names_ agreeing across the registry, the README table
 > and `manifest.json`.
 
 ## Default surface (`core` profile)
 
 The default `FB_TOOL_PACKAGES` profile `core` expands to **core + posts + reader
-+ insights + moderation + messages** (51 tools as shipped) — the `ads` and
++ insights + moderation + messages** (53 tools as shipped) — the `ads` and
 `page_admin` packages are **excluded by default** and must be enabled explicitly (A7 / C5). The out-of-box surface
 therefore includes publishing, so a fresh install can post on day one; ads
 (spend) stays opt-in. The expansion is snapshot-tested (05 §6).
@@ -132,6 +132,8 @@ reversible verbs so client prompting stays proportionate. The irreversible
 | `facebook_private_reply` | false | true | false | true | One private reply per comment or visitor post (`comment_id` or `post_id`), 7-day window (both enforced client-side with clear errors). Text, a saved reply, or one attachment (`url` or `attachment_id`). A send the local journal already records (applied or attempted) is refused; `allow_repeat: true` overrides only an attempted one. Externally visible with no unsend → `destructiveHint:true`; a lost-response retry can double-send → `idempotentHint:false` (unknown-outcome errors instruct "do NOT retry — verify first"; see the error→action matrix in 05) |
 | `facebook_block_user` | false | false | true | true | `/blocked`, accepts PSIDs; reversible via `facebook_unblock_user`, and blocking an already-blocked user is a no-op → `idempotentHint:true` |
 | `facebook_unblock_user` | false | false | true | true | Inverse of `facebook_block_user`; idempotent |
+| `facebook_get_moderation_settings` | true | false | true | true | `GET /{page-id}/settings` (v2 moderation F12, V16): the blocked-word list (`PAGE_MODERATION_BLACKLIST`), the profanity filter (`OFF`/`MEDIUM`/`STRONG`) and `USERS_CAN_MESSAGE`. Blocked words are Page-authored, returned untainted; a missing list setting is a note |
+| `facebook_set_moderation_settings` | false | false | true | true | `POST /{page-id}/settings`, one `option` per setting (V16). `blocked_words` is an `add`/`remove` **delta** resolved case-insensitively against a fresh read, so the full list Graph needs is computed by the tool and nothing unnamed is dropped; words cannot contain commas. Plan-bound (`requirePlanId`) despite the package's apply default: the plan binds an order-insensitive fingerprint of the list plus the filter level, so a concurrent edit diverges instead of being clobbered. A request that changes nothing is refused. Blocked words are written first, then the filter; per-step outcomes, a declined step skips the rest, `applied` only when every step landed. Reversible by a second call with the before-values (kept in the result and the journal). NPE write scope is probe P-7 |
 
 ## Package `messages`
 
@@ -229,10 +231,10 @@ wrong `temporary_status` misleads every visitor at once.
   `facebook_get_conversation`). The joined `note` string is still emitted next
   to it but is **deprecated** and removed in 2.0.
 
-**Total as shipped: 51 model-facing tools in the default `core` profile** (core 4
-+ posts 9 + reader 7 + insights 5 + moderation 13 + messages 13), with the opt-in
-`ads` package adding 11 more and the opt-in `page_admin` package 1 — **63 across
-all 8 packages**, split 33 read / 30 write (22 reversible, 7 irreversible, 1 spend — the single `spend` tool is
+**Total as shipped: 53 model-facing tools in the default `core` profile** (core 4
++ posts 9 + reader 7 + insights 5 + moderation 15 + messages 13), with the opt-in
+`ads` package adding 11 more and the opt-in `page_admin` package 1 — **65 across
+all 8 packages**, split 34 read / 31 write (23 reversible, 7 irreversible, 1 spend — the single `spend` tool is
 `facebook_update_ad_object`). Deliberately smaller than the 100+
 tool ads servers; each tool wraps a real, verified capability rather than
 mirroring every Graph edge. This is **not** the full Pages surface: Story

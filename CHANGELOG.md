@@ -73,6 +73,15 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Page moderation settings (v2 moderation F12).**
+  `facebook_get_moderation_settings` reads the blocked-word list, the
+  profanity filter level and whether people can message the Page.
+  `facebook_set_moderation_settings` adds or removes blocked words (a delta
+  against the current list; the tool writes the full list) and sets the
+  profanity filter. It is plan-bound: a list edited by someone else after the
+  preview makes the plan diverge. Each setting is its own write, with
+  per-step outcomes. Whether the write works on a New Page Experience Page is
+  not yet confirmed live (probe P-7).
 - **Custom labels on Messenger conversations (v2 messaging F11).**
   `facebook_list_labels` lists the Page's labels, or the labels on one person.
   `facebook_create_label`, `facebook_assign_label` (`remove:true` takes a

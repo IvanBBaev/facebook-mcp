@@ -366,16 +366,16 @@ against what your token really has and prints a per-package usable / partial /
 blocked matrix. `business_management` is deliberately **not** in this list — it
 is a setup-only permission that should never ride on a runtime token.
 
-| Package      | Required Graph permissions                                                                             |
-| ------------ | ------------------------------------------------------------------------------------------------------ |
-| `core`       | `pages_show_list`<br>`pages_read_engagement`                                                           |
-| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_show_list`                              |
-| `posts`      | `pages_manage_posts`<br>`pages_read_engagement`                                                        |
-| `insights`   | `read_insights`<br>`pages_read_engagement`                                                             |
-| `moderation` | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_manage_engagement`<br>`pages_messaging` |
-| `messages`   | `pages_messaging`<br>`pages_manage_metadata`<br>`pages_read_engagement`<br>`pages_read_user_content`   |
-| `ads`        | `ads_read`<br>`ads_management`                                                                         |
-| `page_admin` | `pages_manage_metadata`<br>`pages_read_engagement`                                                     |
+| Package      | Required Graph permissions                                                                                                        |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `core`       | `pages_show_list`<br>`pages_read_engagement`                                                                                      |
+| `reader`     | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_show_list`                                                         |
+| `posts`      | `pages_manage_posts`<br>`pages_read_engagement`                                                                                   |
+| `insights`   | `read_insights`<br>`pages_read_engagement`                                                                                        |
+| `moderation` | `pages_read_engagement`<br>`pages_read_user_content`<br>`pages_manage_engagement`<br>`pages_messaging`<br>`pages_manage_metadata` |
+| `messages`   | `pages_messaging`<br>`pages_manage_metadata`<br>`pages_read_engagement`<br>`pages_read_user_content`                              |
+| `ads`        | `ads_read`<br>`ads_management`                                                                                                    |
+| `page_admin` | `pages_manage_metadata`<br>`pages_read_engagement`                                                                                |
 
 <details>
 <summary>Per-tool scopes (a tool marked <em>inherited</em> has no finer mapping and falls back to its package set)</summary>
@@ -420,6 +420,8 @@ is a setup-only permission that should never ride on a runtime token.
 | `facebook_private_reply`             | `pages_messaging`, `pages_read_engagement`, `pages_read_user_content` |
 | `facebook_block_user`                | `pages_manage_engagement`                                             |
 | `facebook_unblock_user`              | `pages_manage_engagement`                                             |
+| `facebook_get_moderation_settings`   | `pages_manage_metadata`                                               |
+| `facebook_set_moderation_settings`   | `pages_manage_metadata`                                               |
 | `facebook_list_conversations`        | `pages_messaging`, `pages_manage_metadata`                            |
 | `facebook_get_conversation`          | `pages_messaging`, `pages_manage_metadata`                            |
 | `facebook_send_message`              | `pages_messaging`                                                     |
@@ -472,7 +474,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `reader`     |       yes       | 7 read            |         —          | Read-only access to a Page's own content: posts (four edges), single posts, Reels, reaction totals, Stories, albums and photos.                                                                                                                                                                                                                   |
 | `posts`      |       yes       | 2 read + 7 write  |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos, Reels and stories (plan-first: every write previews before it applies).                                                                                                                                                                                                            |
 | `insights`   |       yes       | 5 read            |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                                                                                                                       |
-| `moderation` |       yes       | 3 read + 10 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                                                                                                                                 |
+| `moderation` |       yes       | 4 read + 11 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list and the Page moderation settings (blocked words, profanity filter).                                                                                              |
 | `messages`   |       yes       | 5 read + 8 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window, or react to a message; or ask what is new since the last look; keep local saved replies to send verbatim; tag threads with custom labels. Plan-first by default. |
 | `ads`        | **no** (opt-in) | 7 read + 4 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, single-object archive/delete, and ad image uploads. Off by default.                                                                |
 | `page_admin` | **no** (opt-in) | 0 read + 1 write  |       `plan`       | Edit the Page itself: its public profile (about, description, website, phone, hours, temporary status). Opt-in; needs pages_manage_metadata.                                                                                                                                                                                                      |
@@ -481,7 +483,7 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: tools -->
 
-**63 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**65 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
 | Package      | Tool                                 |      Tier      | Purpose                                                                                                                                                                    |
 | ------------ | ------------------------------------ | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -523,6 +525,8 @@ A name none of them recognize fails at startup rather than being ignored.
 | `moderation` | `facebook_private_reply`             | `irreversible` | Send a private message to the author of a comment, or of a visitor post on the Page (post_id).                                                                             |
 | `moderation` | `facebook_block_user`                |  `reversible`  | Add up to 50 PSIDs to the Page's blocked list: they can no longer comment on the Page or message it.                                                                       |
 | `moderation` | `facebook_unblock_user`              |  `reversible`  | Remove up to 50 PSIDs from the Page's blocked list, restoring their ability to comment and message.                                                                        |
+| `moderation` | `facebook_get_moderation_settings`   |     `read`     | Read the Page's moderation settings: the blocked-word list (comments containing one are hidden automatically), the profanity filter level (OFF, MEDIUM, STRONG) and…       |
+| `moderation` | `facebook_set_moderation_settings`   |  `reversible`  | Change the Page's blocked words and profanity filter.                                                                                                                      |
 | `messages`   | `facebook_list_conversations`        |     `read`     | List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet. |
 | `messages`   | `facebook_get_conversation`          |     `read`     | Read one Messenger thread newest-message-first: sender, timestamp, direction and body, plus typed placeholders for images, stickers, files and shared links (attachments…  |
 | `messages`   | `facebook_send_message`              |  `reversible`  | Send ONE PRIVATE Messenger message as the Page — text, or one attachment (image / audio / video / file by public HTTPS URL or reusable attachment_id) — as a reply inside… |

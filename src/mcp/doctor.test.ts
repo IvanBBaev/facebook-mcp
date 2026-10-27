@@ -2743,6 +2743,7 @@ test('a moderation row blocked only by pages_messaging names that permission as 
       'pages_read_engagement',
       'pages_read_user_content',
       'pages_manage_engagement',
+      'pages_manage_metadata',
     ],
   });
 

@@ -78,6 +78,8 @@ export const PACKAGE_PERMISSIONS: Partial<Record<PackageName, readonly string[]>
     'pages_read_user_content',
     'pages_manage_engagement',
     'pages_messaging',
+    // facebook_{get,set}_moderation_settings (`/{page-id}/settings`).
+    'pages_manage_metadata',
   ],
   // pages_read_engagement + pages_read_user_content are
   // facebook_get_activity_since's comment scan.
@@ -164,6 +166,10 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   // descriptions say so); unmapped, they inherited pages_read_user_content too.
   facebook_block_user: ['pages_manage_engagement'],
   facebook_unblock_user: ['pages_manage_engagement'],
+  // `/{page-id}/settings` (V16). The write scope on a New Page Experience Page is
+  // still probe P-7; pages_manage_metadata is the documented one.
+  facebook_get_moderation_settings: ['pages_manage_metadata'],
+  facebook_set_moderation_settings: ['pages_manage_metadata'],
 
   // messages (V07)
   facebook_list_conversations: ['pages_messaging', 'pages_manage_metadata'],

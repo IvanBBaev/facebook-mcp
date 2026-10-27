@@ -339,6 +339,8 @@ const TOOL_TABLE: readonly (readonly [
   ['facebook_private_reply', false, true, false, 'irreversible'],
   ['facebook_block_user', false, false, true, 'reversible'],
   ['facebook_unblock_user', false, false, true, 'reversible'],
+  ['facebook_get_moderation_settings', true, false, true, undefined],
+  ['facebook_set_moderation_settings', false, false, true, 'reversible'],
 ];
 
 test('createModerationPackage is enabled by default and defaults to apply mode', () => {
@@ -401,6 +403,8 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'status',
   'include_replies',
   'allow_repeat',
+  // A fixed enum (OFF / MEDIUM / STRONG); the blocked words themselves are not logged.
+  'profanity_filter',
 ]);
 
 test('every moderation log allowlist names real, non-content arguments', () => {
@@ -431,6 +435,8 @@ test('every moderation log allowlist names real, non-content arguments', () => {
     ],
     facebook_block_user: ['profile', 'apply', 'plan_id'],
     facebook_unblock_user: ['profile', 'apply', 'plan_id'],
+    facebook_get_moderation_settings: ['profile'],
+    facebook_set_moderation_settings: ['profile', 'apply', 'plan_id', 'profanity_filter'],
   };
 
   for (const spec of createModerationPackage().tools) {

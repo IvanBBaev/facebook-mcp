@@ -130,6 +130,7 @@ import {
   shapeFor,
   writeArgs,
 } from './shared.js';
+import { createModerationSettingsTools } from './moderation-settings.js';
 import { messageOrSavedReply, savedReplyIdArg } from './saved-replies.js';
 import {
   ATTACHMENT_FETCH_WARNING,
@@ -2420,7 +2421,7 @@ export function createModerationPackage(): PackageSpec {
     description:
       'Read and moderate comments on Page content (list, reply, comment on a post, ' +
       "edit the Page's own comments, hide, like, delete, private reply) and maintain the " +
-      'blocked-users list.',
+      'blocked-users list and the Page moderation settings (blocked words, profanity filter).',
     tools: [
       listCommentsTool,
       getCommentTool,
@@ -2435,6 +2436,7 @@ export function createModerationPackage(): PackageSpec {
       privateReplyTool,
       blockedTool(true),
       blockedTool(false),
+      ...createModerationSettingsTools(),
     ],
     enabledByDefault: true,
     // Reversible, high-volume day-to-day work must not stack a plan preview and a
