@@ -380,66 +380,67 @@ is a setup-only permission that should never ride on a runtime token.
 <details>
 <summary>Per-tool scopes (a tool marked <em>inherited</em> has no finer mapping and falls back to its package set)</summary>
 
-| Tool                              | Required Graph permissions                                            |
-| --------------------------------- | --------------------------------------------------------------------- |
-| `facebook_whoami`                 | _(none — the token itself is enough)_                                 |
-| `facebook_list_pages`             | `pages_show_list`                                                     |
-| `facebook_get_page`               | `pages_read_engagement`                                               |
-| `facebook_usage`                  | _(none — the token itself is enough)_                                 |
-| `facebook_list_posts`             | `pages_read_engagement`                                               |
-| `facebook_get_post`               | `pages_read_engagement`                                               |
-| `facebook_list_reels`             | `pages_read_engagement`                                               |
-| `facebook_get_reactions`          | `pages_read_engagement`                                               |
-| `facebook_list_stories`           | `pages_read_engagement`, `pages_show_list`                            |
-| `facebook_list_albums`            | `pages_read_engagement`                                               |
-| `facebook_list_photos`            | `pages_read_engagement`, `pages_show_list`                            |
-| `facebook_create_post`            | `pages_manage_posts`                                                  |
-| `facebook_create_photo_post`      | `pages_manage_posts`                                                  |
-| `facebook_create_video_post`      | `pages_manage_posts`                                                  |
-| `facebook_create_reel`            | `pages_manage_posts`                                                  |
-| `facebook_create_story`           | `pages_manage_posts`                                                  |
-| `facebook_update_post`            | `pages_manage_posts`                                                  |
-| `facebook_delete_post`            | `pages_manage_posts`                                                  |
-| `facebook_list_scheduled_posts`   | `pages_read_engagement`                                               |
-| `facebook_get_video_status`       | `pages_read_engagement`                                               |
-| `facebook_page_insights`          | `read_insights`                                                       |
-| `facebook_post_insights`          | `read_insights`                                                       |
-| `facebook_reel_insights`          | `read_insights`                                                       |
-| `facebook_get_page_report`        | `read_insights`, `pages_read_engagement`                              |
-| `facebook_get_posts_insights`     | `read_insights`, `pages_read_engagement`                              |
-| `facebook_list_comments`          | `pages_read_engagement`, `pages_read_user_content`                    |
-| `facebook_get_comment`            | `pages_read_engagement`, `pages_read_user_content`                    |
-| `facebook_triage_comments`        | `pages_read_engagement`, `pages_read_user_content`                    |
-| `facebook_reply_to_comment`       | `pages_manage_engagement`                                             |
-| `facebook_comment_on_post`        | `pages_manage_engagement`                                             |
-| `facebook_edit_comment`           | `pages_manage_engagement`                                             |
-| `facebook_hide_comment`           | `pages_manage_engagement`                                             |
-| `facebook_reply_and_hide_comment` | `pages_manage_engagement`, `pages_read_engagement`                    |
-| `facebook_like_comment`           | `pages_manage_engagement`                                             |
-| `facebook_delete_comment`         | `pages_manage_engagement`, `pages_read_user_content`                  |
-| `facebook_private_reply`          | `pages_messaging`, `pages_read_engagement`, `pages_read_user_content` |
-| `facebook_block_user`             | `pages_manage_engagement`                                             |
-| `facebook_unblock_user`           | `pages_manage_engagement`                                             |
-| `facebook_list_conversations`     | `pages_messaging`, `pages_manage_metadata`                            |
-| `facebook_get_conversation`       | `pages_messaging`, `pages_manage_metadata`                            |
-| `facebook_send_message`           | `pages_messaging`                                                     |
-| `facebook_react_to_message`       | `pages_messaging`                                                     |
-| `facebook_get_activity_since`     | `pages_read_engagement`, `pages_read_user_content`, `pages_messaging` |
-| `facebook_list_saved_replies`     | _(none — the token itself is enough)_                                 |
-| `facebook_save_reply`             | _(none — the token itself is enough)_                                 |
-| `facebook_delete_saved_reply`     | _(none — the token itself is enough)_                                 |
-| `facebook_list_campaigns`         | `ads_read`                                                            |
-| `facebook_list_adsets`            | `ads_read`                                                            |
-| `facebook_list_ads`               | `ads_read`                                                            |
-| `facebook_get_ad_object`          | `ads_read`                                                            |
-| `facebook_get_ad_preview`         | `ads_read`                                                            |
-| `facebook_ads_insights`           | `ads_read`                                                            |
-| `facebook_ads_report_status`      | `ads_read`                                                            |
-| `facebook_update_ad_object`       | `ads_management`                                                      |
-| `facebook_archive_ad_object`      | `ads_management`                                                      |
-| `facebook_delete_ad_object`       | `ads_management`                                                      |
-| `facebook_upload_ad_image`        | `ads_management`                                                      |
-| `facebook_update_page_profile`    | `pages_manage_metadata`, `pages_read_engagement`                      |
+| Tool                                 | Required Graph permissions                                            |
+| ------------------------------------ | --------------------------------------------------------------------- |
+| `facebook_whoami`                    | _(none — the token itself is enough)_                                 |
+| `facebook_list_pages`                | `pages_show_list`                                                     |
+| `facebook_get_page`                  | `pages_read_engagement`                                               |
+| `facebook_usage`                     | _(none — the token itself is enough)_                                 |
+| `facebook_list_posts`                | `pages_read_engagement`                                               |
+| `facebook_get_post`                  | `pages_read_engagement`                                               |
+| `facebook_list_reels`                | `pages_read_engagement`                                               |
+| `facebook_get_reactions`             | `pages_read_engagement`                                               |
+| `facebook_list_stories`              | `pages_read_engagement`, `pages_show_list`                            |
+| `facebook_list_albums`               | `pages_read_engagement`                                               |
+| `facebook_list_photos`               | `pages_read_engagement`, `pages_show_list`                            |
+| `facebook_create_post`               | `pages_manage_posts`                                                  |
+| `facebook_create_photo_post`         | `pages_manage_posts`                                                  |
+| `facebook_create_video_post`         | `pages_manage_posts`                                                  |
+| `facebook_create_reel`               | `pages_manage_posts`                                                  |
+| `facebook_create_story`              | `pages_manage_posts`                                                  |
+| `facebook_update_post`               | `pages_manage_posts`                                                  |
+| `facebook_delete_post`               | `pages_manage_posts`                                                  |
+| `facebook_list_scheduled_posts`      | `pages_read_engagement`                                               |
+| `facebook_get_video_status`          | `pages_read_engagement`                                               |
+| `facebook_page_insights`             | `read_insights`                                                       |
+| `facebook_post_insights`             | `read_insights`                                                       |
+| `facebook_reel_insights`             | `read_insights`                                                       |
+| `facebook_get_page_report`           | `read_insights`, `pages_read_engagement`                              |
+| `facebook_get_posts_insights`        | `read_insights`, `pages_read_engagement`                              |
+| `facebook_list_comments`             | `pages_read_engagement`, `pages_read_user_content`                    |
+| `facebook_get_comment`               | `pages_read_engagement`, `pages_read_user_content`                    |
+| `facebook_triage_comments`           | `pages_read_engagement`, `pages_read_user_content`                    |
+| `facebook_reply_to_comment`          | `pages_manage_engagement`                                             |
+| `facebook_comment_on_post`           | `pages_manage_engagement`                                             |
+| `facebook_edit_comment`              | `pages_manage_engagement`                                             |
+| `facebook_hide_comment`              | `pages_manage_engagement`                                             |
+| `facebook_reply_and_hide_comment`    | `pages_manage_engagement`, `pages_read_engagement`                    |
+| `facebook_like_comment`              | `pages_manage_engagement`                                             |
+| `facebook_delete_comment`            | `pages_manage_engagement`, `pages_read_user_content`                  |
+| `facebook_private_reply`             | `pages_messaging`, `pages_read_engagement`, `pages_read_user_content` |
+| `facebook_block_user`                | `pages_manage_engagement`                                             |
+| `facebook_unblock_user`              | `pages_manage_engagement`                                             |
+| `facebook_list_conversations`        | `pages_messaging`, `pages_manage_metadata`                            |
+| `facebook_get_conversation`          | `pages_messaging`, `pages_manage_metadata`                            |
+| `facebook_send_message`              | `pages_messaging`                                                     |
+| `facebook_react_to_message`          | `pages_messaging`                                                     |
+| `facebook_upload_message_attachment` | `pages_messaging`                                                     |
+| `facebook_get_activity_since`        | `pages_read_engagement`, `pages_read_user_content`, `pages_messaging` |
+| `facebook_list_saved_replies`        | _(none — the token itself is enough)_                                 |
+| `facebook_save_reply`                | _(none — the token itself is enough)_                                 |
+| `facebook_delete_saved_reply`        | _(none — the token itself is enough)_                                 |
+| `facebook_list_campaigns`            | `ads_read`                                                            |
+| `facebook_list_adsets`               | `ads_read`                                                            |
+| `facebook_list_ads`                  | `ads_read`                                                            |
+| `facebook_get_ad_object`             | `ads_read`                                                            |
+| `facebook_get_ad_preview`            | `ads_read`                                                            |
+| `facebook_ads_insights`              | `ads_read`                                                            |
+| `facebook_ads_report_status`         | `ads_read`                                                            |
+| `facebook_update_ad_object`          | `ads_management`                                                      |
+| `facebook_archive_ad_object`         | `ads_management`                                                      |
+| `facebook_delete_ad_object`          | `ads_management`                                                      |
+| `facebook_upload_ad_image`           | `ads_management`                                                      |
+| `facebook_update_page_profile`       | `pages_manage_metadata`, `pages_read_engagement`                      |
 
 </details>
 
@@ -468,7 +469,7 @@ A name none of them recognize fails at startup rather than being ignored.
 | `posts`      |       yes       | 2 read + 7 write  |       `plan`       | Publish, schedule, edit and delete Page posts, photos, videos, Reels and stories (plan-first: every write previews before it applies).                                                                                                                                                                            |
 | `insights`   |       yes       | 5 read            |         —          | Page, post and Reel insights: compact reshaped metric series, semantics-aware summaries, a one-call Page report, a posts comparison table and post-2025 metric-rename guidance (read-only).                                                                                                                       |
 | `moderation` |       yes       | 3 read + 10 write |      `apply`       | Read and moderate comments on Page content (list, reply, comment on a post, edit the Page's own comments, hide, like, delete, private reply) and maintain the blocked-users list.                                                                                                                                 |
-| `messages`   |       yes       | 4 read + 4 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window, or react to a message; or ask what is new since the last look; keep local saved replies to send verbatim. Plan-first by default. |
+| `messages`   |       yes       | 4 read + 5 write  |       `plan`       | Messenger conversations for a Page: poll the inbox, read a thread (untrusted content wrapped, attachments as placeholders) and send one private reply inside the 24-hour window, or react to a message; or ask what is new since the last look; keep local saved replies to send verbatim. Plan-first by default. |
 | `ads`        | **no** (opt-in) | 7 read + 4 write  |       `plan`       | Marketing API access: campaign / ad-set / ad listings with delivery truth, single-object reads, placement previews, insights with async report runs, plan-gated status, budget and campaign spend-cap control, single-object archive/delete, and ad image uploads. Off by default.                                |
 | `page_admin` | **no** (opt-in) | 0 read + 1 write  |       `plan`       | Edit the Page itself: its public profile (about, description, website, phone, hours, temporary status). Opt-in; needs pages_manage_metadata.                                                                                                                                                                      |
 
@@ -476,68 +477,69 @@ A name none of them recognize fails at startup rather than being ignored.
 
 <!-- BEGIN GENERATED: tools -->
 
-**58 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
+**59 tools in 8 packages.** 6 packages are on by default; the rest are opt-in via `FB_TOOL_PACKAGES`. Tier `read` never mutates. `reversible` writes are gated by `FB_WRITE_MODE`; `irreversible` and `spend` additionally require a per-call `apply` plus the `plan_id` of a preview you just ran, and are never unlocked by an environment variable alone.
 
-| Package      | Tool                              |      Tier      | Purpose                                                                                                                                                                    |
-| ------------ | --------------------------------- | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `core`       | `facebook_whoami`                 |     `read`     | Report the identity behind the configured token (type, validity, granted permissions, expiry) plus the server, MCP SDK and pinned Graph API version.                       |
-| `core`       | `facebook_list_pages`             |     `read`     | List the Facebook Pages the operator administers (via /me/accounts): id, name, category, the granted tasks, and whether a Page token is available.                         |
-| `core`       | `facebook_get_page`               |     `read`     | Fetch metadata for one Page — name, category, follower/fan counts, publish state and new-Page-experience flag.                                                             |
-| `core`       | `facebook_usage`                  |     `read`     | Report the most recent Graph rate-limit signals (X-App-Usage, X-Business-Use-Case-Usage, x-fb-ads-insights-throttle) as usage percentages, so you can back off before…     |
-| `reader`     | `facebook_list_posts`             |     `read`     | List a Page's posts, one cursor page at a time.                                                                                                                            |
-| `reader`     | `facebook_get_post`               |     `read`     | Fetch ONE post by its composite id ("{page-id}_{post-id}" as returned by facebook_list_posts).                                                                             |
-| `reader`     | `facebook_list_reels`             |     `read`     | List a Page's Reels via the /video_reels edge — the ONLY place Reels are readable.                                                                                         |
-| `reader`     | `facebook_get_reactions`          |     `read`     | Read the reactions on one post: a `totals` map per reaction type (LIKE / LOVE / CARE / HAHA / WOW / SAD / ANGRY), the overall `total`, and the list of reacting users.     |
-| `reader`     | `facebook_list_stories`           |     `read`     | List a Page's Stories via the /stories edge, one cursor page at a time: each item has `postId`, `status` (PUBLISHED / ARCHIVED), `createdTime` (ISO 8601), `mediaType`…    |
-| `reader`     | `facebook_list_albums`            |     `read`     | List a Page's photo albums, one cursor page at a time: `id`, `name`, `description`, `type` (normal / profile / cover / …), photo `count`, `canUpload`, `coverPhotoId`…     |
-| `reader`     | `facebook_list_photos`            |     `read`     | List photos, one cursor page at a time: an album's photos when `album_id` (from facebook_list_albums) is given, otherwise a Page photo listing chosen by `type`.           |
-| `posts`      | `facebook_create_post`            |  `reversible`  | Create a Page post: plain text, a link, a multi-link card carousel, or a multi-photo carousel.                                                                             |
-| `posts`      | `facebook_create_photo_post`      |  `reversible`  | Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled, and optionally into one of the Page albums (album_id).                                   |
-| `posts`      | `facebook_create_video_post`      |  `reversible`  | Upload a video to a Page.                                                                                                                                                  |
-| `posts`      | `facebook_create_reel`            |  `reversible`  | Publish a Facebook Reel through the three-phase upload (start → transfer → finish) with an explicit video_state: PUBLISHED, DRAFT or SCHEDULED.                            |
-| `posts`      | `facebook_create_story`           | `irreversible` | Publish a photo or video story on the Page.                                                                                                                                |
-| `posts`      | `facebook_update_post`            |  `reversible`  | Edit a Page post the app itself created, or move it through the scheduled-post lifecycle.                                                                                  |
-| `posts`      | `facebook_delete_post`            | `irreversible` | Permanently delete a Page post the app itself created — including a scheduled one, which is the only way to cancel it.                                                     |
-| `posts`      | `facebook_list_scheduled_posts`   |     `read`     | List the Page posts that are queued to publish later, each with its publish time echoed in UTC and in Page-local time.                                                     |
-| `posts`      | `facebook_get_video_status`       |     `read`     | Poll where one video stands in Meta's pipeline: uploading, processing, ready or error.                                                                                     |
-| `insights`   | `facebook_page_insights`          |     `read`     | Read Graph insights for one Page in a compact flat shape: one row per metric per data point ({metric, date, value}, plus `breakdown` for by-action-type metrics) and one…  |
-| `insights`   | `facebook_post_insights`          |     `read`     | Read Graph insights for one published post (post_media_view, post_clicks, post_reactions_by_type_total, video metrics, ...) in the same compact flat shape as…             |
-| `insights`   | `facebook_reel_insights`          |     `read`     | Read Graph insights for one Reel from /{video-id}/video_insights — the edge Reel metrics actually live on, which facebook_post_insights cannot reach.                      |
-| `insights`   | `facebook_get_page_report`        |     `read`     | One-call Page performance report over a window (default last 28 days, [since, until) in Pacific Time) compared with the preceding window of equal length: followers…       |
-| `insights`   | `facebook_get_posts_insights`     |     `read`     | Lifetime insights for several posts in one call, as a compact table: one row per post with `values` (one scalar per metric) and unaggregated `breakdowns` (e.g. reactions… |
-| `moderation` | `facebook_list_comments`          |     `read`     | List the comments on a post, photo, video or another comment, newest-first by default.                                                                                     |
-| `moderation` | `facebook_get_comment`            |     `read`     | Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window).                                              |
-| `moderation` | `facebook_triage_comments`        |     `read`     | A moderation queue in one call: the comments on the Page's most recent published posts, newest first, filtered by `status` (default "unanswered" — no Page reply in the…   |
-| `moderation` | `facebook_reply_to_comment`       |  `reversible`  | Post a PUBLIC reply under a comment — visible to everyone who can see the thread.                                                                                          |
-| `moderation` | `facebook_comment_on_post`        |  `reversible`  | Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment with a link.                                                                                  |
-| `moderation` | `facebook_edit_comment`           |  `reversible`  | Replace the text of a comment the Page itself wrote — e.g. fix a typo in a reply.                                                                                          |
-| `moderation` | `facebook_hide_comment`           |  `reversible`  | Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores).                                                                               |
-| `moderation` | `facebook_reply_and_hide_comment` |  `reversible`  | Post a PUBLIC reply under a comment and then hide that comment, in one approved step — e.g. "We have sent you a DM" under spam or abuse.                                   |
-| `moderation` | `facebook_like_comment`           |  `reversible`  | Like up to 50 comments as the Page, or unlike them with `unlike:true`.                                                                                                     |
-| `moderation` | `facebook_delete_comment`         | `irreversible` | PERMANENTLY delete up to 50 comments.                                                                                                                                      |
-| `moderation` | `facebook_private_reply`          | `irreversible` | Send a private message to the author of a comment.                                                                                                                         |
-| `moderation` | `facebook_block_user`             |  `reversible`  | Add up to 50 PSIDs to the Page's blocked list: they can no longer comment on the Page or message it.                                                                       |
-| `moderation` | `facebook_unblock_user`           |  `reversible`  | Remove up to 50 PSIDs from the Page's blocked list, restoring their ability to comment and message.                                                                        |
-| `messages`   | `facebook_list_conversations`     |     `read`     | List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet. |
-| `messages`   | `facebook_get_conversation`       |     `read`     | Read one Messenger thread newest-message-first: sender, timestamp, direction and body, plus typed placeholders for images, stickers, files and shared links (attachments…  |
-| `messages`   | `facebook_send_message`           |  `reversible`  | Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE).                              |
-| `messages`   | `facebook_react_to_message`       |  `reversible`  | React to ONE Messenger message as the Page with a single emoji (for example "❤️" or "👍"), or remove the Page’s reaction with remove:true — an acknowledgement without a…  |
-| `messages`   | `facebook_get_activity_since`     |     `read`     | What is new on a Page since a point in time, in one call: new comments (and replies) on the most recent published posts, and Messenger conversations updated since then…   |
-| `messages`   | `facebook_list_saved_replies`     |     `read`     | List the Page's local saved replies: operator-approved reply templates kept on this machine (no Facebook call).                                                            |
-| `messages`   | `facebook_save_reply`             |  `reversible`  | Create or update a local saved reply (no Facebook call): a reply template the operator approves once and the agent then sends verbatim.                                    |
-| `messages`   | `facebook_delete_saved_reply`     |  `reversible`  | Delete one local saved reply (no Facebook call).                                                                                                                           |
-| `ads`        | `facebook_list_campaigns`         |     `read`     | List campaigns under one ad account, a cursor page at a time.                                                                                                              |
-| `ads`        | `facebook_list_adsets`            |     `read`     | List ad sets under one ad account, a cursor page at a time.                                                                                                                |
-| `ads`        | `facebook_list_ads`               |     `read`     | List individual ads under one ad account, a cursor page at a time.                                                                                                         |
-| `ads`        | `facebook_get_ad_object`          |     `read`     | Read one campaign, ad set or ad by id.                                                                                                                                     |
-| `ads`        | `facebook_get_ad_preview`         |     `read`     | Show how an existing ad, an existing ad creative, or a Page post used as an ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD).                  |
-| `ads`        | `facebook_ads_insights`           |     `read`     | Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad.                                                          |
-| `ads`        | `facebook_ads_report_status`      |     `read`     | Probe one async insights report run and, with fetch_results:true, read its rows once it has completed.                                                                     |
-| `ads`        | `facebook_update_ad_object`       |    `spend`     | Pause or resume an ads object, change its budget, or set a campaign spend cap.                                                                                             |
-| `ads`        | `facebook_archive_ad_object`      | `irreversible` | Archive one campaign, ad set or ad by id.                                                                                                                                  |
-| `ads`        | `facebook_delete_ad_object`       | `irreversible` | Delete one campaign, ad set or ad by id — permanently.                                                                                                                     |
-| `ads`        | `facebook_upload_ad_image`        |  `reversible`  | Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives…     |
-| `page_admin` | `facebook_update_page_profile`    |  `reversible`  | Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status.                                          |
+| Package      | Tool                                 |      Tier      | Purpose                                                                                                                                                                    |
+| ------------ | ------------------------------------ | :------------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`       | `facebook_whoami`                    |     `read`     | Report the identity behind the configured token (type, validity, granted permissions, expiry) plus the server, MCP SDK and pinned Graph API version.                       |
+| `core`       | `facebook_list_pages`                |     `read`     | List the Facebook Pages the operator administers (via /me/accounts): id, name, category, the granted tasks, and whether a Page token is available.                         |
+| `core`       | `facebook_get_page`                  |     `read`     | Fetch metadata for one Page — name, category, follower/fan counts, publish state and new-Page-experience flag.                                                             |
+| `core`       | `facebook_usage`                     |     `read`     | Report the most recent Graph rate-limit signals (X-App-Usage, X-Business-Use-Case-Usage, x-fb-ads-insights-throttle) as usage percentages, so you can back off before…     |
+| `reader`     | `facebook_list_posts`                |     `read`     | List a Page's posts, one cursor page at a time.                                                                                                                            |
+| `reader`     | `facebook_get_post`                  |     `read`     | Fetch ONE post by its composite id ("{page-id}_{post-id}" as returned by facebook_list_posts).                                                                             |
+| `reader`     | `facebook_list_reels`                |     `read`     | List a Page's Reels via the /video_reels edge — the ONLY place Reels are readable.                                                                                         |
+| `reader`     | `facebook_get_reactions`             |     `read`     | Read the reactions on one post: a `totals` map per reaction type (LIKE / LOVE / CARE / HAHA / WOW / SAD / ANGRY), the overall `total`, and the list of reacting users.     |
+| `reader`     | `facebook_list_stories`              |     `read`     | List a Page's Stories via the /stories edge, one cursor page at a time: each item has `postId`, `status` (PUBLISHED / ARCHIVED), `createdTime` (ISO 8601), `mediaType`…    |
+| `reader`     | `facebook_list_albums`               |     `read`     | List a Page's photo albums, one cursor page at a time: `id`, `name`, `description`, `type` (normal / profile / cover / …), photo `count`, `canUpload`, `coverPhotoId`…     |
+| `reader`     | `facebook_list_photos`               |     `read`     | List photos, one cursor page at a time: an album's photos when `album_id` (from facebook_list_albums) is given, otherwise a Page photo listing chosen by `type`.           |
+| `posts`      | `facebook_create_post`               |  `reversible`  | Create a Page post: plain text, a link, a multi-link card carousel, or a multi-photo carousel.                                                                             |
+| `posts`      | `facebook_create_photo_post`         |  `reversible`  | Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled, and optionally into one of the Page albums (album_id).                                   |
+| `posts`      | `facebook_create_video_post`         |  `reversible`  | Upload a video to a Page.                                                                                                                                                  |
+| `posts`      | `facebook_create_reel`               |  `reversible`  | Publish a Facebook Reel through the three-phase upload (start → transfer → finish) with an explicit video_state: PUBLISHED, DRAFT or SCHEDULED.                            |
+| `posts`      | `facebook_create_story`              | `irreversible` | Publish a photo or video story on the Page.                                                                                                                                |
+| `posts`      | `facebook_update_post`               |  `reversible`  | Edit a Page post the app itself created, or move it through the scheduled-post lifecycle.                                                                                  |
+| `posts`      | `facebook_delete_post`               | `irreversible` | Permanently delete a Page post the app itself created — including a scheduled one, which is the only way to cancel it.                                                     |
+| `posts`      | `facebook_list_scheduled_posts`      |     `read`     | List the Page posts that are queued to publish later, each with its publish time echoed in UTC and in Page-local time.                                                     |
+| `posts`      | `facebook_get_video_status`          |     `read`     | Poll where one video stands in Meta's pipeline: uploading, processing, ready or error.                                                                                     |
+| `insights`   | `facebook_page_insights`             |     `read`     | Read Graph insights for one Page in a compact flat shape: one row per metric per data point ({metric, date, value}, plus `breakdown` for by-action-type metrics) and one…  |
+| `insights`   | `facebook_post_insights`             |     `read`     | Read Graph insights for one published post (post_media_view, post_clicks, post_reactions_by_type_total, video metrics, ...) in the same compact flat shape as…             |
+| `insights`   | `facebook_reel_insights`             |     `read`     | Read Graph insights for one Reel from /{video-id}/video_insights — the edge Reel metrics actually live on, which facebook_post_insights cannot reach.                      |
+| `insights`   | `facebook_get_page_report`           |     `read`     | One-call Page performance report over a window (default last 28 days, [since, until) in Pacific Time) compared with the preceding window of equal length: followers…       |
+| `insights`   | `facebook_get_posts_insights`        |     `read`     | Lifetime insights for several posts in one call, as a compact table: one row per post with `values` (one scalar per metric) and unaggregated `breakdowns` (e.g. reactions… |
+| `moderation` | `facebook_list_comments`             |     `read`     | List the comments on a post, photo, video or another comment, newest-first by default.                                                                                     |
+| `moderation` | `facebook_get_comment`               |     `read`     | Read one comment by ID, optionally with its replies, and report whether a private reply is still possible (the 7-day window).                                              |
+| `moderation` | `facebook_triage_comments`           |     `read`     | A moderation queue in one call: the comments on the Page's most recent published posts, newest first, filtered by `status` (default "unanswered" — no Page reply in the…   |
+| `moderation` | `facebook_reply_to_comment`          |  `reversible`  | Post a PUBLIC reply under a comment — visible to everyone who can see the thread.                                                                                          |
+| `moderation` | `facebook_comment_on_post`           |  `reversible`  | Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment with a link.                                                                                  |
+| `moderation` | `facebook_edit_comment`              |  `reversible`  | Replace the text of a comment the Page itself wrote — e.g. fix a typo in a reply.                                                                                          |
+| `moderation` | `facebook_hide_comment`              |  `reversible`  | Hide or unhide up to 50 comments in one call (`hidden:true` hides, `hidden:false` restores).                                                                               |
+| `moderation` | `facebook_reply_and_hide_comment`    |  `reversible`  | Post a PUBLIC reply under a comment and then hide that comment, in one approved step — e.g. "We have sent you a DM" under spam or abuse.                                   |
+| `moderation` | `facebook_like_comment`              |  `reversible`  | Like up to 50 comments as the Page, or unlike them with `unlike:true`.                                                                                                     |
+| `moderation` | `facebook_delete_comment`            | `irreversible` | PERMANENTLY delete up to 50 comments.                                                                                                                                      |
+| `moderation` | `facebook_private_reply`             | `irreversible` | Send a private message to the author of a comment.                                                                                                                         |
+| `moderation` | `facebook_block_user`                |  `reversible`  | Add up to 50 PSIDs to the Page's blocked list: they can no longer comment on the Page or message it.                                                                       |
+| `moderation` | `facebook_unblock_user`              |  `reversible`  | Remove up to 50 PSIDs from the Page's blocked list, restoring their ability to comment and message.                                                                        |
+| `messages`   | `facebook_list_conversations`        |     `read`     | List Messenger conversations for a Page (platform=messenger only — never Instagram threads): id, updated_time, unread_count, message_count and the latest-message snippet. |
+| `messages`   | `facebook_get_conversation`          |     `read`     | Read one Messenger thread newest-message-first: sender, timestamp, direction and body, plus typed placeholders for images, stickers, files and shared links (attachments…  |
+| `messages`   | `facebook_send_message`              |  `reversible`  | Send ONE PRIVATE Messenger message as the Page — text, or one attachment (image / audio / video / file by public HTTPS URL or reusable attachment_id) — as a reply inside… |
+| `messages`   | `facebook_react_to_message`          |  `reversible`  | React to ONE Messenger message as the Page with a single emoji (for example "❤️" or "👍"), or remove the Page’s reaction with remove:true — an acknowledgement without a…  |
+| `messages`   | `facebook_upload_message_attachment` |  `reversible`  | Upload ONE file (image / audio / video / file) by public HTTPS URL to the Page’s Messenger attachment store and get a reusable attachment_id — valid for about 90 days…    |
+| `messages`   | `facebook_get_activity_since`        |     `read`     | What is new on a Page since a point in time, in one call: new comments (and replies) on the most recent published posts, and Messenger conversations updated since then…   |
+| `messages`   | `facebook_list_saved_replies`        |     `read`     | List the Page's local saved replies: operator-approved reply templates kept on this machine (no Facebook call).                                                            |
+| `messages`   | `facebook_save_reply`                |  `reversible`  | Create or update a local saved reply (no Facebook call): a reply template the operator approves once and the agent then sends verbatim.                                    |
+| `messages`   | `facebook_delete_saved_reply`        |  `reversible`  | Delete one local saved reply (no Facebook call).                                                                                                                           |
+| `ads`        | `facebook_list_campaigns`            |     `read`     | List campaigns under one ad account, a cursor page at a time.                                                                                                              |
+| `ads`        | `facebook_list_adsets`               |     `read`     | List ad sets under one ad account, a cursor page at a time.                                                                                                                |
+| `ads`        | `facebook_list_ads`                  |     `read`     | List individual ads under one ad account, a cursor page at a time.                                                                                                         |
+| `ads`        | `facebook_get_ad_object`             |     `read`     | Read one campaign, ad set or ad by id.                                                                                                                                     |
+| `ads`        | `facebook_get_ad_preview`            |     `read`     | Show how an existing ad, an existing ad creative, or a Page post used as an ad would render in one placement (`ad_format`, default MOBILE_FEED_STANDARD).                  |
+| `ads`        | `facebook_ads_insights`              |     `read`     | Read performance numbers (impressions, clicks, spend, reach, cpc, ctr) for an ad account, campaign, ad set or ad.                                                          |
+| `ads`        | `facebook_ads_report_status`         |     `read`     | Probe one async insights report run and, with fetch_results:true, read its rows once it has completed.                                                                     |
+| `ads`        | `facebook_update_ad_object`          |    `spend`     | Pause or resume an ads object, change its budget, or set a campaign spend cap.                                                                                             |
+| `ads`        | `facebook_archive_ad_object`         | `irreversible` | Archive one campaign, ad set or ad by id.                                                                                                                                  |
+| `ads`        | `facebook_delete_ad_object`          | `irreversible` | Delete one campaign, ad set or ad by id — permanently.                                                                                                                     |
+| `ads`        | `facebook_upload_ad_image`           |  `reversible`  | Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives…     |
+| `page_admin` | `facebook_update_page_profile`       |  `reversible`  | Change the Page's public business fields: about, description, website, phone, opening hours, is_always_open and temporary_status.                                          |
 
 <!-- END GENERATED -->
 

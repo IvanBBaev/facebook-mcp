@@ -359,11 +359,11 @@ test('message and saved_reply_id are exclusive, and one of them is required', as
         { conversation_id: CONVERSATION_ID, message: 'Hi', saved_reply_id: 'hours' },
         h.ctx,
       ),
-      /either `message` or `saved_reply_id`/,
+      /exactly one of `message`, `saved_reply_id` or `attachment`/,
     );
     await assert.rejects(
       call('facebook_send_message', { conversation_id: CONVERSATION_ID }, h.ctx),
-      /`message` or `saved_reply_id`/,
+      /`message`, `saved_reply_id` or `attachment`/,
     );
     await assert.rejects(
       call('facebook_private_reply', { comment_id: COMMENT_ID }, h.ctx),

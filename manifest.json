@@ -211,11 +211,15 @@
     },
     {
       "name": "facebook_send_message",
-      "description": "Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside the 24-hour standard messaging window (messaging_type=RESPONSE)."
+      "description": "Send ONE PRIVATE Messenger message as the Page — text, or one attachment (image / audio / video / file by public HTTPS URL or reusable attachment_id) — as a reply inside…"
     },
     {
       "name": "facebook_react_to_message",
       "description": "React to ONE Messenger message as the Page with a single emoji (for example \"❤️\" or \"👍\"), or remove the Page’s reaction with remove:true — an acknowledgement without a…"
+    },
+    {
+      "name": "facebook_upload_message_attachment",
+      "description": "Upload ONE file (image / audio / video / file) by public HTTPS URL to the Page’s Messenger attachment store and get a reusable attachment_id — valid for about 90 days…"
     },
     {
       "name": "facebook_get_activity_since",

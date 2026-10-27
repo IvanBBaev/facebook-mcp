@@ -806,6 +806,38 @@ function recipientUnavailableAction(): ErrorAction {
 /** Graph's generic invalid-parameter code, which an unknown reply_to mid returns. */
 const INVALID_PARAMETER_CODE = 100;
 
+/** Invalid, expired (90 days) or another Page's reusable attachment id (V9). */
+const ATTACHMENT_ID_REJECTED_SUBCODE = 2018074;
+
+/**
+ * Meta could not fetch an attachment URL. The subcode comes from the spec's
+ * reading of the Send API errors and is not yet confirmed live.
+ */
+const ATTACHMENT_FETCH_FAILED_SUBCODE = 2018047;
+
+function attachmentIdAction(): ErrorAction {
+  return {
+    category: 'validation',
+    retryable: false,
+    nextTool: 'facebook_upload_message_attachment',
+    operatorText:
+      'The attachment id is invalid, expired (ids last 90 days) or belongs to another ' +
+      'Page, so nothing was delivered. Upload the file again with ' +
+      'facebook_upload_message_attachment, or send it by URL.',
+  };
+}
+
+function attachmentFetchAction(): ErrorAction {
+  return {
+    category: 'validation',
+    retryable: false,
+    operatorText:
+      'Meta could not fetch the attachment URL, so nothing was delivered. The URL must ' +
+      'be public (no login), answer within 10 s (75 s for video) and stay within the ' +
+      'size limits (images 8 MB, other files 25 MB).',
+  };
+}
+
 function replyTargetAction(): ErrorAction {
   return {
     category: 'validation',
@@ -888,7 +920,11 @@ export function messagingWindowClosedError(window: MessagingWindow): GraphApiErr
  */
 export function explainSendFailure(
   err: unknown,
-  options: { readonly replyTo?: boolean } = {},
+  options: {
+    readonly replyTo?: boolean;
+    /** How the message's attachment was given, when it carries one. */
+    readonly attachmentSource?: AttachmentSource;
+  } = {},
 ): Error {
   if (!(err instanceof GraphApiError)) {
     return err instanceof Error
@@ -908,6 +944,26 @@ export function explainSendFailure(
       err,
       `Message NOT sent — the recipient is unavailable. ${err.message}`,
       recipientUnavailableAction(),
+    );
+  }
+  if (
+    options.attachmentSource === 'id' &&
+    err.subcode === ATTACHMENT_ID_REJECTED_SUBCODE
+  ) {
+    return reclassify(
+      err,
+      `Message NOT sent — the attachment id was rejected. ${err.message}`,
+      attachmentIdAction(),
+    );
+  }
+  if (
+    options.attachmentSource === 'url' &&
+    err.subcode === ATTACHMENT_FETCH_FAILED_SUBCODE
+  ) {
+    return reclassify(
+      err,
+      `Message NOT sent — Meta could not fetch the attachment URL. ${err.message}`,
+      attachmentFetchAction(),
     );
   }
   if (options.replyTo === true && err.code === INVALID_PARAMETER_CODE) {
@@ -1000,11 +1056,44 @@ export async function getConversationMessages(
   return mapPage(page, (raw) => shapeMessage(raw, input.pageId));
 }
 
+/** The kinds of file Messenger renders as an outbound attachment (V6). */
+export type OutboundAttachmentType = 'image' | 'audio' | 'video' | 'file';
+
+/** How an outbound attachment is given: a URL Meta fetches, or a reusable id. */
+export type AttachmentSource = 'url' | 'id';
+
+/** One outbound attachment: a public URL Meta fetches, or a reusable id (V6, V8). */
+export type OutboundAttachment =
+  | { readonly type: OutboundAttachmentType; readonly url: string }
+  | { readonly type: OutboundAttachmentType; readonly attachmentId: string };
+
+export function attachmentSourceOf(attachment: OutboundAttachment): AttachmentSource {
+  return 'url' in attachment ? 'url' : 'id';
+}
+
+/** What a message carries: text, or one attachment — never both (V7). */
+export type OutboundContent =
+  { readonly text: string } | { readonly attachment: OutboundAttachment };
+
+function messageBody(content: OutboundContent): Record<string, unknown> {
+  if ('text' in content) return { text: content.text };
+  const { attachment } = content;
+  return {
+    attachment: {
+      type: attachment.type,
+      payload:
+        'url' in attachment
+          ? { url: attachment.url, is_reusable: false }
+          : { attachment_id: attachment.attachmentId },
+    },
+  };
+}
+
 export interface SendMessageInput {
   readonly pageId: string;
   /** The recipient's page-scoped ID (PSID). */
   readonly recipientId: string;
-  readonly text: string;
+  readonly content: OutboundContent;
   /** The mid this message quotes (`reply_to`); same conversation only. */
   readonly replyToMessageId?: string;
   readonly token?: string;
@@ -1034,7 +1123,8 @@ function sendId(value: unknown): string | undefined {
 }
 
 /**
- * Send one plain text message as the Page (`messaging_type=RESPONSE`). There is
+ * Send one message as the Page (`messaging_type=RESPONSE`): plain text or one
+ * attachment. There is
  * no idempotency key on this endpoint, so a lost response means UNKNOWN delivery:
  * failures are re-thrown through {@link explainSendFailure} and callers must pair
  * this with {@link classifySendOutcome} instead of retrying (C2 / CC-MSG-2).
@@ -1050,7 +1140,7 @@ export async function sendMessage(
     path: `/${input.pageId}/messages`,
     body: {
       recipient: { id: input.recipientId },
-      message: { text: input.text },
+      message: messageBody(input.content),
       messaging_type: MESSAGING_TYPE_RESPONSE,
       ...(input.replyToMessageId !== undefined
         ? { reply_to: { mid: input.replyToMessageId } }
@@ -1074,7 +1164,12 @@ export async function sendMessage(
       ...(recipientId !== undefined ? { recipientId } : {}),
     };
   } catch (err) {
-    throw explainSendFailure(err, { replyTo: input.replyToMessageId !== undefined });
+    throw explainSendFailure(err, {
+      replyTo: input.replyToMessageId !== undefined,
+      ...('attachment' in input.content
+        ? { attachmentSource: attachmentSourceOf(input.content.attachment) }
+        : {}),
+    });
   }
 }
 
@@ -1177,4 +1272,68 @@ export function classifyReactionOutcome(
   requestedRecipientId: string,
 ): 'applied' | 'attempted' {
   return result.recipientId === requestedRecipientId ? 'applied' : 'attempted';
+}
+
+export interface UploadMessageAttachmentInput {
+  readonly pageId: string;
+  readonly type: OutboundAttachmentType;
+  /** A public https URL Meta fetches once and stores. */
+  readonly url: string;
+  readonly token?: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface UploadMessageAttachmentResult {
+  readonly attachmentId?: string;
+}
+
+interface RawUploadResponse {
+  readonly attachment_id?: unknown;
+}
+
+/**
+ * Upload a reusable Messenger attachment from a URL (V8): POST
+ * `/{page}/message_attachments` with `is_reusable: true`. Nothing is sent to
+ * anyone; the returned id is reusable by this Page for 90 days. A 2xx without
+ * an id leaves the outcome unknown, so the result simply omits it.
+ */
+export async function uploadMessageAttachment(
+  fbRequest: FbRequestFn,
+  input: UploadMessageAttachmentInput,
+): Promise<UploadMessageAttachmentResult> {
+  const req: JsonRequest = {
+    protocol: 'json',
+    method: 'POST',
+    host: 'graph',
+    path: `/${input.pageId}/message_attachments`,
+    body: {
+      message: {
+        attachment: {
+          type: input.type,
+          payload: { url: input.url, is_reusable: true },
+        },
+      },
+    },
+    pageId: input.pageId,
+    ...(input.token !== undefined ? { token: input.token } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
+  };
+  try {
+    const res = await fbRequest<RawUploadResponse>(req);
+    const ack: RawUploadResponse =
+      typeof res.data === 'object' && res.data !== null ? res.data : {};
+    const attachmentId =
+      sendId(ack.attachment_id) ??
+      (typeof ack.attachment_id === 'number' ? String(ack.attachment_id) : undefined);
+    return attachmentId !== undefined ? { attachmentId } : {};
+  } catch (err) {
+    if (err instanceof GraphApiError && err.subcode === ATTACHMENT_FETCH_FAILED_SUBCODE) {
+      throw reclassify(
+        err,
+        `Attachment NOT uploaded — Meta could not fetch the URL. ${err.message}`,
+        attachmentFetchAction(),
+      );
+    }
+    throw err;
+  }
 }

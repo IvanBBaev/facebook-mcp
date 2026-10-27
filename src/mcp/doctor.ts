@@ -171,6 +171,7 @@ export const TOOL_PERMISSIONS: Readonly<Record<string, readonly string[]>> = {
   facebook_send_message: ['pages_messaging'],
   // v2 F2: the same POST edge and thread probe as a send.
   facebook_react_to_message: ['pages_messaging'],
+  facebook_upload_message_attachment: ['pages_messaging'],
   // Comments on the recent posts plus the Messenger inbox.
   facebook_get_activity_since: [
     'pages_read_engagement',

@@ -73,6 +73,17 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **Send attachments in Messenger (v2 messaging F3).**
+  `facebook_send_message` takes an optional `attachment` — `type` (`image`,
+  `audio`, `video` or `file`) and exactly one of `url` (a public HTTPS URL
+  Meta fetches; credentials in the URL are refused locally) or
+  `attachment_id`. A message carries text or one attachment, never both. The
+  URL or id is bound to the plan but never written to the summary, journal or
+  log. New `facebook_upload_message_attachment` uploads one file by URL once
+  and returns a reusable `attachmentId` (this Page only, about 90 days) plus
+  an `expiresAtEstimate`, so the same file can go to many people. A rejected
+  attachment id (subcode 2018074) and a failed URL fetch are explained with
+  the next step. Uploading a local file is not supported yet.
 - **React to a Messenger message (v2 messaging F2).** New
   `facebook_react_to_message` puts an emoji reaction on a message in a
   conversation (`sender_action: react`), or removes the Page's reaction with

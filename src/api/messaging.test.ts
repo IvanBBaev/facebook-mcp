@@ -45,6 +45,7 @@ import {
   parseGraphTime,
   sendMessage,
   sendReaction,
+  uploadMessageAttachment,
   shapeConversation,
   shapeMessage,
   summariseAttachments,
@@ -609,7 +610,7 @@ test('sendMessage POSTs recipient, message and messaging_type=RESPONSE in the bo
   const result = await sendMessage(fb.fn, {
     pageId: PAGE_ID,
     recipientId: PSID,
-    text: 'Thanks for reaching out!',
+    content: { text: 'Thanks for reaching out!' },
     token: PAGE_TOKEN,
   });
 
@@ -632,7 +633,11 @@ test('sendMessage tolerates an acknowledgement without ids', async () => {
   fb.on((req) => req.method === 'POST', fbOk({}));
 
   assert.deepEqual(
-    await sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    await sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      content: { text: 'hi' },
+    }),
     {},
   );
 });
@@ -648,7 +653,11 @@ test('sendMessage ignores a message_id that is not a usable string', async () =>
   fb.on((req) => req.method === 'POST', fbOk({ message_id: null, recipient_id: 2000 }));
 
   assert.deepEqual(
-    await sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    await sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      content: { text: 'hi' },
+    }),
     {},
   );
 });
@@ -661,7 +670,11 @@ test('sendMessage treats an empty 200 body as an id-less acknowledgement', async
   fb.on((req) => req.method === 'POST', fbOk(undefined));
 
   assert.deepEqual(
-    await sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    await sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      content: { text: 'hi' },
+    }),
     {},
   );
 });
@@ -676,7 +689,7 @@ test('sendMessage rethrows a window failure with the tag guidance attached', asy
   );
 
   await assert.rejects(
-    sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, content: { text: 'hi' } }),
     (err: unknown) => {
       assert.ok(err instanceof GraphApiError);
       assert.match(err.message, /Message NOT sent/);
@@ -734,7 +747,7 @@ test('sendMessage names facebook_get_conversation as the verify tool on an ambig
   fb.on((req) => req.method === 'POST', fbErr(lost));
 
   await assert.rejects(
-    sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+    sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, content: { text: 'hi' } }),
     (err: unknown) => {
       assert.ok(err instanceof GraphApiError);
       assert.equal(err.action?.category, 'ambiguous');
@@ -1057,7 +1070,7 @@ test('sendMessage keeps the text of a non-Error rejection and never throws while
     const fb = createFakeFbRequest();
     fb.on((req) => req.method === 'POST', fbErr(rejection as Error));
     await assert.rejects(
-      sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, text: 'hi' }),
+      sendMessage(fb.fn, { pageId: PAGE_ID, recipientId: PSID, content: { text: 'hi' } }),
       (err: unknown) => err instanceof Error && err.message === expected,
     );
   }
@@ -1156,7 +1169,7 @@ test('sendMessage adds reply_to only when a reply target is given', async () => 
   await sendMessage(fb.fn, {
     pageId: PAGE_ID,
     recipientId: PSID,
-    text: 'Quoted answer',
+    content: { text: 'Quoted answer' },
     replyToMessageId: 'm_abc',
   });
 
@@ -1178,7 +1191,7 @@ test('a code-100 rejection of a reply names the reply target, and only for a rep
     sendMessage(fb.fn, {
       pageId: PAGE_ID,
       recipientId: PSID,
-      text: 'x',
+      content: { text: 'x' },
       replyToMessageId: 'm_gone',
     }),
     (err: unknown) => {
@@ -1339,4 +1352,152 @@ test('classifyReactionOutcome applies only an ack naming the requested recipient
   assert.equal(classifyReactionOutcome({ recipientId: PSID }, PSID), 'applied');
   assert.equal(classifyReactionOutcome({}, PSID), 'attempted');
   assert.equal(classifyReactionOutcome({ recipientId: '999' }, PSID), 'attempted');
+});
+
+// ---------------------------------------------------------------------------
+// v2 F3: outbound attachments
+// ---------------------------------------------------------------------------
+
+test('sendMessage sends a URL attachment as a non-reusable payload, without text', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.method === 'POST',
+    fbOk({ message_id: 'mid.3', recipient_id: PSID }),
+  );
+
+  await sendMessage(fb.fn, {
+    pageId: PAGE_ID,
+    recipientId: PSID,
+    content: { attachment: { type: 'file', url: 'https://cdn.example.com/menu.pdf' } },
+  });
+
+  assert.deepEqual(jsonOf(fb.lastRequest()).body, {
+    recipient: { id: PSID },
+    message: {
+      attachment: {
+        type: 'file',
+        payload: { url: 'https://cdn.example.com/menu.pdf', is_reusable: false },
+      },
+    },
+    messaging_type: MESSAGING_TYPE_RESPONSE,
+  });
+});
+
+test('sendMessage sends a reusable attachment by id', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbOk({ message_id: 'mid.4' }));
+
+  await sendMessage(fb.fn, {
+    pageId: PAGE_ID,
+    recipientId: PSID,
+    content: { attachment: { type: 'image', attachmentId: '1857777774821032' } },
+  });
+
+  assert.deepEqual(jsonOf(fb.lastRequest()).body, {
+    recipient: { id: PSID },
+    message: {
+      attachment: { type: 'image', payload: { attachment_id: '1857777774821032' } },
+    },
+    messaging_type: MESSAGING_TYPE_RESPONSE,
+  });
+});
+
+test('a 2018074 rejection of an attachment id says the id is invalid or expired', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.method === 'POST',
+    fbErr(graphError('(#100) Invalid attachment id', { code: 100, subcode: 2018074 })),
+  );
+
+  await assert.rejects(
+    sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      content: { attachment: { type: 'file', attachmentId: '123' } },
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof GraphApiError);
+      assert.match(err.message, /attachment id was rejected/);
+      assert.match(String(err.action?.operatorText), /expired \(ids last 90 days\)/);
+      assert.equal(err.action?.nextTool, 'facebook_upload_message_attachment');
+      assert.equal(classifySendOutcome(err), 'failed');
+      return true;
+    },
+  );
+});
+
+test('a URL fetch failure is explained only for a URL attachment', async () => {
+  const fetchFailed = (): GraphApiError =>
+    new GraphApiError('(#100) Failed to fetch', {
+      code: 100,
+      subcode: 2018047,
+      httpStatus: 400,
+    });
+  const fb = createFakeFbRequest();
+  fb.on((req) => req.method === 'POST', fbErr(fetchFailed()));
+
+  await assert.rejects(
+    sendMessage(fb.fn, {
+      pageId: PAGE_ID,
+      recipientId: PSID,
+      content: { attachment: { type: 'image', url: 'https://cdn.example.com/a.png' } },
+    }),
+    /could not fetch the attachment URL/,
+  );
+  assert.doesNotMatch(explainSendFailure(fetchFailed()).message, /attachment/);
+  assert.doesNotMatch(
+    explainSendFailure(fetchFailed(), { attachmentSource: 'id' }).message,
+    /fetch the attachment/,
+  );
+});
+
+test('uploadMessageAttachment posts a reusable URL payload and reads the id', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${PAGE_ID}/message_attachments`,
+    fbOk({ attachment_id: '1857777774821032' }),
+  );
+
+  const result = await uploadMessageAttachment(fb.fn, {
+    pageId: PAGE_ID,
+    type: 'file',
+    url: 'https://cdn.example.com/brochure.pdf',
+    token: PAGE_TOKEN,
+  });
+
+  assert.deepEqual(result, { attachmentId: '1857777774821032' });
+  const req = jsonOf(fb.lastRequest());
+  assert.equal(req.token, PAGE_TOKEN);
+  assert.deepEqual(req.body, {
+    message: {
+      attachment: {
+        type: 'file',
+        payload: { url: 'https://cdn.example.com/brochure.pdf', is_reusable: true },
+      },
+    },
+  });
+});
+
+test('uploadMessageAttachment tolerates a numeric id and an id-less ack', async () => {
+  const numeric = createFakeFbRequest();
+  numeric.on((req) => req.method === 'POST', fbOk({ attachment_id: 42 }));
+  assert.deepEqual(
+    await uploadMessageAttachment(numeric.fn, {
+      pageId: PAGE_ID,
+      type: 'image',
+      url: 'https://cdn.example.com/a.png',
+    }),
+    { attachmentId: '42' },
+  );
+
+  const empty = createFakeFbRequest();
+  empty.on((req) => req.method === 'POST', fbOk(undefined));
+  assert.deepEqual(
+    await uploadMessageAttachment(empty.fn, {
+      pageId: PAGE_ID,
+      type: 'image',
+      url: 'https://cdn.example.com/a.png',
+    }),
+    {},
+  );
 });

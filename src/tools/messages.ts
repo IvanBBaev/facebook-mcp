@@ -13,8 +13,12 @@
 //     is not enough on its own — an explicitly-set `FB_WRITE_MODE=apply`
 //     overrides a package default — and a DM lands in a real person's inbox with
 //     no unsend.
+//     It can carry ONE attachment (image / audio / video / file) instead of
+//     text: a public HTTPS URL Meta fetches, or a reusable attachment id.
 //   * facebook_react_to_message  — react to one message of a thread as the Page,
 //     or remove the Page's reaction. Plan-bound like a send, same window gate.
+//   * facebook_upload_message_attachment — upload one file by URL once and get a
+//     reusable attachment id (about 90 days) to send to many people.
 //   * facebook_get_activity_since — new comments and new / unread conversations
 //     since a local high-water mark, in one call (`./activity.ts`).
 //
@@ -53,6 +57,7 @@ import type {
   ToolContext,
 } from '../core/index.js';
 import { GraphApiError } from '../core/index.js';
+import { MediaSourceError, resolveRemoteMediaUrl } from '../api/media-photos.js';
 import {
   ATTACHMENT_URL_NOTE,
   MESSAGE_TAG_GUIDANCE,
@@ -67,10 +72,13 @@ import {
   messagingWindowClosedError,
   sendMessage,
   sendReaction,
+  uploadMessageAttachment,
   windowStatusFromLastActivity,
   type ConversationRecord,
   type MessageRecord,
   type MessagingWindow,
+  type OutboundAttachment,
+  type OutboundAttachmentType,
   type SendReactionResult,
 } from '../api/messaging.js';
 import {
@@ -97,6 +105,7 @@ const TOOL_LIST_CONVERSATIONS = 'facebook_list_conversations';
 const TOOL_GET_CONVERSATION = 'facebook_get_conversation';
 const TOOL_SEND_MESSAGE = 'facebook_send_message';
 const TOOL_REACT_TO_MESSAGE = 'facebook_react_to_message';
+const TOOL_UPLOAD_MESSAGE_ATTACHMENT = 'facebook_upload_message_attachment';
 
 /**
  * Appended to the shared rejection message on both `conversation_id` arguments.
@@ -142,6 +151,94 @@ const REACT_ANNOTATIONS: ToolAnnotations = {
 
 /** Messenger's plain-text limit; rejected client-side rather than at the wire. */
 const MAX_MESSAGE_CHARS = 2000;
+
+const ATTACHMENT_TYPES = ['image', 'audio', 'video', 'file'] as const;
+const MAX_ATTACHMENT_URL_CHARS = 2048;
+/** Meta keeps a reusable attachment id for about 90 days (V8); an estimate. */
+const ATTACHMENT_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+const UPLOAD_ANNOTATIONS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+const attachmentTypeArg = z
+  .enum(ATTACHMENT_TYPES)
+  .describe('Attachment kind: image, audio, video or file (for example a PDF).');
+
+const attachmentUrlArg = z
+  .string()
+  .url()
+  .max(MAX_ATTACHMENT_URL_CHARS)
+  .describe(
+    'A public https:// URL Meta fetches itself (no credentials in it). Meta gives up ' +
+      'after about 10 s (75 s for video); images up to 8 MB, other files up to 25 MB.',
+  );
+
+const attachmentArg = z
+  .object({
+    type: attachmentTypeArg,
+    url: attachmentUrlArg.optional(),
+    attachment_id: z
+      .string()
+      .regex(/^\d{1,32}$/, 'attachment_id must be the numeric id an upload returned.')
+      .optional()
+      .describe(
+        'A reusable attachment id from facebook_upload_message_attachment (valid for ' +
+          'about 90 days, this Page only).',
+      ),
+  })
+  .strict()
+  .describe(
+    'ONE attachment instead of text: exactly one of url / attachment_id. A message ' +
+      'carries text or one attachment, never both.',
+  );
+
+const ATTACHMENT_SOURCE_MESSAGE =
+  'Nothing was sent: give the attachment exactly one of `url` or `attachment_id`.';
+
+const SEND_CONTENT_MESSAGE =
+  'Nothing was sent: pass exactly one of `message`, `saved_reply_id` or `attachment` ' +
+  '(a message carries text or one attachment, never both).';
+
+const ATTACHMENT_FETCH_WARNING =
+  'Meta fetches the attachment URL when the message is sent: it must be public and ' +
+  'answer within 10 s (75 s for video); images ≤ 8 MB, other files ≤ 25 MB.';
+
+/**
+ * Validates an attachment URL locally (HTTPS, no embedded credentials) so a bad
+ * one never reaches Meta. The URL itself is not echoed back: it can carry a
+ * signed query string.
+ */
+function checkedAttachmentUrl(raw: string, nothingDone: string): string {
+  try {
+    return resolveRemoteMediaUrl(raw);
+  } catch (err) {
+    if (err instanceof MediaSourceError) {
+      throw new Error(
+        `${nothingDone}: the attachment URL must be a public https:// URL without ` +
+          `credentials (${err.reason}).`,
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+}
+
+/** The send's attachment, validated; `undefined` for a text send. */
+function outboundAttachmentOf(
+  arg: z.infer<typeof attachmentArg> | undefined,
+): OutboundAttachment | undefined {
+  if (arg === undefined) return undefined;
+  if ((arg.url === undefined) === (arg.attachment_id === undefined)) {
+    throw new Error(ATTACHMENT_SOURCE_MESSAGE);
+  }
+  return arg.url !== undefined
+    ? { type: arg.type, url: checkedAttachmentUrl(arg.url, 'Nothing was sent') }
+    : { type: arg.type, attachmentId: arg.attachment_id ?? '' };
+}
 
 /** Messages read to locate the last inbound one before a send (CC-MSG-1). */
 const WINDOW_PROBE_LIMIT = 10;
@@ -530,6 +627,17 @@ interface SendOutcome {
   readonly recipientId?: string;
   /** The quoted mid, echoed when the send was a reply. */
   readonly replyToMessageId?: string;
+  /** The attachment kind, when the message carried one instead of text. */
+  readonly attachmentType?: OutboundAttachmentType;
+  readonly note: string;
+}
+
+/** What facebook_upload_message_attachment reports. */
+interface UploadOutcome {
+  readonly attachmentId?: string;
+  readonly type: OutboundAttachmentType;
+  /** Upload time + 90 days: Meta's documented lifetime, not a promise. */
+  readonly expiresAtEstimate?: string;
   readonly note: string;
 }
 
@@ -869,7 +977,9 @@ export function createMessagesPackage(): PackageSpec {
     name: TOOL_SEND_MESSAGE,
     title: 'Send message',
     description:
-      'Send ONE plain-text PRIVATE Messenger message as the Page, as a reply inside ' +
+      'Send ONE PRIVATE Messenger message as the Page — text, or one attachment ' +
+      '(image / audio / video / file by public HTTPS URL or reusable attachment_id) — ' +
+      'as a reply inside ' +
       'the 24-hour standard messaging window (messaging_type=RESPONSE). This is not ' +
       'a public comment reply — use the moderation tools for that. Dry run by ' +
       'default: it returns a preview and sends nothing unless apply:true. Pass ' +
@@ -906,6 +1016,7 @@ export function createMessagesPackage(): PackageSpec {
           `The message text (1–${String(MAX_MESSAGE_CHARS)} characters). Sent verbatim to a real person; there is no unsend. Exactly one of message / saved_reply_id.`,
         ),
       saved_reply_id: savedReplyIdArg.optional(),
+      attachment: attachmentArg.optional(),
       reply_to_message_id: z
         .string()
         .regex(MESSAGE_ID_SHAPE, 'reply_to_message_id must be a Messenger mid.')
@@ -933,14 +1044,26 @@ export function createMessagesPackage(): PackageSpec {
       if (input.message !== undefined && input.message.trim().length === 0) {
         throw new Error(BLANK_MESSAGE);
       }
-      if (input.message === undefined && input.saved_reply_id === undefined) {
-        throw new Error('Pass `message` or `saved_reply_id`.');
+      const contentArgs = [input.message, input.saved_reply_id, input.attachment].filter(
+        (value) => value !== undefined,
+      ).length;
+      if (contentArgs !== 1) {
+        throw new Error(
+          contentArgs === 0 && input.saved_reply_id === undefined
+            ? 'Pass `message`, `saved_reply_id` or `attachment`.'
+            : SEND_CONTENT_MESSAGE,
+        );
       }
+      const attachment = outboundAttachmentOf(input.attachment);
+      const attachmentSource =
+        attachment === undefined ? undefined : 'url' in attachment ? 'url' : 'id';
       const resolved: ResolvedPage = await ctx.pages.resolvePage(input.profile);
       // A saved reply is resolved to its text now, and the text (not the id) is
       // bound to the plan: editing the template after the preview diverges it.
       const text =
-        (await messageOrSavedReply(ctx, resolved, input, MAX_MESSAGE_CHARS)) ?? '';
+        attachment === undefined
+          ? ((await messageOrSavedReply(ctx, resolved, input, MAX_MESSAGE_CHARS)) ?? '')
+          : '';
       const savedReplyId = input.saved_reply_id;
       const target = await resolveSendTarget(ctx, resolved, input);
       const window = windowInput(target, ctx.clock.now());
@@ -973,7 +1096,9 @@ export function createMessagesPackage(): PackageSpec {
         params: {
           conversationId: target.conversationId ?? null,
           recipientId: target.recipientId,
-          message: text,
+          // The attachment (its URL or id included) is the plan identity of an
+          // attachment send; a text send keeps the identity it always had.
+          ...(attachment !== undefined ? { attachment } : { message: text }),
           // The quoted message is part of what was previewed: a changed target
           // invalidates the plan. Absent (not null) when unset, so plain sends
           // keep the identity they always had.
@@ -981,10 +1106,15 @@ export function createMessagesPackage(): PackageSpec {
         },
         ...(input.apply !== undefined ? { apply: input.apply } : {}),
         ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        // The URL or id stays out of the summary: the summary is journalled.
         summary:
-          `Send a PRIVATE Messenger message of ${String(text.length)} ` +
-          (savedReplyId !== undefined ? `(saved reply "${savedReplyId}") ` : '') +
-          `characters from Page ${resolved.pageId} (${resolved.name}) to recipient ` +
+          (attachment !== undefined
+            ? `Send a PRIVATE Messenger ${attachment.type} attachment ` +
+              `(by ${attachmentSource === 'url' ? 'URL' : 'attachment id'}) from Page`
+            : `Send a PRIVATE Messenger message of ${String(text.length)} ` +
+              (savedReplyId !== undefined ? `(saved reply "${savedReplyId}") ` : '') +
+              `characters from Page`) +
+          ` ${resolved.pageId} (${resolved.name}) to recipient ` +
           `${target.recipientId}` +
           (target.conversationId !== undefined
             ? ` in conversation ${target.conversationId}`
@@ -996,6 +1126,7 @@ export function createMessagesPackage(): PackageSpec {
           SEND_VISIBILITY_WARNING,
           SEND_UNKNOWN_OUTCOME_WARNING,
           window.explanation,
+          ...(attachmentSource === 'url' ? [ATTACHMENT_FETCH_WARNING] : []),
           ...(messageUnseen(target, replyTo) ? [REPLY_TARGET_UNSEEN_WARNING] : []),
         ],
         resolvedPage: resolved,
@@ -1008,7 +1139,10 @@ export function createMessagesPackage(): PackageSpec {
           ...(target.conversationId !== undefined
             ? { conversationId: target.conversationId }
             : {}),
-          chars: text.length,
+          // Kind and source only — never the URL (it may be signed) or the id.
+          ...(attachment !== undefined
+            ? { attachmentType: attachment.type, attachmentSource }
+            : { chars: text.length }),
           ...(savedReplyId !== undefined ? { savedReplyId } : {}),
           windowStatus: window.status,
           // Whether the send quoted a message — never which one (see logFields).
@@ -1021,7 +1155,7 @@ export function createMessagesPackage(): PackageSpec {
             result = await sendMessage(ctx.fbRequest, {
               pageId: resolved.pageId,
               recipientId: target.recipientId,
-              text,
+              content: attachment !== undefined ? { attachment } : { text },
               ...(replyTo !== undefined ? { replyToMessageId: replyTo } : {}),
               token: resolved.token,
               ...signalOf(ctx),
@@ -1037,6 +1171,7 @@ export function createMessagesPackage(): PackageSpec {
               ? { recipientId: result.recipientId }
               : {}),
             ...(replyTo !== undefined ? { replyToMessageId: replyTo } : {}),
+            ...(attachment !== undefined ? { attachmentType: attachment.type } : {}),
             note: confirmed ? SEND_CONFIRMED_NOTE : SEND_UNCONFIRMED_NOTE,
           };
         },
@@ -1184,6 +1319,78 @@ export function createMessagesPackage(): PackageSpec {
     },
   });
 
+  const uploadMessageAttachmentTool = defineTool({
+    name: TOOL_UPLOAD_MESSAGE_ATTACHMENT,
+    title: 'Upload message attachment',
+    description:
+      'Upload ONE file (image / audio / video / file) by public HTTPS URL to the ' +
+      'Page’s Messenger attachment store and get a reusable attachment_id — valid ' +
+      'for about 90 days, this Page only — to pass to facebook_send_message as ' +
+      'attachment.attachment_id, so the same file goes to many people without a ' +
+      're-fetch. Nobody receives anything. Dry run by default; apply:true uploads.',
+    inputSchema: z.object({
+      ...writeArgs,
+      type: attachmentTypeArg,
+      url: attachmentUrlArg,
+    }),
+    annotations: UPLOAD_ANNOTATIONS,
+    // Nothing reaches a person and an unused id simply expires, so `reversible`
+    // and not plan-bound.
+    writeTier: 'reversible',
+    // The URL can carry a signed query string, so it stays off the log.
+    logFields: ['profile', 'apply', 'plan_id', 'type'],
+    handler: async (input, ctx) => {
+      const url = checkedAttachmentUrl(input.url, 'Nothing was uploaded');
+      const resolved: ResolvedPage = await ctx.pages.resolvePage(input.profile);
+      return executeWrite<UploadOutcome>(ctx, {
+        tool: TOOL_UPLOAD_MESSAGE_ATTACHMENT,
+        tier: 'reversible',
+        pageId: resolved.pageId,
+        params: { type: input.type, url },
+        ...(input.apply !== undefined ? { apply: input.apply } : {}),
+        ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
+        summary:
+          `Upload one ${input.type} by URL to the Messenger attachment store of Page ` +
+          `${resolved.pageId} (${resolved.name}) for reuse. Nobody receives it.`,
+        warnings: [ATTACHMENT_FETCH_WARNING],
+        resolvedPage: resolved,
+        notPerformedNotice: 'This was a dry run — NOTHING was uploaded.',
+        metadata: { type: input.type },
+        perform: async (): Promise<UploadOutcome> => {
+          const result = await uploadMessageAttachment(ctx.fbRequest, {
+            pageId: resolved.pageId,
+            type: input.type,
+            url,
+            token: resolved.token,
+            ...signalOf(ctx),
+          });
+          if (result.attachmentId === undefined) {
+            return {
+              type: input.type,
+              note:
+                'Facebook accepted the upload but returned no attachment id, so there ' +
+                'is nothing to reuse. Upload again, or send the file by URL.',
+            };
+          }
+          return {
+            attachmentId: result.attachmentId,
+            type: input.type,
+            expiresAtEstimate: new Date(
+              ctx.clock.now() + ATTACHMENT_ID_TTL_MS,
+            ).toISOString(),
+            note:
+              'Pass attachmentId to facebook_send_message as attachment.attachment_id ' +
+              '(this Page only). expiresAtEstimate is the documented ~90-day lifetime, ' +
+              'not a guarantee.',
+          };
+        },
+        classifyOutcome: classifySendOutcome,
+        classifyResult: (outcome) =>
+          outcome.attachmentId !== undefined ? APPLIED_VERDICT : ATTEMPTED_VERDICT,
+      });
+    },
+  });
+
   return {
     name: 'messages',
     title: 'Messages',
@@ -1199,6 +1406,7 @@ export function createMessagesPackage(): PackageSpec {
       getConversationTool,
       sendMessageTool,
       reactToMessageTool,
+      uploadMessageAttachmentTool,
       createActivitySinceTool(),
       ...createSavedReplyTools(),
     ],
