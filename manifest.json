@@ -99,7 +99,7 @@
     },
     {
       "name": "facebook_create_photo_post",
-      "description": "Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled."
+      "description": "Publish ONE photo to a Page, optionally with a caption, as a draft, or scheduled, and optionally into one of the Page albums (album_id)."
     },
     {
       "name": "facebook_create_video_post",

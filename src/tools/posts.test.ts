@@ -1338,6 +1338,130 @@ test('create_photo_post keeps a scheduled photo unpublished and passes the epoch
   assert.equal(jsonBody(upload)['scheduled_publish_time'], Date.parse(SOON) / 1000);
 });
 
+const ALBUM_ID = '4242';
+
+/** Stub the F4 album pre-check (`GET /{album-id}?fields=…`). */
+function stubAlbum(fb: FakeFbRequest, node: Record<string, unknown>): void {
+  fb.on(
+    (req) => req.method === 'GET' && req.path === `/${ALBUM_ID}`,
+    fbOk({ id: ALBUM_ID, ...node }),
+  );
+}
+
+test('create_photo_post with album_id names the album and uploads to the album edge', async () => {
+  const { fb, ctx } = makeCtx();
+  stubAlbum(fb, {
+    name: 'Menu',
+    type: 'normal',
+    can_upload: true,
+    from: { id: PAGE_ID },
+  });
+  fb.on(
+    (req) => req.method === 'POST' && req.path === `/${ALBUM_ID}/photos`,
+    fbOk({ id: 'ph-11', post_id: '100_911' }),
+  );
+  const args = {
+    photo: 'https://cdn.example/a.jpg',
+    caption: 'Lunch',
+    album_id: ALBUM_ID,
+  };
+
+  const preview = body(await tool('facebook_create_photo_post').handler(args, ctx));
+  assert.equal(preview['status'], 'preview');
+  assert.match(
+    String(preview['summary']),
+    new RegExp(
+      `^Publish a photo to album "Menu" \\(${ALBUM_ID}\\) on Page ${PAGE_ID}\\.`,
+    ),
+  );
+  const check = findJson(fb, (req) => req.path === `/${ALBUM_ID}`);
+  assert.equal(check.params?.['fields'], 'id,name,type,can_upload,from');
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+
+  const applied = body(
+    await tool('facebook_create_photo_post').handler(
+      { ...args, apply: true, plan_id: 'plan-1' },
+      ctx,
+    ),
+  );
+  const result = record(applied['result']);
+  assert.equal(result['photoId'], 'ph-11');
+  assert.equal(result['albumId'], ALBUM_ID);
+  const upload = findJson(fb, (req) => req.method === 'POST');
+  assert.equal(upload.path, `/${ALBUM_ID}/photos`);
+  assert.equal(jsonBody(upload)['caption'], 'Lunch');
+  assert.equal(jsonBody(upload)['aid'], undefined);
+});
+
+test('create_photo_post refuses an album that does not accept uploads', async () => {
+  const { fb, ctx } = makeCtx();
+  stubAlbum(fb, {
+    name: 'Menu',
+    type: 'normal',
+    can_upload: false,
+    from: { id: PAGE_ID },
+  });
+  const result = await tool('facebook_create_photo_post').handler(
+    { photo: 'https://cdn.example/a.jpg', album_id: ALBUM_ID },
+    ctx,
+  );
+  assert.equal(result.isError, true);
+  const refusal = body(result);
+  assert.equal(refusal['field'], 'album_id');
+  assert.match(String(refusal['error']), /does not accept uploads/);
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+});
+
+test("create_photo_post refuses another owner's album", async () => {
+  const { fb, ctx } = makeCtx();
+  stubAlbum(fb, {
+    name: 'Theirs',
+    type: 'normal',
+    can_upload: true,
+    from: { id: '999' },
+  });
+  const result = await tool('facebook_create_photo_post').handler(
+    { photo: 'https://cdn.example/a.jpg', album_id: ALBUM_ID },
+    ctx,
+  );
+  assert.equal(result.isError, true);
+  assert.match(String(body(result)['error']), /belongs to 999, not to Page/);
+  assert.equal(fb.calls.filter(isWrite).length, 0);
+});
+
+test('create_photo_post refuses a Meta-managed system album', async () => {
+  const { fb, ctx } = makeCtx();
+  stubAlbum(fb, {
+    name: 'Cover photos',
+    type: 'cover',
+    can_upload: true,
+    from: { id: PAGE_ID },
+  });
+  const result = await tool('facebook_create_photo_post').handler(
+    { photo: 'https://cdn.example/a.jpg', album_id: ALBUM_ID },
+    ctx,
+  );
+  assert.equal(result.isError, true);
+  assert.match(String(body(result)['error']), /"cover" album/);
+});
+
+test('create_photo_post warns that scheduling into an album is unverified', async () => {
+  const { fb, ctx } = makeCtx();
+  stubPageTimezone(fb);
+  stubAlbum(fb, { name: 'Menu', type: 'app', can_upload: true, from: { id: PAGE_ID } });
+  const preview = body(
+    await tool('facebook_create_photo_post').handler(
+      {
+        photo: 'https://cdn.example/a.jpg',
+        album_id: ALBUM_ID,
+        scheduled_publish_time: SOON,
+      },
+      ctx,
+    ),
+  );
+  assert.ok(strings(preview['warnings']).some((w) => /album .*unverified/.test(w)));
+});
+
 test('create_photo_post refuses a local file when FB_MEDIA_DIR is not configured', async () => {
   const { fb, ctx } = makeCtx();
   const result = await tool('facebook_create_photo_post').handler(

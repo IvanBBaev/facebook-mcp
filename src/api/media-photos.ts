@@ -1070,10 +1070,20 @@ function describeSource(prepared: PreparedPhotoSource): string {
 // Single photo upload
 // ---------------------------------------------------------------------------
 
-/** One `POST /{page-id}/photos` call. */
+/**
+ * Where a single photo lands: the Page's own `/{page-id}/photos` edge (Graph
+ * files it in the Timeline Photos album) or a named album's `/{album-id}/photos`
+ * edge. The deprecated `aid` param on the Page edge is never used.
+ */
+export type PhotoTargetEdge =
+  { readonly kind: 'page' } | { readonly kind: 'album'; readonly albumId: string };
+
+/** One `POST /{page-id}/photos` (or `/{album-id}/photos`) call. */
 export interface PhotoUploadRequest {
   readonly pageId: string;
   readonly source: PhotoSource;
+  /** The edge to post to; defaults to the Page's `photos` edge. */
+  readonly targetEdge?: PhotoTargetEdge;
   /** Photo caption. For a multi-photo post the CAPTION belongs on the feed post. */
   readonly caption?: string;
   /**
@@ -1265,7 +1275,8 @@ async function uploadPreparedPhoto(
     published,
     ...(req.extraParams !== undefined ? { extraParams: req.extraParams } : {}),
   });
-  const path = `/${req.pageId}/${PHOTOS_EDGE}`;
+  const owner = req.targetEdge?.kind === 'album' ? req.targetEdge.albumId : req.pageId;
+  const path = `/${owner}/${PHOTOS_EDGE}`;
   const verifyTool = photoVerifyTool(published, req.extraParams);
 
   let request: JsonRequest | MultipartRequest;

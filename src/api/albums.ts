@@ -58,6 +58,25 @@ export interface AlbumItem {
   readonly updatedTime?: string;
 }
 
+/** The plan-time album pre-check field set (organic F4). */
+export const ALBUM_UPLOAD_CHECK_FIELDS = 'id,name,type,can_upload,from';
+
+/**
+ * Album types a Page may upload into. The rest (`profile`, `cover`, `wall`,
+ * `mobile`, …) are system albums Meta manages itself.
+ */
+export const UPLOADABLE_ALBUM_TYPES: readonly string[] = ['normal', 'app'];
+
+/** What the pre-check learned about an upload target. Unsent fields are absent. */
+export interface AlbumUploadCheck {
+  readonly albumId: string;
+  readonly name?: string;
+  readonly type?: string;
+  readonly canUpload?: boolean;
+  /** The album owner's id (`from.id`). */
+  readonly ownerId?: string;
+}
+
 /** One mapped photo row. */
 export interface PhotoItem {
   readonly id: string;
@@ -298,4 +317,76 @@ export async function listPhotos(
   );
   const photos = mapped(res.data, mapPhoto);
   return { pageId: opts.pageId, type, photos, count: photos.length, ...pagingOf(res) };
+}
+
+/** The `GET /{album-id}?fields=…` request behind the F4 upload pre-check. */
+export function albumUploadCheckRequest(
+  albumId: string,
+  opts: Pick<ScopedOptions, 'token' | 'signal'> = {},
+): EdgeRequest {
+  return edgeOf(`/${albumId}`, { fields: ALBUM_UPLOAD_CHECK_FIELDS }, opts);
+}
+
+/** Map the pre-check node; an unrecognised body yields the bare album id. */
+export function toAlbumUploadCheck(albumId: string, raw: unknown): AlbumUploadCheck {
+  if (!isRecord(raw)) return { albumId };
+  const name = stringOf(raw.name);
+  const type = stringOf(raw.type);
+  const ownerId = refId(raw.from);
+  return {
+    albumId,
+    ...(name !== undefined ? { name } : {}),
+    ...(type !== undefined ? { type } : {}),
+    ...(typeof raw.can_upload === 'boolean' ? { canUpload: raw.can_upload } : {}),
+    ...(ownerId !== undefined ? { ownerId } : {}),
+  };
+}
+
+/**
+ * Read an album's upload facts. A not-found is re-thrown with
+ * `facebook_list_albums` as the next tool.
+ */
+export async function readAlbumUploadCheck(
+  fbRequest: FbRequestFn,
+  opts: {
+    readonly albumId: string;
+    readonly token?: string;
+    readonly signal?: AbortSignal;
+  },
+): Promise<AlbumUploadCheck> {
+  const req = albumUploadCheckRequest(opts.albumId, opts);
+  const res = await fbRequest<unknown>({
+    protocol: 'json',
+    method: 'GET',
+    host: req.host,
+    path: req.path,
+    ...(req.params !== undefined ? { params: req.params } : {}),
+    ...(req.token !== undefined ? { token: req.token } : {}),
+    ...(req.signal !== undefined ? { signal: req.signal } : {}),
+  }).catch(withAlbumHint);
+  return toAlbumUploadCheck(opts.albumId, res.data);
+}
+
+/**
+ * Why a photo may not go into this album, or `undefined` when it may. A fact
+ * Graph did not report is not held against the album.
+ */
+export function albumUploadRefusal(
+  check: AlbumUploadCheck,
+  pageId: string,
+): string | undefined {
+  const label =
+    check.name !== undefined
+      ? `album "${check.name}" (${check.albumId})`
+      : `album ${check.albumId}`;
+  if (check.ownerId !== undefined && check.ownerId !== pageId) {
+    return `The ${label} belongs to ${check.ownerId}, not to Page ${pageId}. Pick one of this Page's albums from facebook_list_albums.`;
+  }
+  if (check.canUpload === false) {
+    return `The ${label} does not accept uploads (can_upload:false).`;
+  }
+  if (check.type !== undefined && !UPLOADABLE_ALBUM_TYPES.includes(check.type)) {
+    return `The ${label} is a "${check.type}" album that Meta manages itself; only ${UPLOADABLE_ALBUM_TYPES.join(' and ')} albums accept uploads.`;
+  }
+  return undefined;
 }

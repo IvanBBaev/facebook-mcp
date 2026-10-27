@@ -73,6 +73,14 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ### Added
 
+- **`album_id` on `facebook_create_photo_post` (v2 organic F4).** Publish the
+  photo into one of the Page's albums instead of Timeline Photos. The upload
+  goes to `POST /{album-id}/photos`; the deprecated `aid` param is never used.
+  The dry run reads the album (`name,type,can_upload,from`) and refuses an
+  album another owner holds, one with `can_upload:false`, and a Meta-managed
+  system album (anything but `normal` and `app`). The summary names the album,
+  and a scheduled upload into an album carries an "unverified" warning, because
+  the album edge does not document scheduling.
 - **`facebook_update_page_profile` in the new opt-in `page_admin` package
   (v2 organic F8).** Change the Page's public business fields: `about`,
   `description`, `website`, `phone`, opening `hours`, `is_always_open` and

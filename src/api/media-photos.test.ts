@@ -738,6 +738,49 @@ test('single photo: POSTs caption + published:true to /{page-id}/photos and retu
   assert.equal(fb.calls.length, 1);
 });
 
+test('single photo: an album target POSTs to /{album-id}/photos, never with aid', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1', post_id: '777_888' }));
+
+  const uploaded = await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    caption: 'menu',
+    targetEdge: { kind: 'album', albumId: '4242' },
+  });
+
+  assert.deepEqual(uploaded, { id: 'photo-1', postId: '777_888' });
+  const req = jsonAt(fb, 0);
+  assert.equal(req.path, '/4242/photos');
+  assert.deepEqual(req.body, { caption: 'menu', published: true, url: REMOTE });
+});
+
+test('single photo (local): an album target sends the multipart upload to the album edge', async (t) => {
+  const fx = await mediaFixture(t);
+  await writeFile(join(fx.mediaDir, 'shot.png'), pngBytes());
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1' }));
+
+  await uploadPhoto(makeDeps(fb, { mediaDir: fx.mediaDir }), {
+    pageId: PAGE_ID,
+    source: local('shot.png'),
+    targetEdge: { kind: 'album', albumId: '4242' },
+  });
+  assert.equal(multipartAt(fb, 0).path, '/4242/photos');
+});
+
+test('single photo: an explicit page target keeps the Page edge', async () => {
+  const fb = createFakeFbRequest();
+  fb.enqueue(fbOk({ id: 'photo-1' }));
+
+  await uploadPhoto(makeDeps(fb), {
+    pageId: PAGE_ID,
+    source: url(REMOTE),
+    targetEdge: { kind: 'page' },
+  });
+  assert.equal(jsonAt(fb, 0).path, '/777/photos');
+});
+
 test('single photo: published:false yields a child id and no post id', async () => {
   const fb = createFakeFbRequest();
   fb.enqueue(fbOk({ id: 'photo-1' }));

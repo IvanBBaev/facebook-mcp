@@ -44,6 +44,11 @@ import type {
   ToolResult,
 } from '../core/index.js';
 import {
+  albumUploadRefusal,
+  readAlbumUploadCheck,
+  type AlbumUploadCheck,
+} from '../api/albums.js';
+import {
   MediaSourceError,
   MultiPhotoUploadError,
   cleanupUnpublishedPhotos,
@@ -1236,14 +1241,19 @@ function buildCreatePost() {
 // 8. facebook_create_photo_post
 // ---------------------------------------------------------------------------
 
+/** Graph documents `published` on the album photos edge but not scheduling. */
+const ALBUM_SCHEDULE_UNVERIFIED =
+  'Scheduling a photo into an album is not documented on the album photos edge and is unverified — check the post time with facebook_list_scheduled_posts after applying.';
+
 function buildCreatePhotoPost() {
   return defineTool({
     name: 'facebook_create_photo_post',
     title: 'Create Photo Post',
     description:
       'Publish ONE photo to a Page, optionally with a caption, as a draft, or ' +
-      'scheduled. The photo is either an https:// URL Meta fetches itself or a ' +
-      'local file inside FB_MEDIA_DIR. Dry run by default.',
+      'scheduled, and optionally into one of the Page albums (album_id). The photo ' +
+      'is either an https:// URL Meta fetches itself or a local file inside ' +
+      'FB_MEDIA_DIR. Dry run by default.',
     inputSchema: z.object({
       ...writeArgs,
       photo: z
@@ -1260,6 +1270,11 @@ function buildCreatePhotoPost() {
       scheduled_publish_time: scheduledPublishTimeArg,
       page_timezone: pageTimezoneArg,
       targeting: targetingArg,
+      album_id: graphNodeIdArg({
+        description:
+          "Upload into this album instead of the Page's default Timeline Photos album. The album must belong to the Page, accept uploads, and be a normal or app album (not profile/cover).",
+        hint: 'Album ids come from facebook_list_albums.',
+      }).optional(),
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',
@@ -1304,6 +1319,31 @@ function buildCreatePhotoPost() {
         const photoSha256 =
           boundSource?.kind === 'local' ? boundSource.sha256 : undefined;
 
+        // F4: the album is checked at plan time, so a wrong album is refused in
+        // the dry run rather than after the upload.
+        let album: AlbumUploadCheck | undefined;
+        if (input.album_id !== undefined) {
+          album = await readAlbumUploadCheck(ctx.fbRequest, {
+            albumId: input.album_id,
+            token: base.page.token,
+            ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
+          });
+          const refusal = albumUploadRefusal(album, base.page.pageId);
+          if (refusal !== undefined) {
+            throw new ToolInputError(
+              'album_id',
+              refusal,
+              "Pick an album with can_upload:true from facebook_list_albums, or omit album_id to use the Page's Timeline Photos.",
+            );
+          }
+        }
+        const albumLabel =
+          album === undefined
+            ? undefined
+            : album.name !== undefined
+              ? `"${album.name}" (${album.albumId})`
+              : album.albumId;
+
         const echo = plan.schedule !== undefined ? toTimeEcho(plan.schedule) : undefined;
         const extraParams: Record<string, ParamValue> = {
           ...(plan.schedule !== undefined
@@ -1323,22 +1363,35 @@ function buildCreatePhotoPost() {
             ...plan.params,
             photo: input.photo,
             ...(photoSha256 !== undefined ? { photo_sha256: photoSha256 } : {}),
+            ...(album !== undefined ? { album_id: album.albumId } : {}),
           },
           ...(input.apply !== undefined ? { apply: input.apply } : {}),
           ...(input.plan_id !== undefined ? { planId: input.plan_id } : {}),
-          summary: plan.summary,
-          warnings: planWarnings(plan, echo),
+          summary:
+            albumLabel === undefined
+              ? plan.summary
+              : `Publish a photo to album ${albumLabel} on Page ${base.page.pageId}. ${plan.summary}`,
+          warnings: [
+            ...planWarnings(plan, echo),
+            ...(album !== undefined && plan.schedule !== undefined
+              ? [ALBUM_SCHEDULE_UNVERIFIED]
+              : []),
+          ],
           resolvedPage: base.page,
           notPerformedNotice: 'This was a dry run — no photo was uploaded or posted.',
           classifyOutcome: classifyPublishFailure,
           metadata: {
             publishState: plan.publishState,
             ...targetingMeta(plan),
+            ...(album !== undefined ? { albumId: album.albumId } : {}),
           },
           perform: async (): Promise<Record<string, unknown>> => {
             const uploaded = await uploadPhoto(media, {
               pageId: base.page.pageId,
               source: boundSource ?? source,
+              ...(album !== undefined
+                ? { targetEdge: { kind: 'album' as const, albumId: album.albumId } }
+                : {}),
               ...(input.caption !== undefined ? { caption: input.caption } : {}),
               published: plan.publishState === 'published',
               token: base.page.token,
@@ -1350,6 +1403,7 @@ function buildCreatePhotoPost() {
               postId: uploaded.postId ?? null,
               pageId: base.page.pageId,
               publishState: plan.publishState,
+              ...(album !== undefined ? { albumId: album.albumId } : {}),
               ...(echo !== undefined ? { schedule: echo } : {}),
               ...targetingMeta(plan),
               verifyNote: publishVerifyNote(plan.publishState),

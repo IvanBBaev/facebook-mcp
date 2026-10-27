@@ -18,13 +18,18 @@ import { loadFixture } from '../testing/fixtures.js';
 import { DEFAULT_PAGE_LIMIT } from './shared.js';
 import {
   ALBUM_FIELDS,
+  ALBUM_UPLOAD_CHECK_FIELDS,
   DEFAULT_PHOTO_LIST_TYPE,
   PHOTO_LIST_FIELDS,
   UNKNOWN_ALBUM_TEXT,
+  albumUploadCheckRequest,
+  albumUploadRefusal,
   listAlbums,
   listPhotos,
   mapAlbum,
   mapPhoto,
+  readAlbumUploadCheck,
+  toAlbumUploadCheck,
 } from './albums.js';
 
 const PAGE_ID = '100000000000001';
@@ -210,4 +215,96 @@ test('a non-not-found album error propagates unchanged', async () => {
       return true;
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Upload pre-check (organic F4)
+// ---------------------------------------------------------------------------
+
+test('albumUploadCheckRequest reads the album node with the pre-check fields', () => {
+  assert.deepEqual(albumUploadCheckRequest('42', { token: 'tok' }), {
+    host: 'graph',
+    path: '/42',
+    params: { fields: ALBUM_UPLOAD_CHECK_FIELDS },
+    token: 'tok',
+  });
+});
+
+test('readAlbumUploadCheck maps name, type, can_upload and the owner id', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({
+      id: '42',
+      name: 'Menu',
+      type: 'normal',
+      can_upload: true,
+      from: { id: PAGE_ID },
+    }),
+  );
+  const check = await readAlbumUploadCheck(fb.fn, { albumId: '42', token: 'tok' });
+  assert.deepEqual(check, {
+    albumId: '42',
+    name: 'Menu',
+    type: 'normal',
+    canUpload: true,
+    ownerId: PAGE_ID,
+  });
+  const req = fb.calls[0] as JsonRequest;
+  assert.equal(req.method, 'GET');
+  assert.equal(req.path, '/42');
+  assert.equal(req.token, 'tok');
+});
+
+test('readAlbumUploadCheck re-throws an unknown album id pointing at facebook_list_albums', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbErr(
+      new GraphApiError('Unsupported get request', {
+        code: 100,
+        httpStatus: 400,
+        action: { category: 'not_found', retryable: false, operatorText: 'gone' },
+      }),
+    ),
+  );
+  await assert.rejects(readAlbumUploadCheck(fb.fn, { albumId: '42' }), (err) => {
+    assert.ok(err instanceof GraphApiError);
+    assert.equal(err.action?.nextTool, 'facebook_list_albums');
+    return true;
+  });
+});
+
+test('toAlbumUploadCheck tolerates a body that is not an object', () => {
+  assert.deepEqual(toAlbumUploadCheck('42', true), { albumId: '42' });
+});
+
+test('albumUploadRefusal accepts normal and app albums the Page owns', () => {
+  for (const type of ['normal', 'app']) {
+    assert.equal(
+      albumUploadRefusal(
+        { albumId: '42', type, canUpload: true, ownerId: PAGE_ID },
+        PAGE_ID,
+      ),
+      undefined,
+    );
+  }
+  assert.equal(albumUploadRefusal({ albumId: '42' }, PAGE_ID), undefined);
+});
+
+test('albumUploadRefusal refuses a foreign, closed or system album', () => {
+  assert.match(
+    albumUploadRefusal({ albumId: '42', ownerId: '999' }, PAGE_ID) ?? '',
+    /belongs to 999/,
+  );
+  assert.match(
+    albumUploadRefusal({ albumId: '42', name: 'Menu', canUpload: false }, PAGE_ID) ?? '',
+    /album "Menu" \(42\) does not accept uploads/,
+  );
+  for (const type of ['profile', 'cover', 'wall', 'mobile']) {
+    assert.match(
+      albumUploadRefusal({ albumId: '42', type }, PAGE_ID) ?? '',
+      /Meta manages/,
+    );
+  }
 });
