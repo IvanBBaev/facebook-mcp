@@ -36,6 +36,9 @@ allowlist as this server.
 **Recommendation: B for 2.0**, with a README section and a combined MCPB/config example. Revisit
 C only if both servers gain real users.
 
+**Decided 2026-10-27: B.** No Instagram code here; the README carries the sibling section and a
+two-server client config.
+
 ## D3. Reverse A12 for a narrow boost-post create-chain?
 
 A12 deferred all object creation. The research supports a narrow exception: Meta's official Ads
@@ -50,6 +53,9 @@ published" is the composability story no ads-only server has.
 
 **Recommendation: B, only if D1 is not "personal tool".** For personal use, A is enough. The
 smoke test needs a real ad account with a spending limit set (doc 08 protocol).
+
+**Decided 2026-10-27: B.** Shipped as `facebook_boost_post` (tier `irreversible`). The live
+probes P1–P7 in [features/ads.md](features/ads.md) are still open.
 
 ## D4. Insights window convention (before the 1.0 freeze)
 

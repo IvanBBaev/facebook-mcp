@@ -206,6 +206,43 @@ overrides the file:
 }
 ```
 
+### (c) Instagram alongside: the sibling server
+
+This server stays Pages-only. Instagram professional accounts are covered by the
+separate [`instagram-mcp-ai`](https://github.com/IvanBBaev/instagram-mcp)
+server (publishing, media, comments, insights, DMs). Run both side by side;
+each keeps its own credentials and env file
+(`~/.config/instagram-mcp-ai/.env` for Instagram, set up with
+`npx instagram-mcp-ai login`), so neither config below needs an `env` block.
+
+**Claude Code:**
+
+```bash
+claude mcp add facebook -- npx -y @ivanbaev/facebook-mcp
+claude mcp add instagram -- npx -y instagram-mcp-ai
+```
+
+**Claude Desktop** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "facebook": {
+      "command": "npx",
+      "args": ["-y", "@ivanbaev/facebook-mcp"]
+    },
+    "instagram": {
+      "command": "npx",
+      "args": ["-y", "instagram-mcp-ai"]
+    }
+  }
+}
+```
+
+The two servers share nothing at runtime: a post to a Page and a post to
+Instagram are two tool calls, each with its own preview. Tool names do not
+collide (`facebook_*` here).
+
 ## Client compatibility
 
 This is a standard stdio MCP server with no client-specific code, so it should
@@ -629,7 +666,8 @@ install:
   API, and the Groups API was discontinued in April 2024. This server operates
   **Pages** — nothing else.
 - **Instagram, Threads, WhatsApp.** Different products, different permission
-  sets. Possible sibling servers one day; not this one.
+  sets. Instagram has its own sibling server — see
+  [(c) Instagram alongside](#c-instagram-alongside-the-sibling-server).
 - **Webhooks / real-time ingestion.** A local stdio server has no public URL to
   receive callbacks on. Reads are polled, by design.
 - **A general ad-creation surface.** `facebook_boost_post` is the one create

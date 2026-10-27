@@ -84,6 +84,9 @@ each has a live probe that must pass before it is enabled by default.
 
 ### Instagram package — gated by D2
 
+**D2 was decided B (2026-10-27): the package is not built here.** The README points to the
+sibling server instead. The rest of this section is kept for a later revisit.
+
 [instagram.md](instagram.md) applies only if decision D2 is A (package here) or C (shared core).
 Probe P1 blocks the whole package: whether a Page token, rather than a User token, is enough
 for `instagram_business_account` and `GET /{ig-id}`. Run that probe before writing any code.
