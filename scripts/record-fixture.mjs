@@ -86,7 +86,7 @@
 //   resolved through the server's own `loadSettings` (so the operator's env file
 //   counts too). There is deliberately no `--token` flag: a token on a command
 //   line is visible to every process on the box via `ps` and is persisted into
-//   shell history (see the warning in `src/mcp/setup-token.ts`).
+//   shell history (see the warning in `src/cli/setup-token/`).
 //
 // Safety
 //   Every recording is passed through `redactSecrets` before being written:

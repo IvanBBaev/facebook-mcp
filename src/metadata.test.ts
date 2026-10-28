@@ -8,7 +8,7 @@
 //   1. version — one version number, repeated in five places, must never fork;
 //   2. environment — every FB_* variable the process actually reads (the server
 //      via `src/core/settings.ts`, the setup subcommand via
-//      `src/mcp/setup-token.ts`) must appear in `.env.example`, nothing may be
+//      `src/cli/setup-token/`) must appear in `.env.example`, nothing may be
 //      advertised there that nothing reads, and `server.json` — which tells a
 //      client how to RUN the server — must carry the runtime set only. Names are
 //      only half of it: the DEFAULTS and the enumerated CHOICES `.env.example`
@@ -27,7 +27,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -208,7 +208,16 @@ async function runtimeEnvNames(): Promise<ReadonlySet<string>> {
  * variable even though `settings.ts` never looks it up.
  */
 async function setupEnvNames(): Promise<ReadonlySet<string>> {
-  return envNames(await readText('src', 'mcp', 'setup-token.ts'));
+  const files = (await readdir(repoFile('src', 'cli', 'setup-token'))).filter(
+    (file) => file.endsWith('.ts') && !file.endsWith('.test.ts'),
+  );
+  const names = new Set<string>();
+  for (const file of files) {
+    for (const name of envNames(await readText('src', 'cli', 'setup-token', file))) {
+      names.add(name);
+    }
+  }
+  return names;
 }
 
 /** Everything the process reads anywhere: runtime ∪ setup-only. */

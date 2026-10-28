@@ -303,7 +303,7 @@ function taskNames(value: unknown): readonly string[] {
  * How many accounts one `facebook_list_pages` call asks Graph for. The tool
  * reads exactly ONE page of `/me/accounts` and follows no cursor, so this is the
  * hard ceiling on what it can report — the same ceiling, and the same reason, as
- * the setup-token flow (`src/mcp/setup-token.ts`). Left unset, Graph applies its
+ * the setup-token flow (`src/cli/setup-token/`). Left unset, Graph applies its
  * own default edge window (25), which is small enough that an ordinary agency
  * account is cut without anyone asking for a page size at all.
  */
