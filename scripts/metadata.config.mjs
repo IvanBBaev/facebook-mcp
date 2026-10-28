@@ -68,7 +68,7 @@ export const identity = Object.freeze({
   displayName: 'Facebook Pages MCP',
   /** The key an MCP client uses in its `mcpServers` map. */
   serverKey: 'facebook',
-  version: '0.7.0',
+  version: '0.8.0',
   license: 'MIT',
   nodeEngine: '>=22',
   author: {

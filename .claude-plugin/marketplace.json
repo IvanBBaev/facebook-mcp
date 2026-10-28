@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Facebook Pages MCP server for the Meta Graph API — publishing, insights, moderation, messaging",
-    "version": "0.7.0"
+    "version": "0.8.0"
   },
   "plugins": [
     {
       "name": "facebook-mcp",
       "source": "./",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "description": "Facebook Pages MCP server for the Meta Graph API — publishing, insights, moderation, messaging. Add with: /plugin marketplace add IvanBBaev/facebook-mcp"
     }
   ]

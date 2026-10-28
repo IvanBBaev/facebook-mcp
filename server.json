@@ -6,13 +6,13 @@
     "url": "https://github.com/IvanBBaev/facebook-mcp",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.8.0",
   "websiteUrl": "https://ivanbbaev.github.io/facebook-mcp/",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ivanbaev/facebook-mcp",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       },

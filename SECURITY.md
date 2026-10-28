@@ -10,7 +10,7 @@ you can rely on, and what is explicitly outside the threat model.
 ## Supported versions
 
 The project is published on npm as **`@ivanbaev/facebook-mcp`** (current release
-`0.7.0`; note the scope carries one `b`, unlike the GitHub user `IvanBBaev`). It
+`0.8.0`; note the scope carries one `b`, unlike the GitHub user `IvanBBaev`). It
 is still **pre-1.0 and in active development**, so interfaces may change until
 `1.0.0`.
 

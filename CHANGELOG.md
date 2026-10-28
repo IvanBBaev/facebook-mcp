@@ -7,6 +7,8 @@ largely one commit per task, apart from the squashed `0.7.0` release commit.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-28
+
 ### Changed
 
 - **BREAKING: insights summaries follow a semantics-aware contract (v2).**
@@ -3193,5 +3195,6 @@ verification, not new surface area.
   proven to have come out of this repository's workflow, which a checksum
   published beside it cannot do.
 
-[Unreleased]: https://github.com/IvanBBaev/facebook-mcp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/IvanBBaev/facebook-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/IvanBBaev/facebook-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/IvanBBaev/facebook-mcp/releases/tag/v0.7.0

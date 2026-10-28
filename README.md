@@ -53,7 +53,7 @@ does and does not mean.
 | **Messaging**          | Conversation reads and replies within the 24-hour window                        | ✅ Implemented, not live-verified |
 | **Ads**                | Campaign/adset/ad reads, insights, status & budget control — **off by default** | ✅ Implemented, not live-verified |
 | **Live verification**  | Every tool exercised against a real Page and a real ad account                  | ❌ Not done — see the status note |
-| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, attested bundle, registry listing                 | ✅ Published — 0.7.0              |
+| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, attested bundle, registry listing                 | ✅ Published — 0.8.0              |
 
 The default profile exposes a deliberately small, curated tool surface — each
 tool wraps one real capability rather than mirroring every Graph edge.
@@ -173,7 +173,7 @@ it). It carries a build-provenance attestation, so you can prove it came out of
 this repository's workflow before you install it:
 
 ```bash
-gh attestation verify facebook-mcp-0.7.0.mcpb --repo IvanBBaev/facebook-mcp
+gh attestation verify facebook-mcp-0.8.0.mcpb --repo IvanBBaev/facebook-mcp
 ```
 
 ### (b) From source
@@ -334,7 +334,7 @@ versions on one line and exits — it needs no credential, so it still answers o
 an install that cannot start:
 
 ```text
-facebook-mcp 0.7.0 (node v22.23.0, darwin arm64, sdk 1.30.0)
+facebook-mcp 0.8.0 (node v22.23.0, darwin arm64, sdk 1.32.1)
 ```
 
 The bare server version is always the second field, so `--version | awk '{print
@@ -630,7 +630,7 @@ Current, factual, and deliberately unflattering:
 
 - **No live Graph API verification.** Nothing here has been proven against Meta's
   servers. Fixtures encode what the API is documented to do; reality gets a vote.
-- **Published, but brand new.** 0.7.0 is on npm with provenance, the `.mcpb`
+- **Published, but brand new.** 0.8.0 is on npm with provenance, the `.mcpb`
   bundle is attached to the release and the MCP Registry listing is active — but
   no install path has been walked end-to-end by anyone except CI. See
   [Client compatibility](#client-compatibility) for what that means per client.
