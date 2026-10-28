@@ -14,9 +14,11 @@
 // README table and `manifest.json` agree on tool NAMES. Neither freezes all four
 // booleans for the whole surface in one place, which is what this file does:
 //
-//   * ANNOTATION_MANIFEST below is a frozen literal — 65 rows, one per tool.
-//     Changing a hint anywhere in `src/tools/` fails here until the row is
-//     edited too, which is the point: the edit is the review.
+//   * ANNOTATION_MANIFEST is a frozen literal — one row per tool, split into
+//     one fragment per package under `./annotations/<pkg>.ts` and concatenated
+//     by `./annotations/index.ts`. Changing a hint anywhere in `src/tools/`
+//     fails here until the row is edited too, which is the point: the edit is
+//     the review.
 //   * The table and the registry must agree in BOTH directions, so a new tool
 //     cannot ship without its annotations being looked at, and a deleted tool
 //     cannot leave a stale row behind.
@@ -39,8 +41,8 @@ import {
   type PackageSpec,
   type Settings,
   type ToolSpec,
-  type WriteTier,
 } from '../core/index.js';
+import { ANNOTATION_MANIFEST } from './annotations/index.js';
 import { DEFAULT_PROFILE_PACKAGES, sortByCanonical } from './packages.js';
 import { createRegistry, type ToolRegistry } from './registry.js';
 
@@ -124,111 +126,9 @@ const REGISTRY = fullRegistry();
 // The frozen manifest
 // ---------------------------------------------------------------------------
 
-/**
- * One row per registered tool:
- * `[name, readOnlyHint, destructiveHint, idempotentHint, openWorldHint, writeTier]`.
- * `writeTier` is `undefined` for a read-only tool (the `ToolSpec` contract).
- *
- * Grouped by package in canonical order for reading only — the assertions below
- * compare by name, not by position.
- */
-type AnnotationRow = readonly [
-  name: string,
-  readOnlyHint: boolean,
-  destructiveHint: boolean,
-  idempotentHint: boolean,
-  openWorldHint: boolean,
-  writeTier: WriteTier | undefined,
-];
-
-const ANNOTATION_MANIFEST: readonly AnnotationRow[] = [
-  // package `core` — always on, read-only.
-  ['facebook_whoami', true, false, true, true, undefined],
-  ['facebook_list_pages', true, false, true, true, undefined],
-  ['facebook_get_page', true, false, true, true, undefined],
-  ['facebook_usage', true, false, true, true, undefined],
-
-  // package `reader` — read-only.
-  ['facebook_list_posts', true, false, true, true, undefined],
-  ['facebook_get_post', true, false, true, true, undefined],
-  ['facebook_list_reels', true, false, true, true, undefined],
-  ['facebook_get_reactions', true, false, true, true, undefined],
-  ['facebook_list_stories', true, false, true, true, undefined],
-  ['facebook_list_albums', true, false, true, true, undefined],
-  ['facebook_list_photos', true, false, true, true, undefined],
-
-  // package `posts` — publishing.
-  ['facebook_create_post', false, false, false, true, 'reversible'],
-  ['facebook_create_photo_post', false, false, false, true, 'reversible'],
-  ['facebook_create_video_post', false, false, false, true, 'reversible'],
-  ['facebook_create_reel', false, false, false, true, 'reversible'],
-  ['facebook_create_story', false, false, false, true, 'irreversible'],
-  ['facebook_update_post', false, true, true, true, 'reversible'],
-  ['facebook_delete_post', false, true, true, true, 'irreversible'],
-  ['facebook_list_scheduled_posts', true, false, true, true, undefined],
-  ['facebook_get_video_status', true, false, true, true, undefined],
-
-  // package `insights` — read-only.
-  ['facebook_page_insights', true, false, true, true, undefined],
-  ['facebook_post_insights', true, false, true, true, undefined],
-  ['facebook_reel_insights', true, false, true, true, undefined],
-  ['facebook_get_page_report', true, false, true, true, undefined],
-  ['facebook_get_posts_insights', true, false, true, true, undefined],
-
-  // package `moderation` — comment triage.
-  ['facebook_list_comments', true, false, true, true, undefined],
-  ['facebook_get_comment', true, false, true, true, undefined],
-  ['facebook_triage_comments', true, false, true, true, undefined],
-  ['facebook_reply_to_comment', false, false, false, true, 'reversible'],
-  ['facebook_comment_on_post', false, false, false, true, 'reversible'],
-  ['facebook_edit_comment', false, false, true, true, 'reversible'],
-  ['facebook_hide_comment', false, false, true, true, 'reversible'],
-  ['facebook_reply_and_hide_comment', false, false, false, true, 'reversible'],
-  ['facebook_like_comment', false, false, true, true, 'reversible'],
-  ['facebook_delete_comment', false, true, true, true, 'irreversible'],
-  ['facebook_private_reply', false, true, false, true, 'irreversible'],
-  ['facebook_block_user', false, false, true, true, 'reversible'],
-  ['facebook_unblock_user', false, false, true, true, 'reversible'],
-  ['facebook_get_moderation_settings', true, false, true, true, undefined],
-  ['facebook_set_moderation_settings', false, false, true, true, 'reversible'],
-
-  // package `messages` — Page inbox.
-  ['facebook_list_conversations', true, false, true, true, undefined],
-  ['facebook_get_conversation', true, false, true, true, undefined],
-  ['facebook_send_message', false, true, false, true, 'reversible'],
-  ['facebook_react_to_message', false, false, true, true, 'reversible'],
-  ['facebook_upload_message_attachment', false, false, false, true, 'reversible'],
-  ['facebook_get_activity_since', true, false, false, true, undefined],
-  // Local saved replies: a file on this machine, so the world is closed.
-  ['facebook_list_saved_replies', true, false, true, false, undefined],
-  ['facebook_save_reply', false, false, true, false, 'reversible'],
-  ['facebook_delete_saved_reply', false, false, true, false, 'reversible'],
-  // Custom inbox labels (v2 F11): invisible to the person; delete is permanent.
-  ['facebook_list_labels', true, false, true, true, undefined],
-  ['facebook_create_label', false, false, false, true, 'reversible'],
-  ['facebook_assign_label', false, false, true, true, 'reversible'],
-  ['facebook_delete_label', false, true, true, true, 'irreversible'],
-
-  // package `ads` — off by default.
-  ['facebook_list_campaigns', true, false, true, true, undefined],
-  ['facebook_list_adsets', true, false, true, true, undefined],
-  ['facebook_list_ads', true, false, true, true, undefined],
-  ['facebook_get_ad_object', true, false, true, true, undefined],
-  ['facebook_get_ad_preview', true, false, true, true, undefined],
-  ['facebook_ads_insights', true, false, true, true, undefined],
-  ['facebook_ads_report_status', true, false, true, true, undefined],
-  ['facebook_update_ad_object', false, true, true, true, 'spend'],
-  ['facebook_archive_ad_object', false, true, true, true, 'irreversible'],
-  ['facebook_delete_ad_object', false, true, true, true, 'irreversible'],
-  ['facebook_upload_ad_image', false, false, true, true, 'reversible'],
-  ['facebook_get_ad_set_targeting', true, false, true, true, undefined],
-  ['facebook_update_ad_set_targeting', false, true, true, true, 'spend'],
-  ['facebook_duplicate_ad_object', false, false, false, true, 'irreversible'],
-  ['facebook_boost_post', false, false, false, true, 'irreversible'],
-
-  // package `page_admin` — off by default.
-  ['facebook_update_page_profile', false, false, true, true, 'reversible'],
-];
+// The rows live in one fragment per package under `./annotations/` (each owned
+// by that package's lane); `./annotations/index.ts` concatenates them in
+// canonical package order. Every assertion below reads the concatenated list.
 
 /** The four hints doc 06 requires every tool to spell out. */
 const HINTS = [
@@ -254,8 +154,8 @@ test('the frozen manifest and the registry list exactly the same tools', () => {
   assert.equal(
     tabled.size,
     ANNOTATION_MANIFEST.length,
-    'ANNOTATION_MANIFEST in this file lists the same tool name twice: one row then ' +
-      'shadows the other and a real tool goes unchecked. Remove the duplicate.',
+    'ANNOTATION_MANIFEST (src/mcp/annotations/<pkg>.ts) lists the same tool name twice: ' +
+      'one row then shadows the other and a real tool goes unchecked. Remove the duplicate.',
   );
 
   const missingRows = [...registered].filter((name) => !tabled.has(name)).sort();
@@ -263,8 +163,9 @@ test('the frozen manifest and the registry list exactly the same tools', () => {
     missingRows,
     [],
     `these tools are registered but have no row in ANNOTATION_MANIFEST: ` +
-      `${missingRows.join(', ')}. Fix THIS FILE, not the tool: add a row stating the ` +
-      `four hints and the write tier you intend the tool to advertise. A new tool must ` +
+      `${missingRows.join(', ')}. Fix the package's fragment in src/mcp/annotations/, ` +
+      `not the tool: add a row stating the four hints and the write tier you intend ` +
+      `the tool to advertise. A new tool must ` +
       `have its annotations reviewed here, not only in its own package test.`,
   );
 
@@ -272,9 +173,10 @@ test('the frozen manifest and the registry list exactly the same tools', () => {
   assert.deepEqual(
     staleRows,
     [],
-    `ANNOTATION_MANIFEST in this file still has rows for tools the registry no longer ` +
-      `exposes: ${staleRows.join(', ')}. Fix THIS FILE: delete those rows. If the tools ` +
-      `were meant to survive, the defect is in src/tools/ or in the registry selection.`,
+    `ANNOTATION_MANIFEST (src/mcp/annotations/<pkg>.ts) still has rows for tools the ` +
+      `registry no longer exposes: ${staleRows.join(', ')}. Fix the fragment: delete ` +
+      `those rows. If the tools were meant to survive, the defect is in src/tools/ or ` +
+      `in the registry selection.`,
   );
 });
 
