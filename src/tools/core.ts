@@ -377,7 +377,7 @@ const usageOutputSchema = z.object({
     businessUseCasePct: z.number().optional(),
     adsInsightsThrottlePct: z.number().optional(),
     seenAt: z.number(),
-    raw: z.record(z.string()),
+    raw: z.record(z.string(), z.string()),
   }),
   hasData: z.boolean(),
   /**
@@ -398,6 +398,7 @@ const usageOutputSchema = z.object({
    */
   recent: z
     .record(
+      z.string(),
       z.object({
         pct: z.number().optional(),
         seenAt: z.number(),

@@ -232,11 +232,13 @@ test('no reader tool declares an outputSchema — reads are text-only (CC-MCP-7)
  * `ToolSpec.inputSchema` is a `ZodTypeAny`, so reach the field map through an
  * explicit object narrowing rather than an unchecked property access.
  */
-function isObjectSchema(schema: z.ZodTypeAny): schema is z.ZodObject<z.ZodRawShape> {
+function isObjectSchema(
+  schema: z.ZodTypeAny,
+): schema is z.ZodObject<Record<string, z.ZodTypeAny>> {
   return schema instanceof z.ZodObject;
 }
 
-function shapeOf(schema: z.ZodTypeAny, tool: string): z.ZodRawShape {
+function shapeOf(schema: z.ZodTypeAny, tool: string): Record<string, z.ZodTypeAny> {
   assert.ok(isObjectSchema(schema), `${tool} takes an object schema`);
   return schema.shape;
 }

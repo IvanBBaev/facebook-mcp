@@ -291,7 +291,7 @@ test('the input schemas are strict and demand at least one metric', async () => 
   );
   await rejects(
     tool('facebook_page_insights').handler({ metrics: [] }, ctx),
-    /at least 1/,
+    />=1 items/,
   );
   await rejects(tool('facebook_page_insights').handler({}, ctx), /metrics/);
   await rejects(
@@ -314,7 +314,7 @@ test('the metric list is bounded and max_rows can only shrink the row cap', asyn
   const many = Array.from({ length: 21 }, (_unused, i) => `page_metric_${String(i)}`);
   await rejects(
     tool('facebook_page_insights').handler({ metrics: many }, ctx),
-    /at most 20/,
+    /<=20 items/,
   );
   await rejects(
     tool('facebook_page_insights').handler(
@@ -328,7 +328,7 @@ test('the metric list is bounded and max_rows can only shrink the row cap', asyn
       { metrics: ['page_media_view'], max_rows: 0 },
       ctx,
     ),
-    /greater than or equal to 1/,
+    />=1/,
   );
   assert.equal(fb.calls.length, 0, 'a schema rejection never reaches Graph');
 });

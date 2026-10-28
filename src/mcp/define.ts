@@ -31,7 +31,7 @@ import type {
  * (matching {@link ToolSpec.writeTier} semantics) and MUST agree with
  * `annotations.readOnlyHint`.
  */
-export interface ToolDefinition<Schema extends z.AnyZodObject> {
+export interface ToolDefinition<Schema extends z.ZodObject> {
   /** `facebook_<verb>_<noun>`. */
   readonly name: string;
   readonly title?: string;
@@ -79,7 +79,7 @@ export interface ToolDefinition<Schema extends z.AnyZodObject> {
  *   and a read-only tool must not carry a tier), or if `logFields` is present
  *   but names nothing loggable (an empty array, or a blank argument name).
  */
-export function defineTool<Schema extends z.AnyZodObject>(
+export function defineTool<Schema extends z.ZodObject>(
   def: ToolDefinition<Schema>,
 ): ToolSpec {
   if (def.name.trim().length === 0) {
@@ -124,7 +124,7 @@ export function defineTool<Schema extends z.AnyZodObject>(
 
   const handler: ToolHandler = async (input, ctx) => {
     // `.strict()` parse rejects unknown keys before the author's handler runs.
-    const parsed: z.infer<Schema> = await strictSchema.parseAsync(input);
+    const parsed = (await strictSchema.parseAsync(input)) as z.infer<Schema>;
     return def.handler(parsed, ctx);
   };
 

@@ -1680,19 +1680,19 @@ test('a bulk call above the 50-id cap is rejected before any request is made', a
   await assert.rejects(
     () =>
       tool('facebook_hide_comment').handler({ comment_ids: tooMany, hidden: true }, ctx),
-    /at most 50 element/,
+    /<=50 items/,
   );
   await assert.rejects(
     () => tool('facebook_delete_comment').handler({ comment_ids: tooMany }, ctx),
-    /at most 50 element/,
+    /<=50 items/,
   );
   await assert.rejects(
     () => tool('facebook_block_user').handler({ psids: tooMany }, ctx),
-    /at most 50 element/,
+    /<=50 items/,
   );
   await assert.rejects(
     () => tool('facebook_hide_comment').handler({ comment_ids: [], hidden: true }, ctx),
-    /at least 1 element/,
+    />=1 items/,
   );
 
   assert.equal(fb.calls.length, 0, 'schema rejection happens before the network');

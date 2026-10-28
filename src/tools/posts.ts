@@ -1320,10 +1320,12 @@ function buildCreatePhotoPost() {
       page_timezone: pageTimezoneArg,
       targeting: targetingArg,
       album_id: graphNodeIdArg({
-        description:
-          "Upload into this album instead of the Page's default Timeline Photos album. The album must belong to the Page, accept uploads, and be a normal or app album (not profile/cover).",
         hint: 'Album ids come from facebook_list_albums.',
-      }).optional(),
+      })
+        .optional()
+        .describe(
+          "Upload into this album instead of the Page's default Timeline Photos album. The album must belong to the Page, accept uploads, and be a normal or app album (not profile/cover).",
+        ),
     }),
     annotations: CREATE_ANNOTATIONS,
     writeTier: 'reversible',

@@ -2836,6 +2836,16 @@ setup-token` has nothing to open. The required scopes are named inline now,
 
 ### Security
 
+- **zod moves from `^3.25.76` to `^4.6.7`.** zod below 4.6.6 can exhaust memory
+  while validating oversized constrained collections (GHSA-mrhx-c7xc-m3w5, high),
+  and every tool input is validated by zod before the handler runs. The SDK
+  accepts `^3.25 || ^4.0`, so the 3.x tree is gone from the install. The input
+  schemas in `tools/list` are equivalent but rendered by zod 4: literal unions
+  appear as `anyOf` of `const`, shared sub-schemas are inlined instead of
+  `$ref`-ed, and validation messages read "Too big: expected array to have
+  <=50 items" instead of "Array must contain at most 50 element(s)".
+  `npm audit --omit=dev` reports 0 vulnerabilities.
+
 - **The MCP SDK floor moves from `^1.29.0` to `^1.32.1`.** Every SDK release
   up to 1.31.0 is covered by high-severity advisories, among them one HTTP
   request within the default size limit exhausting server memory during
