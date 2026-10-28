@@ -238,6 +238,10 @@ Changelog release heading, not `## Unreleased`, not `## v1.0.0`, not `## 1.0.0`:
 ...
 ```
 
+First fold the task fragments: `npm run changelog:fold -- --dry-run` to review,
+then `npm run changelog:fold` — it merges `changes/unreleased/*.md` into
+`## [Unreleased]` and deletes them (see `changes/unreleased/README.md`).
+
 Rename the existing `## [Unreleased]` section (or add a new section below it) and
 keep the `Added` / `Changed` / `Fixed` / `Removed` subheadings. Release notes are
 written before the tag, never after — this is the last moment where writing them

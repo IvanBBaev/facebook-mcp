@@ -25,6 +25,7 @@
     "!build/**/*.test.d.ts",
     "!build/testing",
     "!build/core/fakes",
+    "!build/mcp/annotations",
     "!build/mcp/transport.spawn-fixture.*",
     "!build/mcpb",
     "bin"
@@ -38,6 +39,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "changelog:fold": "node scripts/fold-changes.mjs",
     "test": "node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
     "coverage": "npm run build && c8 node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
     "smoke": "node scripts/smoke/run.mjs",
