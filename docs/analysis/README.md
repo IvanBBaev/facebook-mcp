@@ -53,7 +53,7 @@ Three findings shape the design:
 
 - **Phase:** implemented and published, not yet live-verified. This corpus
   preceded implementation by design; `src/` now holds the full server, shipped as
-  `@ivanbaev/facebook-mcp` 0.7.0 on npm (the scope has one `b`, unlike the GitHub
+  `@ivanbaev/facebook-mcp` 0.8.0 on npm (the scope has one `b`, unlike the GitHub
   user `IvanBBaev`), with the registry listing `io.github.IvanBBaev/facebook-mcp`
   active. Nothing has been verified against the live Graph API yet.
 - **Reviews:** seven role-based senior reviews completed 2026-07-21/22 (see

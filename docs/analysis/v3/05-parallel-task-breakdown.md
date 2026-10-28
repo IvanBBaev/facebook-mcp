@@ -373,7 +373,7 @@ Done when: §2 definition of done is green. Commit on the branch; do not merge, 
 
 | Wave | Tasks | Merged |
 |---|---|---|
-| A | U-A1, I-A1, I-A2, U-A2 | — |
+| A | U-A1, I-A1, I-A2, U-A2 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). U-A2 open |
 | 0 | I00, I01, X01–X07 | — |
 | 1 | C01–C06 | — |
 | 2 | L2.* (8), C01b | — |

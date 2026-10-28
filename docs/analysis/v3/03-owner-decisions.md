@@ -17,7 +17,7 @@ before that decision is recorded.
 | V3-D8 | Skills and prompts | A-tasks for resources/prompts | Prompts + plugin skills in 2.x |
 | V3-D9 | Legacy-client support promise in 2.x | wave 6 | Support both eras for all of 2.x |
 | V3-D10 | Stable insights schema: 1.0 or 3.0 | C05 and the insights lane | 1.0 |
-| V3-D11 | Dispatch model | every wave from 0 | ≤ 4 parallel lanes, owner integrates |
+| V3-D11 | Dispatch model | every wave from 0 | ≤ 4 parallel lanes, owner integrates — **Decided 2026-10-28: A** |
 
 ## V3-D1. Adoption checkpoint outcome
 
@@ -132,6 +132,8 @@ alongside the raw `metrics`), so it does not have to wait for a major.
 
 **Recommendation: A.** The integrator is the owner, or one session with the I-tasks only.
 
+**Decided 2026-10-28: A.** Wave A (U-A1) approved the same day.
+
 ## Open v2 decisions carried over
 
 | v2 ID | State on 2026-10-28 | v3 handling |
@@ -140,4 +142,4 @@ alongside the raw `metrics`), so it does not have to wait for a major.
 | D4 insights window | adopted de facto in PR #41's direction | confirm with the live gate before 1.0 |
 | D5 renames | open | superseded by V3-D5 |
 | D6 `outputSchema` on write previews | open | task C03 builds the envelope schema; recommendation unchanged (envelope only) |
-| D7 PR #41 | open | task I-A1 (wave A) |
+| D7 PR #41 | closed 2026-10-28 | recorded as merged; its content landed in `c7ce5b8` |
