@@ -47,6 +47,7 @@ Three findings shape the design:
 | [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) | Multi-agent work plan: waves, task IDs, file ownership, dependency DAG |
 | [12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md) | Post-launch Meta changelog check (2026-10-02): versions, v23.0 sunset, impact matrix, bump recommendation |
 | [v2/](v2/README.md) | v2.0.0 analysis (2026-10-24): fix-before-1.0 list, v1.x backlog, v2 scope, owner decisions, roadmap and risks |
+| [v3/](v3/README.md) | v3.0.0 analysis (2026-10-28): current state vs the v2 plan, v3 scope, owner decisions V3-D1–D11, roadmap to 3.0, parallel-branch task breakdown |
 
 ## Status
 
@@ -73,6 +74,10 @@ Three findings shape the design:
 - **v2.0.0 analysis:** ✎ 2026-10-24: [v2/](v2/README.md) adds a fix-before-1.0
   list (F1–F14) for the contract freeze, plus the 2.0 scope (forced by the MCP SDK
   v2 migration) and owner decisions D1–D7.
+- **v3.0.0 analysis:** ✎ 2026-10-28: [v3/](v3/README.md) places every v3 candidate
+  in its earliest correct release (lean 3.0 = removals, Q4 2027 – Q1 2028) and splits
+  the work from 0.8 to 3.0 into waves of tasks with exclusive file ownership, so they
+  can run in separate branches without conflicts.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
   runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
   the release rail in [../runbooks/release.md](../runbooks/release.md) has already
