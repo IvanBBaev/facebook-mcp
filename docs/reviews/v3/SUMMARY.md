@@ -235,9 +235,9 @@ State on 2026-10-30, after the delegated decisions.
 |---|---|---|---|
 | 1 | Rulesets on `main` and `v*` tags; `release` environment with the owner as required reviewer; `npm-publish` runs in that environment (OPS-02, SD-6) | Done | **Done 2026-10-30** |
 | 2 | Delete the `NPM_TOKEN` secret, revoke the token on npmjs.com, verify the trusted publisher (OPS-01) | Owner | Open — secret-store writes are owner-only |
-| 3 | R01 explicit `advantage_audience`, R02 plan-first moderation free text | Lanes | See doc 05 §11 |
-| 4 | Release 0.8.1 (I-A3) | Owner (tag push, then approve the deployment) | Waits for R01/R02 on `main` and the owner's push |
-| 5 | `PRIVACY.md` (D08) | Docs | See doc 05 §11 |
+| 3 | R01 explicit `advantage_audience`, R02 plan-first moderation free text | Lanes | Done 2026-10-30 (`99ae652`, `ee54de1`) |
+| 4 | Release 0.8.1 (I-A3) | Owner (tag push, then approve the deployment) | R01/R02 are on `main`; waits for the owner's tag push and approval |
+| 5 | `PRIVACY.md` (D08) | Docs | Done 2026-10-30 (`1df6e1f`) |
 | 6 | 2026-11-20 ad terms (U-A9) | Analysis | [10-ad-terms-2026-11-20](10-ad-terms-2026-11-20.md); the liability text goes into D01 |
 | 7 | Thin live pass (U-A3) | Owner | Open — needs a real Page and the test ad account |
 | 8 | Launch U-A2a–d | Owner | Open — after D08 and U-A3; the announcement needs the owner's yes |
