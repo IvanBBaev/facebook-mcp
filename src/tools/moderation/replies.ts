@@ -238,7 +238,8 @@ export function createReplyToCommentTool() {
       'Post a PUBLIC reply under a comment — visible to everyone who can see the ' +
       'thread. Takes `message`, an `attachment` (photo URL, GIF URL or a local ' +
       'photo under FB_MEDIA_DIR), or both. For a private message to the commenter use facebook_private_reply ' +
-      'instead. Additive and reversible by deleting the reply, but NOT idempotent: ' +
+      'instead. Always previews first: apply needs the `plan_id` of that preview. ' +
+      'Additive and reversible by deleting the reply, but NOT idempotent: ' +
       'if the response is lost, verify with facebook_list_comments before retrying, ' +
       'or you will post twice. Needs a PAGE token with pages_manage_engagement and ' +
       'the MODERATE task.',
@@ -285,6 +286,10 @@ export function createReplyToCommentTool() {
       return executeWrite(ctx, {
         tool: 'facebook_reply_to_comment',
         tier: TIERS.facebook_reply_to_comment,
+        // Free text under the Page's name, often drafted while reading the very
+        // comment it answers (SEC-01): the package's apply default must not post
+        // it unseen, so apply is bound to a previewed plan.
+        requirePlanId: true,
         pageId: resolved.pageId,
         resolvedPage: resolved,
         // A local photo's size and hash join the bound params, so a plan built

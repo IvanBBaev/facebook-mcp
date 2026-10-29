@@ -30,7 +30,14 @@
 //    and keeps `destructiveHint:false` on the reversible verbs. That default can
 //    never reach `facebook_delete_comment` or `facebook_private_reply` — the
 //    `irreversible` tier demands `apply:true` AND a `plan_id` from a preview,
-//    whatever the mode says (C4).
+//    whatever the mode says (C4). Nor does it reach the free-text verbs
+//    (`facebook_reply_to_comment`, `facebook_comment_on_post`,
+//    `facebook_edit_comment`, `facebook_reply_and_hide_comment`): text written
+//    as the Page is usually drafted while reading a stranger's comment, so one
+//    injected comment could otherwise publish anything in one call (SEC-01).
+//    Each passes `requirePlanId: true` to the gate, so its apply is bound to a
+//    previewed plan. The default stays for the verbs that carry no text — hide,
+//    unhide, like, unlike, block, unblock.
 //
 // 3. NEVER ALL-OR-NOTHING (CC-MOD-5). The bulk verbs take up to 50 ids, run them
 //    one at a time and return a per-id outcome array. A comment someone deleted
@@ -78,9 +85,11 @@ import {
 
 /**
  * Build the `moderation` package. `writeModeDefault: 'apply'` covers only the
- * `reversible` verbs (reply / hide / block / unblock); `facebook_delete_comment`
- * and `facebook_private_reply` are `irreversible` and therefore always require
- * an explicit `apply:true` plus a `plan_id` from a preview.
+ * `reversible` verbs that carry no free text (hide / like / block / unblock).
+ * The free-text verbs (reply, comment on a post, edit, reply-and-hide) are
+ * plan-bound, and `facebook_delete_comment` and `facebook_private_reply` are
+ * `irreversible`; all of them always require an explicit `apply:true` plus a
+ * `plan_id` from a preview.
  */
 export function createModerationPackage(): PackageSpec {
   return {
@@ -109,7 +118,8 @@ export function createModerationPackage(): PackageSpec {
     enabledByDefault: true,
     // Reversible, high-volume day-to-day work must not stack a plan preview and a
     // client confirm on every comment (A6 / UX #6). The `irreversible` delete and
-    // private reply are unaffected — their tier overrides any default (C4).
+    // private reply are unaffected — their tier overrides any default (C4) — and
+    // so are the plan-bound free-text verbs (SEC-01).
     writeModeDefault: 'apply',
   };
 }

@@ -188,7 +188,8 @@ export function createCommentOnPostTool() {
       'Post a PUBLIC top-level comment as the Page on a post — e.g. a first comment ' +
       'with a link. Takes `message`, an https `attachment_url` photo, or both. To ' +
       'answer a comment use facebook_reply_to_comment instead. @[page-id] mentions ' +
-      'are passed through but Facebook reviews them. Reversible by deleting the ' +
+      'are passed through but Facebook reviews them. Always previews first: apply ' +
+      'needs the `plan_id` of that preview. Reversible by deleting the ' +
       'comment, but NOT idempotent: if the response is lost, verify with ' +
       'facebook_list_comments before retrying, or you will post twice. Needs a PAGE ' +
       'token with pages_manage_engagement and the MODERATE task.',
@@ -215,6 +216,9 @@ export function createCommentOnPostTool() {
       return executeWrite(ctx, {
         tool: 'facebook_comment_on_post',
         tier: TIERS.facebook_comment_on_post,
+        // A public comment with free text and a URL Facebook fetches (SEC-01):
+        // plan-first whatever the package default, like a reply.
+        requirePlanId: true,
         pageId: resolved.pageId,
         resolvedPage: resolved,
         params: {
@@ -278,8 +282,9 @@ export function createEditCommentTool() {
     title: 'Edit own comment',
     description:
       'Replace the text of a comment the Page itself wrote — e.g. fix a typo in a ' +
-      'reply. Comments by anyone else are refused before any write. The plan-mode ' +
-      'preview shows the current and the new text, so the old text can be restored ' +
+      'reply. Comments by anyone else are refused before any write. Always previews ' +
+      'first: apply needs the `plan_id` of that preview, which shows the current ' +
+      'and the new text, so the old text can be restored ' +
       'with a second edit; a comment edited by someone else after the preview makes ' +
       'the plan diverge. Needs a PAGE token with pages_manage_engagement.',
     inputSchema: z.object({
@@ -296,8 +301,8 @@ export function createEditCommentTool() {
       const scope = scopeOf(ctx, resolved);
       const read = () =>
         readEditableComment(ctx.fbRequest, { ...scope, commentId: input.comment_id });
-      // Ownership is checked on every call, not only in plan mode: under the
-      // package's `apply` default no preview runs, and the refusal must hold there.
+      // Ownership is checked on every call, not only in plan mode: a plan for a
+      // comment the Page did not write must never be issued, let alone applied.
       const current = await read();
       if (current.fromId !== resolved.pageId) {
         throw notOwnCommentError(input.comment_id, current.fromId);
@@ -309,6 +314,9 @@ export function createEditCommentTool() {
       return executeWrite(ctx, {
         tool: 'facebook_edit_comment',
         tier: TIERS.facebook_edit_comment,
+        // The new text is public under the Page's name (SEC-01): plan-first
+        // whatever the package default, like a reply.
+        requirePlanId: true,
         pageId: resolved.pageId,
         resolvedPage: resolved,
         params: { comment_id: input.comment_id, message: input.message },

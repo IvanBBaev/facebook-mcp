@@ -744,13 +744,17 @@ that corpus, not a replacement for it.
   receive a token.
 - **Plan-and-apply write gating.** Writes default to `plan` (a non-mutating
   preview); `apply` executes. The exception is `moderation`, which defaults to
-  `apply` because hiding a comment is high-volume, reversible work — and
+  `apply` for its text-free verbs because hiding a comment is high-volume,
+  reversible work — and
   `FB_WRITE_MODE` overrides any package default outright, in either direction, so
   the mode is an operator decision rather than a per-tool promise. What the mode
   cannot touch: irreversible and spend actions always require an out-of-band
   confirmation, and anything that reaches a live audience (publishing a post or a
-  Reel, publishing a scheduled post early, sending a DM) additionally requires a
-  `plan_id` bound to a preview of that exact call. No env flag bypasses either.
+  Reel, publishing a scheduled post early, sending a DM, or a public comment,
+  reply or comment edit as the Page) additionally requires a `plan_id` bound to a
+  preview of that exact call. No env flag bypasses either. A session that reads
+  comments or the inbox should run a read-only profile or a client with
+  elicitation — see [SECURITY.md](SECURITY.md).
 - **Single-choke-point redaction.** Secret values are stripped at one place
   before anything reaches logs, errors, tool results or the write journal; Page
   access tokens are derived to a boolean and their values never enter a payload.

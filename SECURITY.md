@@ -82,6 +82,20 @@ These are properties the design commits to; grounded in the corpus:
   content, a **read-only package profile is the recommended configuration** so
   that reading untrusted content and taking destructive/spend actions are never
   enabled in the same session.
+- **Comment and inbox sessions.** A session that reads comments or the
+  Messenger inbox is reading text written by strangers, and the default package
+  profile can also post as the Page in that same session. Run such a session
+  with a read-only profile (`FB_PACKAGES_READONLY`), or with an MCP client that
+  supports elicitation so a human sees each confirmation. Since 0.8.1 the
+  free-text moderation verbs (`facebook_reply_to_comment`,
+  `facebook_comment_on_post`, `facebook_edit_comment`,
+  `facebook_reply_and_hide_comment`) are plan-first: they always return a
+  preview, and only an `apply:true` bound to that preview's `plan_id` posts.
+  Neither the `moderation` package's `apply` default nor `FB_WRITE_MODE=apply`
+  skips the preview. Verbs that carry no text (hide, unhide, like, unlike,
+  block, unblock) keep the one-call `apply` default. Plan-first makes a public
+  reply a deliberate two-step action, but both steps are still model calls; it
+  is not a human confirmation.
 - **Append-only write journal.** Applied writes are recorded as structured
   metadata (no tokens, no PII — it passes through the same redactor), written
   `0600` under the XDG state directory, non-blocking, and size-rotated.

