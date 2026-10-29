@@ -16,7 +16,7 @@ before that decision is recorded.
 | V3-D7 | Threads | none | Never in this server |
 | V3-D8 | Skills and prompts | A-tasks for resources/prompts | Prompts + plugin skills in 2.x |
 | V3-D9 | Legacy-client support promise in 2.x | wave 6 | Support both eras for all of 2.x |
-| V3-D10 | Stable insights schema: 1.0 or 3.0 | C05 and the insights lane | 1.0 |
+| V3-D10 | Stable insights schema: 1.0 or 3.0 | C05 and the insights lane | 1.0 — **Decided 2026-10-29: 1.0** |
 | V3-D11 | Dispatch model | every wave from 0 | ≤ 4 parallel lanes, owner integrates — **Decided 2026-10-28: A** |
 
 ## V3-D1. Adoption checkpoint outcome
@@ -121,6 +121,8 @@ A server-owned schema (`views`, `viewers`, `engagements`, `follows`…, each wit
 `source_metric` and `status: ok | removed | empty`) absorbs that churn. Shipping it in 1.0
 means later waves become a status change, not a breaking change. It is additive (new fields
 alongside the raw `metrics`), so it does not have to wait for a major.
+
+**Decided 2026-10-29: 1.0.** C05 is dispatched in wave 1.
 
 ## V3-D11. Dispatch model
 
