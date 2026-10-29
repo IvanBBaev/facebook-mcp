@@ -474,6 +474,11 @@ jobs:
       !cancelled()
       && needs.gate.result == 'success'
       && (needs.bundle.result == 'success' || needs.bundle.result == 'skipped')
+    # A real publish waits for a human: the `release` environment requires the
+    # owner's approval and only admits `v*` tags. A rehearsal (dry run, from
+    # `main`) runs without it, so the expression yields no environment there.
+    # Every later publishing job needs this one, so the one approval gates them.
+    environment: ${{ needs.gate.outputs.publish == 'true' && 'release' || '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

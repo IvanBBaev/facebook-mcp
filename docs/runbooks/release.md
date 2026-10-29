@@ -59,9 +59,11 @@ outside GitHub Actions.
    | Workflow filename    | `release.yml`    |
    | Environment          | _(leave empty)_  |
 
-   The binding is exact-match: renaming the workflow file, moving the repo, or
-   adding a job `environment:` all break publishing until the trusted publisher
-   is updated to match.
+   The binding is exact-match: renaming the workflow file or moving the repo
+   breaks publishing until the trusted publisher is updated to match. Since
+   2026-10-30 the `npm-publish` job runs in the `release` GitHub environment
+   (owner approval, `v*` tags only). With the Environment field empty, npm does
+   not check the environment; to bind it tighter, set the field to `release`.
 
    > **Already done for this package** (v0.7.0, 2026-08-27). npm would not
    > pre-register a trusted publisher for a name that did not exist yet, so the
@@ -259,6 +261,11 @@ git push origin v1.0.0
 
 The tag must be `v<version>` — the workflow triggers on `v*.*.*` and asserts
 `tag == package.json.version`. Nothing else starts a release.
+
+**Approve the deployment.** After `gate` and `bundle` pass, `npm-publish` waits for
+review in the `release` environment. Open the run in the Actions tab, choose
+*Review deployments*, tick `release` and approve. Nothing is published until you
+do; rejecting it stops the release before the registry is touched.
 
 **Prereleases publish to a prerelease dist-tag, automatically.** `v*.*.*` also
 matches `v1.0.0-rc.1`, so the gate derives the npm dist-tag from the version
