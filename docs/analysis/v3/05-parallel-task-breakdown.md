@@ -83,7 +83,7 @@ Waves order *development*. Phase gates in doc 04 order *releases*.
 - [ ] `npm run check` green in the task worktree:
   - guard
   - typecheck
-  - lint (layers `core ← api ← mcp ← tools`)
+  - lint (layers `core ← api ← mcp ← tools ← cli ← server`)
   - format
   - build
   - tests
@@ -374,7 +374,7 @@ Done when: §2 definition of done is green. Commit on the branch; do not merge, 
 | Wave | Tasks | Merged |
 |---|---|---|
 | A | U-A1, I-A1, I-A2, U-A2 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). U-A2 open |
-| 0 | I00, I01, X01–X07 | — |
+| 0 | I00, I01, X01–X07 | All (2026-10-29; `tools/list` byte-identical to the 0.8.0 baseline). Deferred: split `runSetupToken` in `src/cli/setup-token/flow.ts` (825 lines); adopt `src/api/upload-session.ts` in the media upload paths (L2.posts); optional `release.yml` guard against unfolded `changes/unreleased/` fragments; lane ownership of the shared `src/mcp/annotations/messages.ts` fragment (saved replies + activity); remove the `src/mcp/setup-token.ts` facade and its ESLint override; split the large test files |
 | 1 | C01–C06 | — |
 | 2 | L2.* (8), C01b | — |
 | 3 | I30–I32, U30 | — |
