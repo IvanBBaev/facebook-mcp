@@ -1,5 +1,8 @@
 # Role-Based Reviews of the Analysis Corpus
 
+> **Later round:** the implemented code at 0.8.0 was reviewed on 2026-10-29 by nine roles —
+> see [v3/README.md](v3/README.md). This page describes the first, pre-code round.
+
 Before implementation, the pre-code analysis corpus (`docs/analysis/`) is
 reviewed by senior-level reviewers, one per role. Each review is an independent,
 critical pass over the full corpus with the raw research (`docs/ai/research/`)
