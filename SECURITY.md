@@ -133,6 +133,10 @@ runbooks:
 - [Write kill-switch](docs/runbooks/kill-switch.md)
 - [Offboarding / clean uninstall](docs/runbooks/offboarding.md)
 
+What the server reads, where that data goes, which local files it keeps (and for
+how long), and the operator's own data-protection duties are described in
+[PRIVACY.md](PRIVACY.md).
+
 ## Out of scope for the threat model
 
 Stated soberly, so expectations are honest:

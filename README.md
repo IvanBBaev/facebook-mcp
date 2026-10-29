@@ -709,6 +709,9 @@ your token. Automating them does not exempt you from the rules that govern them:
 The security-side counterpart is in
 [`SECURITY.md`](SECURITY.md#out-of-scope-for-the-threat-model).
 
+What data the tools read, where it goes (including your AI provider) and what
+stays on disk is described in the [privacy notice](PRIVACY.md).
+
 ## Roadmap
 
 Work is tracked publicly on the
