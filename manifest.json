@@ -311,7 +311,7 @@
     },
     {
       "name": "facebook_update_ad_set_targeting",
-      "description": "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is."
+      "description": "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is, except that an unset Advantage+…"
     },
     {
       "name": "facebook_duplicate_ad_object",
