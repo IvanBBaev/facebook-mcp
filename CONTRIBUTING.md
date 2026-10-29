@@ -55,16 +55,27 @@ To auto-fix formatting: `npm run format`.
 
 ## Architecture rule: layers point leftward only
 
-The codebase is a lint-enforced four-layer stack:
+The codebase is a lint-enforced six-layer stack:
 
 ```
-core ← api ← mcp ← tools
+core ← api ← mcp ← tools ← cli ← server
 ```
 
 Imports may only point **leftward** — `tools` may import from `mcp`, `api`, and
 `core`; `mcp` may import from `api` and `core`; `api` may import from `core`;
-`core` imports from nothing above it. This is enforced by ESLint
-`no-restricted-imports`, so a wrong-direction import fails `npm run check`, not
+`core` imports from nothing above it. Two exceptions to strict ordering:
+
+- `cli/` (operator subcommands such as `setup-token`) may import `core`, `api`
+  and `mcp` only — never `tools` or `server`.
+- `server/` (process entry, bootstrap, request handlers; `src/index.ts` is its
+  entry facade) is the top layer and may import every layer below it. Nothing
+  imports `server/`.
+
+The one allowed upward import is the facade `src/mcp/setup-token.ts`, which
+re-exports `cli/setup-token/` until a later task removes it.
+
+This is enforced by ESLint (`import-x/no-restricted-paths` plus
+`no-restricted-imports`), so a wrong-direction import fails `npm run check`, not
 just review. In particular, `tools` must **never** import `core/http` directly —
 all Graph traffic goes through the `api` layer.
 

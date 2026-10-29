@@ -67,7 +67,7 @@ tool wraps one real capability rather than mirroring every Graph edge.
   require out-of-band confirmation and are never bypassed by an env flag.
 - **Secret hygiene.** Value-based redaction at a single choke-point across logs,
   errors, tool results, and the write journal.
-- **Layered architecture.** Lint-enforced `core ← api ← mcp ← tools` layering,
+- **Layered architecture.** Lint-enforced `core ← api ← mcp ← tools ← cli ← server` layering,
   tools-as-data with a central package registry.
 
 ## Requirements

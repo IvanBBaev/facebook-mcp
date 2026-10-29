@@ -15,14 +15,14 @@ says "as in servicenow-mcp", the pattern is described in
   coverage gates; `fast-check` for property tests where useful.
 - **Lint/format:** ESLint 9 flat config + typescript-eslint 8 (type-checked),
   `no-floating-promises: error`, prettier.
-- Entry: `src/index.ts` → `build/`; ESM `bin/facebook-mcp.mjs` launcher with a
+- Entry: `src/index.ts` (facade over `src/server/*`) → `build/`; ESM `bin/facebook-mcp.mjs` launcher with a
   Node version guard.
 
 ## Layering (lint-enforced)
 
 ```
 src/
-  index.ts        # bootstrap + CLI subcommands (doctor, setup-token later)
+  index.ts        # entry facade (re-exports server/, self-run guard)
   core/           # L0: config, settings, auth + per-page token resolver
                   #     (auth.ts, pages-registry.ts), http client (http.ts) +
                   #     upload protocols (http-upload.ts), host allowlist,
@@ -35,9 +35,13 @@ src/
   mcp/            # L2: define/registry/packages, result shaper, write-mode +
                   #     journal, transport, taint/confirm seams
   tools/          # L3: ToolSpec[] per package — data, not code
+  cli/            # L4: operator subcommands (setup-token); core/api/mcp only
+  server/         # L5: bootstrap, CLI args, doctor command, request handlers
 ```
 
-`core ← api ← mcp ← tools` enforced via ESLint `no-restricted-imports`; tools
+`core ← api ← mcp ← tools ← cli ← server` enforced via ESLint
+(`import-x/no-restricted-paths` + `no-restricted-imports`; `cli` may not import
+`tools`; `src/mcp/setup-token.ts` is the one allowed facade into `cli`); tools
 never import `core/http` directly.
 
 ## Key decisions (Graph-API-specific deltas from servicenow-mcp)
