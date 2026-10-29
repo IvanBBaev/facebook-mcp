@@ -2482,6 +2482,18 @@ test('get targeting returns the summary, the raw blob only on request', async ()
   assert.deepEqual(raw.targeting, simpleTargeting());
 });
 
+test('get targeting says when Advantage+ audience is unset', async () => {
+  const { fb, ctx } = makeHarness();
+  stubTargetingReads(fb, simpleTargeting({ targeting_automation: undefined }));
+  const get = tool('facebook_get_ad_set_targeting');
+
+  const summary = obj(
+    body(await get.handler(get.inputSchema.parse({ adset_id: ADSET_ID }), ctx)).summary,
+  );
+  assert.equal(summary.advantage_audience_state, 'unset');
+  assert.equal(summary.advantage_audience, null);
+});
+
 test('get targeting refuses an ad set from another explicitly named account', async () => {
   const { fb, ctx } = makeHarness();
   fb.on(

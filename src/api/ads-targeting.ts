@@ -10,8 +10,10 @@
 // so it is allowed only on an audience simple enough that replacing three keys
 // cannot silently change anything else: no custom audiences, no detailed
 // targeting, no sub-country geography, no exclusions, Advantage+ audience off.
-// Every other key is carried over byte-identical. The planner is PURE; the
-// reads it needs are made by the caller.
+// Every other key is carried over byte-identical, with one exception: an
+// unset `targeting_automation.advantage_audience` is written explicitly as 0,
+// because from Graph v23 Meta may default an absent value to 1 (audience
+// expansion on). The planner is PURE; the reads it needs are made by the caller.
 
 import { createHash } from 'node:crypto';
 
@@ -106,6 +108,9 @@ const EXCLUSION_KEYS: readonly string[] = [
 
 export type Targeting = Readonly<Record<string, unknown>>;
 
+/** Advantage+ audience as stored; `unset` when the blob does not carry it. */
+export type AdvantageAudienceState = 'on' | 'off' | 'unset';
+
 export interface AdSetTargetingRead {
   readonly id: string;
   readonly name?: string;
@@ -122,6 +127,8 @@ export interface TargetingSummary {
   readonly genders: readonly number[];
   readonly locales_count: number;
   readonly advantage_audience: boolean | null;
+  /** The same as a tri-state: `unset` means Meta may default it on (v23+). */
+  readonly advantage_audience_state: AdvantageAudienceState;
   readonly has_detailed_targeting: boolean;
   readonly has_custom_audiences: boolean;
   readonly has_exclusions: boolean;
@@ -185,6 +192,12 @@ function advantageAudience(targeting: Targeting): boolean | null {
   return null;
 }
 
+/** {@link advantageAudience} as a tri-state; `unset` covers an unreadable value too. */
+export function advantageAudienceState(targeting: Targeting): AdvantageAudienceState {
+  const on = advantageAudience(targeting);
+  return on === null ? 'unset' : on ? 'on' : 'off';
+}
+
 /**
  * Why a read-modify-write of this blob could drop or change something this
  * server does not model. Empty means the narrow edit is safe.
@@ -225,6 +238,7 @@ export function summarizeTargeting(targeting: Targeting): TargetingSummary {
       : [],
     locales_count: count(targeting.locales),
     advantage_audience: advantageAudience(targeting),
+    advantage_audience_state: advantageAudienceState(targeting),
     has_detailed_targeting: DETAILED_KEYS.some((key) => nonEmpty(targeting[key])),
     has_custom_audiences: nonEmpty(targeting.custom_audiences),
     has_exclusions: EXCLUSION_KEYS.some((key) => nonEmpty(targeting[key])),
@@ -282,6 +296,8 @@ export interface TargetingEditPlan {
   readonly changedFields: readonly ('countries' | 'age_min' | 'age_max')[];
   /** EU countries this edit adds to an audience that had none. */
   readonly euAdded: readonly string[];
+  /** Advantage+ audience was unset and the edit writes it explicitly as 0. */
+  readonly advantageAudienceSetOff: boolean;
 }
 
 /** Upper-case and de-duplicate, keeping the caller's order. */
@@ -350,6 +366,14 @@ export function planTargetingEdit(
   }
   if (changedFields.includes('age_min')) next.age_min = afterMin;
   if (changedFields.includes('age_max')) next.age_max = afterMax;
+  // An absent value may default to 1 on write (v23+); pin it off explicitly.
+  const advantageAudienceSetOff = advantageAudienceState(current) === 'unset';
+  if (advantageAudienceSetOff) {
+    next.targeting_automation = {
+      ...asRecord(current.targeting_automation),
+      advantage_audience: 0,
+    };
+  }
 
   const hadEu = beforeCountries.some((c) => EU_COUNTRIES.has(c));
   const euAdded = hadEu ? [] : afterCountries.filter((c) => EU_COUNTRIES.has(c));
@@ -360,6 +384,7 @@ export function planTargetingEdit(
     after: { countries: afterCountries, ageMin: afterMin, ageMax: afterMax },
     changedFields,
     euAdded,
+    advantageAudienceSetOff,
   };
 }
 
@@ -379,7 +404,10 @@ export function targetingEditSummary(adsetId: string, plan: TargetingEditPlan): 
       `ages ${ageRange(plan.before.ageMin, plan.before.ageMax)} → ${ageRange(plan.after.ageMin, plan.after.ageMax)}`,
     );
   }
-  return `Change the audience of ad set ${adsetId}: ${parts.join('; ')}. Everything else in its targeting is kept as is.`;
+  const advantage = plan.advantageAudienceSetOff
+    ? ' Advantage+ audience: set explicitly OFF (was unset).'
+    : '';
+  return `Change the audience of ad set ${adsetId}: ${parts.join('; ')}. Everything else in its targeting is kept as is.${advantage}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -69,7 +69,7 @@ export const getAdSetTargetingTool = defineTool({
   name: 'facebook_get_ad_set_targeting',
   title: 'Get Ad Set Targeting',
   description:
-    "Read one ad set's audience and summarise it in plain terms: countries, counts of regions / cities / locales, age range, genders, placements, and flags for detailed targeting, custom audiences, exclusions and Advantage+ audience. `editable_by_this_server` says whether facebook_update_ad_set_targeting can change it, and `not_editable_because` says why not. Pass include_raw:true to also get the raw targeting spec (omitted above 64 KB).",
+    "Read one ad set's audience and summarise it in plain terms: countries, counts of regions / cities / locales, age range, genders, placements, and flags for detailed targeting, custom audiences, exclusions and Advantage+ audience (`advantage_audience_state` is on / off / unset; unset may default to on at Meta). `editable_by_this_server` says whether facebook_update_ad_set_targeting can change it, and `not_editable_because` says why not. Pass include_raw:true to also get the raw targeting spec (omitted above 64 KB).",
   inputSchema: z.object({
     adset_id: adsetIdArg,
     ad_account_id: adAccountIdArg,
@@ -130,7 +130,7 @@ export const updateAdSetTargetingTool = defineTool({
   name: 'facebook_update_ad_set_targeting',
   title: 'Update Ad Set Targeting',
   description:
-    "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is. Refused when the audience is more complex than that (custom audiences, detailed targeting, regions/cities/zips, exclusions, Advantage+ audience on) — check editable_by_this_server with facebook_get_ad_set_targeting first. Adding EU countries to an audience that had none needs DSA payor/beneficiary info on the ad set or the account. Plan-first: without apply:true this returns a preview (before → after) and changes NOTHING; applying requires apply:true plus the plan_id from that preview, and is refused if the targeting changed in between.",
+    "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is, except that an unset Advantage+ audience is written explicitly OFF so Meta cannot default it on. Refused when the audience is more complex than that (custom audiences, detailed targeting, regions/cities/zips, exclusions, Advantage+ audience on) — check editable_by_this_server with facebook_get_ad_set_targeting first. Adding EU countries to an audience that had none needs DSA payor/beneficiary info on the ad set or the account. Plan-first: without apply:true this returns a preview (before → after) and changes NOTHING; applying requires apply:true plus the plan_id from that preview, and is refused if the targeting changed in between.",
   inputSchema: z.object({
     adset_id: adsetIdArg,
     ad_account_id: adAccountIdArg,
@@ -242,6 +242,7 @@ export const updateAdSetTargetingTool = defineTool({
         changedFields: plan.changedFields,
         before: plan.before,
         after: plan.after,
+        advantageAudienceSetOff: plan.advantageAudienceSetOff,
       },
     });
   },

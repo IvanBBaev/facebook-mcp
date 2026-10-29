@@ -8,18 +8,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createFakeFbRequest, fbErr, fbOk } from '../core/fakes/index.js';
-import { GraphApiError, classifyGraphError, type JsonRequest } from '../core/index.js';
+import {
+  GraphApiError,
+  classifyGraphError,
+  type FbRequest,
+  type JsonRequest,
+} from '../core/index.js';
 import { normalizeAdNode } from './ads-read.js';
 
 import {
   COPY_PAUSED_NOTE,
   DEFAULT_RENAME_SUFFIX,
+  advantageAudienceAlert,
   applyCopy,
+  copiedAdSets,
   copyRequest,
   parseCopyResult,
   pauseAlert,
   planCopy,
   readCopyTree,
+  verifyAdvantageAudience,
   verifyPaused,
   type CopyPlanInput,
   type CopyTree,
@@ -445,4 +453,127 @@ test('apply copies, verifies every copied id and maps a gone source', async () =
   const gone = createFakeFbRequest();
   gone.on(() => true, fbErr(graphError(100, 'Unsupported post request.')));
   await assert.rejects(applyCopy(gone.fn, plan), /may be DELETED or ARCHIVED/);
+});
+
+// ---------------------------------------------------------------------------
+// Advantage+ audience read-back
+// ---------------------------------------------------------------------------
+
+/** Answer a targeting read of `id` with this `targeting_automation`. */
+function targetingOf(id: string, automation?: Record<string, unknown>) {
+  return fbOk({
+    id,
+    targeting: {
+      geo_locations: { countries: ['US'] },
+      ...(automation !== undefined ? { targeting_automation: automation } : {}),
+    },
+  });
+}
+
+/** A read of `id` that asks for its targeting, not its status. */
+function isTargetingRead(r: FbRequest, id: string): boolean {
+  return (
+    r.protocol === 'json' &&
+    r.method === 'GET' &&
+    r.path === `/${id}` &&
+    String(r.params?.fields).includes('targeting')
+  );
+}
+
+test('copied ad sets are paired with their sources', () => {
+  assert.deepEqual(
+    copiedAdSets(
+      { objectId: ADSET_ID, level: 'adset' },
+      {
+        copiedId: '901',
+        copiedObjects: [
+          { type: 'ad_set', source_id: ADSET_ID, copied_id: '901' },
+          { type: 'ad', source_id: AD_ID, copied_id: '902' },
+        ],
+      },
+    ),
+    [{ source_id: ADSET_ID, copied_id: '901' }],
+  );
+  assert.deepEqual(
+    copiedAdSets(
+      { objectId: AD_ID, level: 'ad' },
+      { copiedId: '902', copiedObjects: [] },
+    ),
+    [],
+  );
+});
+
+test('a copy that ends with Advantage+ audience on is flagged against an off or unset source', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((r) => isTargetingRead(r, '901'), targetingOf('901', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, '903'), targetingOf('903', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, '905'), targetingOf('905', { advantage_audience: 0 }));
+  fb.on((r) => isTargetingRead(r, 'A'), targetingOf('A', { advantage_audience: 0 }));
+  fb.on((r) => isTargetingRead(r, 'B'), targetingOf('B'));
+  const check = await verifyAdvantageAudience(fb.fn, [
+    { source_id: 'A', copied_id: '901' },
+    { source_id: 'B', copied_id: '903' },
+    { source_id: 'C', copied_id: '905' },
+  ]);
+  assert.deepEqual(check.expanded, [
+    { source_id: 'A', copied_id: '901', source: 'off', copy: 'on' },
+    { source_id: 'B', copied_id: '903', source: 'unset', copy: 'on' },
+  ]);
+  assert.deepEqual(check.unreadable, []);
+  assert.equal(
+    fb.calls.some((c) => c.path === '/C'),
+    false,
+    'a copy that is not on needs no source read',
+  );
+  const alert = String(advantageAudienceAlert(check));
+  assert.match(
+    alert,
+    /^WARNING: copy 901 has Advantage\+ audience ON while its source A had it OFF/,
+  );
+  assert.match(alert, /copy 903 .* source B had it unset/);
+});
+
+test('a copy that matches its source, or cannot be read, is not flagged as expanded', async () => {
+  const fb = createFakeFbRequest();
+  fb.on((r) => isTargetingRead(r, '901'), targetingOf('901', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, 'A'), targetingOf('A', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, '903'), fbErr(graphError(100, 'nope')));
+  fb.on((r) => isTargetingRead(r, '905'), targetingOf('905', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, 'C'), fbErr(graphError(100, 'nope')));
+  const check = await verifyAdvantageAudience(fb.fn, [
+    { source_id: 'A', copied_id: '901' },
+    { source_id: 'B', copied_id: '903' },
+    { source_id: 'C', copied_id: '905' },
+  ]);
+  assert.deepEqual(check.expanded, []);
+  assert.deepEqual(check.unreadable, ['903', '905']);
+  assert.match(
+    String(advantageAudienceAlert(check)),
+    /^WARNING: the Advantage\+ audience of 903, 905 could not be checked/,
+  );
+  assert.equal(advantageAudienceAlert({ expanded: [], unreadable: [] }), undefined);
+});
+
+test('an ad-set copy that Meta turned Advantage+ audience on for carries the flag and the alert', async () => {
+  const plan = planCopy(
+    input({
+      objectId: ADSET_ID,
+      level: 'adset',
+      tree: { source: adset(), campaign: campaign() },
+    }),
+  );
+  const fb = createFakeFbRequest();
+  fb.on(
+    (r) => r.method === 'POST' && r.path === `/${ADSET_ID}/copies`,
+    fbOk({ copied_adset_id: '901' }),
+  );
+  fb.on((r) => isTargetingRead(r, '901'), targetingOf('901', { advantage_audience: 1 }));
+  fb.on((r) => isTargetingRead(r, ADSET_ID), targetingOf(ADSET_ID));
+  fb.on((r) => r.method === 'GET', fbOk({ status: 'PAUSED' }));
+  const out = await applyCopy(fb.fn, plan);
+  assert.deepEqual(out.verification.paused, ['901']);
+  assert.deepEqual(out.advantageAudience?.expanded, [
+    { source_id: ADSET_ID, copied_id: '901', source: 'unset', copy: 'on' },
+  ]);
+  assert.match(String(out.alert), /^WARNING: copy 901 has Advantage\+ audience ON/);
 });

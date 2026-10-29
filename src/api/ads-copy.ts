@@ -14,12 +14,20 @@
 // and passes it in, so a refusal happens with certainty that nothing was
 // created. A copy cannot be retried safely (a retry duplicates again), so an
 // ambiguous answer is reconciled by the rename suffix, never by re-sending.
+//
+// After the copy, every copied ad set's targeting is read back next to its
+// source's: from Graph v23 an absent `advantage_audience` may default to 1, so
+// a copy can end with audience expansion ON where the source had it off or
+// unset. `/copies` takes no targeting override, so the copy is flagged, not
+// rewritten.
 
 import { GraphApiError, classifyGraphError } from '../core/index.js';
 import type { FbRequestFn, JsonRequest } from '../core/index.js';
 import { MARKETING_API, getAdObject } from './ads-read.js';
 import type { AdLevel, AdRecord } from './ads-read.js';
 import { OUT_OF_SCOPE_ADVANTAGE_STATES, mapUpdateError } from './ads-control.js';
+import { advantageAudienceState, readAdSetTargeting } from './ads-targeting.js';
+import type { AdvantageAudienceState } from './ads-targeting.js';
 import {
   SPEND_CAP_REMOVAL_SENTINEL,
   describeEnvelope,
@@ -713,6 +721,89 @@ export async function verifyPaused(
   return { paused, repaused, unreadable };
 }
 
+/** One copied ad set whose Advantage+ audience is on where its source's was not. */
+export interface AdvantageAudienceFlag {
+  readonly source_id: string;
+  readonly copied_id: string;
+  readonly source: Exclude<AdvantageAudienceState, 'on'>;
+  readonly copy: 'on';
+}
+
+export interface AdvantageAudienceCheck {
+  /** Copies that ended with Advantage+ audience on while the source had it off or unset. */
+  readonly expanded: readonly AdvantageAudienceFlag[];
+  /** Copied ad sets whose targeting (or their source's) could not be read. */
+  readonly unreadable: readonly string[];
+}
+
+/** The copied ad sets of a copy answer, each paired with its source. */
+export function copiedAdSets(
+  plan: Pick<CopyPlan, 'objectId' | 'level'>,
+  parsed: CopyResult,
+): readonly { readonly source_id: string; readonly copied_id: string }[] {
+  const pairs = new Map<string, string>();
+  if (plan.level === 'adset' && parsed.copiedId !== undefined) {
+    pairs.set(parsed.copiedId, plan.objectId);
+  }
+  for (const entry of parsed.copiedObjects) {
+    if (/^ad_?set$/i.test(entry.type)) pairs.set(entry.copied_id, entry.source_id);
+  }
+  return [...pairs].map(([copied_id, source_id]) => ({ source_id, copied_id }));
+}
+
+/**
+ * Read back each copied ad set's Advantage+ audience next to its source's and
+ * flag the copies Meta turned on. Never throws, except on abort.
+ */
+export async function verifyAdvantageAudience(
+  fbRequest: FbRequestFn,
+  pairs: readonly { readonly source_id: string; readonly copied_id: string }[],
+  signal?: AbortSignal,
+): Promise<AdvantageAudienceCheck> {
+  const expanded: AdvantageAudienceFlag[] = [];
+  const unreadable: string[] = [];
+  const stateOf = async (id: string): Promise<AdvantageAudienceState | undefined> => {
+    try {
+      return advantageAudienceState(
+        (await readAdSetTargeting(fbRequest, id, signal)).targeting,
+      );
+    } catch (err) {
+      if (signal?.aborted === true) throw err;
+      return undefined;
+    }
+  };
+  for (const pair of pairs) {
+    const copy = await stateOf(pair.copied_id);
+    if (copy === undefined) {
+      unreadable.push(pair.copied_id);
+      continue;
+    }
+    if (copy !== 'on') continue;
+    const source = await stateOf(pair.source_id);
+    if (source === undefined) unreadable.push(pair.copied_id);
+    else if (source !== 'on') expanded.push({ ...pair, source, copy });
+  }
+  return { expanded, unreadable };
+}
+
+/** The loud line for copies whose Advantage+ audience is on or unknown. */
+export function advantageAudienceAlert(
+  check: AdvantageAudienceCheck,
+): string | undefined {
+  const parts: string[] = [];
+  for (const flag of check.expanded) {
+    parts.push(
+      `copy ${flag.copied_id} has Advantage+ audience ON while its source ${flag.source_id} had it ${flag.source === 'off' ? 'OFF' : 'unset'} — it may deliver outside the source's countries and ages; turn it off in Ads Manager before activating`,
+    );
+  }
+  if (check.unreadable.length > 0) {
+    parts.push(
+      `the Advantage+ audience of ${check.unreadable.join(', ')} could not be checked — check it with facebook_get_ad_set_targeting before activating`,
+    );
+  }
+  return parts.length === 0 ? undefined : `WARNING: ${parts.join('; ')}.`;
+}
+
 export interface CopyOutcome {
   readonly sourceId: string;
   readonly level: AdLevel;
@@ -721,7 +812,12 @@ export interface CopyOutcome {
   readonly copiedObjects: readonly CopiedObject[];
   readonly status: 'PAUSED';
   readonly verification: PauseVerification;
-  /** Present when a copy was found not PAUSED or could not be read back. */
+  /** Copied ad sets' Advantage+ audience, read back; omitted when no ad set was copied. */
+  readonly advantageAudience?: AdvantageAudienceCheck;
+  /**
+   * Present when a copy was found not PAUSED or could not be read back, or a
+   * copied ad set ended with Advantage+ audience on (or unknown).
+   */
   readonly alert?: string;
 }
 
@@ -767,7 +863,18 @@ export async function applyCopy(
   if (parsed.copiedId !== undefined) ids.add(parsed.copiedId);
   for (const entry of parsed.copiedObjects) ids.add(entry.copied_id);
   const verification = await verifyPaused(fbRequest, [...ids], signal);
-  const alert = pauseAlert(verification);
+  const pairs = copiedAdSets(plan, parsed);
+  const advantageAudience =
+    pairs.length > 0
+      ? await verifyAdvantageAudience(fbRequest, pairs, signal)
+      : undefined;
+  const alerts = [
+    pauseAlert(verification),
+    advantageAudience !== undefined
+      ? advantageAudienceAlert(advantageAudience)
+      : undefined,
+  ].filter((line): line is string => line !== undefined);
+  const alert = alerts.length > 0 ? alerts.join(' ') : undefined;
   return {
     sourceId: plan.objectId,
     level: plan.level,
@@ -776,6 +883,7 @@ export async function applyCopy(
     copiedObjects: parsed.copiedObjects,
     status: 'PAUSED',
     verification,
+    ...(advantageAudience !== undefined ? { advantageAudience } : {}),
     ...(alert !== undefined ? { alert } : {}),
   };
 }

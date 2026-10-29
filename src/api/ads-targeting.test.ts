@@ -99,6 +99,20 @@ test('an empty blob summarises without throwing', () => {
   assert.deepEqual(summary.countries, []);
   assert.equal(summary.age_min, null);
   assert.equal(summary.advantage_audience, null);
+  assert.equal(summary.advantage_audience_state, 'unset');
+});
+
+test('Advantage+ audience reads as on, off or unset', () => {
+  const state = (automation: unknown) =>
+    summarizeTargeting(simple({ targeting_automation: automation }))
+      .advantage_audience_state;
+  assert.equal(state({ advantage_audience: 1 }), 'on');
+  assert.equal(state({ advantage_audience: '0' }), 'off');
+  assert.equal(state({ individual_setting: { age: 1 } }), 'unset');
+  assert.equal(state(undefined), 'unset');
+  const unset = summarizeTargeting(simple({ targeting_automation: undefined }));
+  assert.equal(unset.advantage_audience, null, 'the boolean field is unchanged');
+  assert.equal(unset.editable_by_this_server, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -185,6 +199,36 @@ test('the summary names before and after', () => {
   assert.match(text, /countries US, CA → MX/);
   assert.match(text, /ages 25–54 → 30–54/);
   assert.match(text, /Everything else in its targeting is kept/);
+});
+
+test('an unset Advantage+ audience is written explicitly as 0 and said so', () => {
+  const current = simple({ targeting_automation: { individual_setting: { age: 1 } } });
+  const plan = planTargetingEdit(current, { ageMin: 30 });
+  assert.equal(plan.advantageAudienceSetOff, true);
+  assert.deepEqual((plan.next as Record<string, unknown>).targeting_automation, {
+    individual_setting: { age: 1 },
+    advantage_audience: 0,
+  });
+  assert.match(
+    targetingEditSummary(ADSET_ID, plan),
+    /Advantage\+ audience: set explicitly OFF \(was unset\)\./,
+  );
+
+  const fromBare = planTargetingEdit(simple({ targeting_automation: undefined }), {
+    countries: ['MX'],
+  });
+  assert.deepEqual((fromBare.next as Record<string, unknown>).targeting_automation, {
+    advantage_audience: 0,
+  });
+});
+
+test('an Advantage+ audience already off stays 0 and the summary is silent', () => {
+  const plan = planTargetingEdit(simple(), { ageMin: 30 });
+  assert.equal(plan.advantageAudienceSetOff, false);
+  assert.deepEqual((plan.next as Record<string, unknown>).targeting_automation, {
+    advantage_audience: 0,
+  });
+  assert.doesNotMatch(targetingEditSummary(ADSET_ID, plan), /Advantage/);
 });
 
 test('countries are upper-cased and de-duplicated in caller order', () => {
