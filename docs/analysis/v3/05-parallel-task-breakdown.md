@@ -65,6 +65,11 @@ Waves order *development*. Phase gates in doc 04 order *releases*.
 
    An exported symbol used by another lane is frozen during the wave. If it must change, add a
    new export and leave the old one; the owning lane's next task removes it.
+
+   The list above is not complete: the Architect review of 2026-10-29 (ARC-01) counted about 16
+   cross-lane edges in the import graph, and media upload (`media-photos.ts`) is shared by three
+   lanes. R14 adds a `lane-graph.json` gate that makes the real edge list explicit, and C07 moves
+   the shared media-source code into a C-owned module.
 8. **Fragments instead of shared lists** (introduced by I00):
    - **CHANGELOG:** each task writes `changes/unreleased/<task-id>.md`. The release I-task folds
      them into `CHANGELOG.md` and deletes them.
@@ -73,8 +78,9 @@ Waves order *development*. Phase gates in doc 04 order *releases*.
      The test only concatenates them.
 9. **Only I-tasks change dependencies, the Node version or the CI.** A task that needs a new
    dependency asks for it (§6). No task adds a dependency inside its own branch.
-10. **Feature freeze from wave 0 to the 1.0 tag.** New tools wait for wave 5 (A-tasks).
-    Bug fixes are allowed in the lane that owns the file.
+10. **Feature freeze from wave 0 to the 0.9 tag** (the contract release, formerly "1.0"; see
+    V3-D13). New tools wait for wave 5 (A-tasks). Bug fixes are allowed in the lane that owns the
+    file; R01 and R02 (0.8.1) are such fixes.
 11. **Commit and push.** Commit on the task branch when the definition of done is green. Merge
     into `main` happens through the integrator (§5). Nothing is pushed unless the owner asks.
 
@@ -89,7 +95,10 @@ Waves order *development*. Phase gates in doc 04 order *releases*.
   - tests
 - [ ] `npm run metadata:check` green (if it fails only on generated files, run `npm run metadata`).
 - [ ] Colocated tests for every new or changed behaviour. Coverage is not lowered: compare
-  `npm run coverage` before and after (advisory, not gated).
+  `npm run coverage` before and after (advisory until R11 lands; then gated by the per-PR
+  ratchet, D-QA-2).
+- [ ] Docs tasks (type D, §12): every link resolves and no statement claims more verification
+  than [`docs/verification.md`](../../verification.md) records.
 - [ ] Only files from the *Owns* column are changed: `git diff --name-only main...` ⊆ the
   ownership set plus the task's CHANGELOG fragment.
 - [ ] Facade paths unchanged; no import path of another lane broken.
@@ -199,12 +208,12 @@ Every lane task does the same checklist, only in its own files:
 | ID | Lane | Lane-specific items | Depends | Size |
 |---|---|---|---|---|
 | L2.core | core | `whoami` / `usage` recorded exceptions | C01–C04, C06 | S |
-| L2.reader | reader | `get_activity_since` `idempotentHint: true` | C01–C03, C06 | M |
-| L2.posts | posts | `create_story` tier → reversible (if V3-D5 confirms); adopt X06 `upload-session.ts` in the media files | C01–C03, C06, X01, X06 | L |
+| L2.reader | reader | `get_activity_since` stays `idempotentHint: false` — the earlier item was unsafe (AUX-13); adopt the list-level taint envelope from C02 | C01–C03, C06 | M |
+| L2.posts | posts | `create_story` stays irreversible with `destructiveHint: true` (OD-7). The upload-session work moved to L2.posts-upload (§12) | C01–C03, C06, X01 | M |
 | L2.insights | insights | Adopt C05 in every insights tool and the report; insights renames | C01–C03, C05, C06 | L |
 | L2.moderation | moderation | `send_private_reply` / `set_comment_visibility` renames | C01–C03, C06, X02 | M |
 | L2.messages | messages | `send_message` `destructiveHint` fix; thread-ownership refusal typed (Conversation Routing / Meta Business Agent) | C01–C03, C06 | M |
-| L2.ads | ads | Explicit `advantage_audience` on duplicate and targeting edit (**due 2027-02-23**); `ad_set` spelling; `boost_post` arg; typed refusals (breakdown enablement, ASC/AAC writes) | C01–C03, C06, X04 | L |
+| L2.ads | ads | Explicit `advantage_audience` — **done in R01 (0.8.1)**, it already applies on v26. `ad_set` spelling; `boost_post` arg; typed refusals (breakdown enablement, ASC/AAC writes); review-round items in §12 | C01–C03, C06, X04 | L |
 | L2.page-admin | page-admin | — | C01–C03, C06 | S |
 
 Merge order: any order. Each lane rebases on `main` before merge.
@@ -321,30 +330,41 @@ Typical requests:
 | `src/tools/shared.ts` | C01, C02 (split into `shared/list.ts`) | request |
 | `src/mcp/define.ts` | C03 → C06 | request |
 | `src/mcp/doctor.ts` | X03, then per-lane probe files | edit your lane's probe file |
-| `src/core/settings.ts` | C04, C04b, B02 | request |
+| `src/core/settings.ts` | C04, C04b, C09, C14, B02 | request |
+| `src/mcp/write-mode.ts`, `confirm.ts`, `taint.ts` | C08, C09, C11 — one at a time, in that order | request |
+| `src/api/media-photos.ts` (media-source section) | C07, then `src/api/media-source.ts` | request |
+| `.github/workflows/*`, `docs/runbooks/release.md` | R15, then release I-tasks | request |
 | README tool tables, `manifest.json`, `server.json`, `.env.example` | generated | `npm run metadata` |
 
 ## 8. Dependency graph
 
 ```text
 Wave A   U-A1 → I-A1 → I-A2 → U-A2
+         R01  R02  D08 → I-A3 (0.8.1);  U-A3, U-A7, U-A8, U-A9;  D08 → U-A2a–d
+                         │
+Wave 1a  R10  R11  R12  R13  R14  R15  R16  R17  R18                (before C01)
                          │
 Wave 0   I00  I01  X01  X02  X03  X04  X05  X06  X07     (parallel)
                 │              │
 Wave 1   C02  C05   C01(I01) → C03 → C06   C04(X03)       (parallel)
                 │
+         C07  C08 → C09 → C11  C10  C12  C13  C14                       (wave 1 additions)
+         ── wave 2 waits for U-A2 and U-A3 (V3-D15) ──
 Wave 2   L2.core  L2.reader  L2.posts  L2.insights  L2.moderation  L2.messages  L2.ads  L2.page-admin
                                                    └──────────── all ────────────┘
                                                                   → C01b
-Wave 3   I30 → I31 → U30 → I32 (1.0.0)
-Wave 4   P01 (freeze) → { P02  P03  P04  P05  L4.*  C04b } → I40 (2.0.0)
-Wave 5   A01  A02 → L5.*  A03  A04 → A05  A06  A07  A08  A09  A10  → I5x (2.x)
-Wave 6   U60 → { B01 → B03 → C60 → L6r.*,  B02,  B04,  L6.* } → I60 (3.0.0)
+Wave 3   I30 → I31 → U30a/U30b → U31 → I32 (0.9.0)
+Wave 4   P01 (no freeze) → { P03 → P02  P04  P05  P06  L4.*  C04b } → I40 (1.0.0)
+Wave 5   A01  A02 → L5.*  A03  A04 → A05  A06  A07  A08  A09  A10  → I5x (1.x)
+Wave 6   U60 → { B01 → B03 → C60 → L6r.*,  B02,  B04,  L6.* } → I60 (2.0.0)
 ```
 
 ## 9. Dispatch checklist (per wave)
 
 - [ ] The owner decisions that block this wave are recorded in [doc 03](03-owner-decisions.md).
+- [ ] The `main` and `v*` rulesets and the `release` environment are present
+  (`gh api repos/IvanBBaev/facebook-mcp/rulesets`).
+- [ ] Wave 2 only: U-A2 and U-A3 are done (V3-D15).
 - [ ] The previous wave is fully merged, and `main` is green.
 - [ ] Number of parallel tasks ≤ the V3-D11 limit.
 - [ ] Each task has a worktree under `~/Development/_branches/facebook-mcp-<id>` and a branch
@@ -375,9 +395,79 @@ Done when: §2 definition of done is green. Commit on the branch; do not merge, 
 |---|---|---|
 | A | U-A1, I-A1, I-A2, U-A2 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). U-A2 open |
 | 0 | I00, I01, X01–X07 | All (2026-10-29; `tools/list` byte-identical to the 0.8.0 baseline). Deferred: split `runSetupToken` in `src/cli/setup-token/flow.ts` (825 lines); adopt `src/api/upload-session.ts` in the media upload paths (L2.posts); optional `release.yml` guard against unfolded `changes/unreleased/` fragments; lane ownership of the shared `src/mcp/annotations/messages.ts` fragment (saved replies + activity); remove the `src/mcp/setup-token.ts` facade and its ESLint override; split the large test files |
-| 1 | C01–C06 | — |
+| 1a | R10–R18 | — |
+| 1 | C01–C06, C07–C14, X08–X11 | C05 (2026-10-29, `2c8d8bd`) |
 | 2 | L2.* (8), C01b | — |
 | 3 | I30–I32, U30 | — |
 | 4 | P01–P05, L4.*, C04b, I40 | — |
 | 5 | A01–A10, L5.*, I5x | — |
 | 6 | U60, B01–B04, C60, L6.*, I60 | — |
+
+The review round of 2026-10-29 added tasks to waves A, 1a, 1, 2, 3 and 4 (§12). Their state is
+tracked in the same table: wave A rows R01, R02, D08 and the wave 1a / wave 1 additions.
+
+## 12. Review-round tasks (2026-10-29)
+
+The nine role reviews in [`docs/reviews/v3/`](../../reviews/v3/README.md) added the tasks below.
+The full finding → task map, with the finding IDs and sizes, is
+[SUMMARY §5](../../reviews/v3/SUMMARY.md#5-finding--task-map). The decisions they rely on are
+recorded in [doc 03](03-owner-decisions.md#review-round-decisions-2026-10-30). Release labels
+follow V3-D13 (0.9 = contracts, 1.0 = platform).
+
+**New task type D (docs).** A D-task owns documentation files only (README sections that are not
+generated, runbooks, `PRIVACY.md`, community files). It follows the same ownership and
+definition-of-done rules; generated blocks stay with `npm run metadata`.
+
+### Wave A / 0.8.x
+
+| ID | Type | Owns / scope | State |
+|---|---|---|---|
+| R01 | L | `src/api/ads-targeting.ts`, `src/api/ads-copy.ts` and their tests: explicit `advantage_audience` | see §11 |
+| R02 | L | `src/tools/moderation/*`: free-text verbs plan-first; `hide`/`unhide`/`like` keep apply | see §11 |
+| I-A3 | I | Release 0.8.1 (fold fragments, tag) — needs the owner's push | open |
+| I-A4 | I | Pages site under the metadata generator; `privacy_policies` in the manifest | open |
+| U-A2a–d | U | Directory submissions, plugin walk-through, one announcement, demo assets | owner |
+| U-A3 | U | Thin live pass on 0.8.0 (META §7 A1, A3, C4, D3; spend cap ≤ 1 unit) | owner |
+| U-A4 | U | Two-week dogfood log (`docs/ai/dogfood-log.md`, local) | owner |
+| U-A5 | U | Response plan for an official Meta Pages MCP (V3-D16) | open |
+| U-A6 | U | Maintenance budget and sunset clause in the README | open |
+| U-A7 | U | Release credential and governance: rulesets and `release` environment **done 2026-10-30**; delete `NPM_TOKEN`, verify the trusted publisher — owner | partly done |
+| U-A8 | U | Repo hygiene: Dependabot PRs, milestones, Discussions, 0.8.0 release notes, #40/#41 | open |
+| U-A9 | U | 2026-11-20 ad terms — analysis in [`10-ad-terms-2026-11-20`](../../reviews/v3/10-ad-terms-2026-11-20.md) | analysed |
+| U-A9a | L | Ad terms follow-ups (L2.ads, size S–M): LEG-04 special-ad-category attestation on spend-tier creates (blocks 1.0); new create/copy paths set creative-enhancement and `advantage_audience` explicitly, asserted by a test (blocks 1.0); the operator-liability line in ads write-tool descriptions and the README; copy previews say the copy inherits the source's Advantage+ / creative settings | open |
+| D01–D06, D08, D09 | D | README truth pass, onboarding, verification record, community files, CHANGELOG header, doc-env checker, `PRIVACY.md`, logo | D08 see §11; others open |
+
+### Wave 1a (gates C01)
+
+R10 golden snapshots · R11 exact SDK pin, runner hardening, coverage ratchet · R12 guard
+manifest · R13 schema-budget ratchet · R14 fitness functions (lane graph, file-size soft gate) ·
+R15 release-rail hardening (remove the `NPM_TOKEN` fallback, pin the marketplace ref, Dependabot
+grouping) · R16 fixture tooling · R17 split the test files over 2,500 lines · R18 upload boundary
+tests.
+
+### Wave 1 additions
+
+C07 shared `media-source.ts` · C08 outbound taint latch · C09 per-plan confirmation code ·
+C10 `tool-names.ts` · C11 single tier declaration · C12 annotation derivation · C13 `json.ts` ·
+C14 journal retention (90 days) · X08 split `core/types.ts` · X09–X11 split `insights.ts`,
+`media-video.ts` / `media-reels.ts`, `ads-read.ts`. Extensions of C01–C04 and C06 are listed in
+SUMMARY §5.
+
+### Wave 2 additions
+
+L2.posts-upload (new lane task: adopt `upload-session.ts` in the media paths, else revert X06;
+D-META-2) · A01 `instructions` moved into wave 2 (V3-D8) · every lane owns its
+`src/mcp/doctor/<lane>.ts` probe. Lane items are in the table in §4 and SUMMARY §5.
+
+### Waves 3 and 4
+
+U30 splits into **U30a** (live gate, 0.9 subset) and **U30b** (fixture capture, ads included) ·
+**U31** onboarding trials on two clients · I33 write-safety sweep · I34 SDK import restriction ·
+I35 boost smoke · C30 conformance baseline · D07 docs IA · P01 re-scoped without a code freeze ·
+P02 depends on P03 · P06 `PlanStore` port · an I-task for the TypeScript 7 evaluation.
+
+### 1.x follow-ups
+
+M01 apply by `plan_id` · M02 taint page-authored text · M03 kill switch without a restart ·
+M04 Graph usage view · M05 schema diet · M06 remove the `verifyTool` inference · M07 prompts and
+resources (A03).

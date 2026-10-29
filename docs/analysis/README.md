@@ -47,7 +47,7 @@ Three findings shape the design:
 | [11-parallel-task-breakdown.md](11-parallel-task-breakdown.md) | Multi-agent work plan: waves, task IDs, file ownership, dependency DAG |
 | [12-graph-changelog-check-2026-10.md](12-graph-changelog-check-2026-10.md) | Post-launch Meta changelog check (2026-10-02): versions, v23.0 sunset, impact matrix, bump recommendation |
 | [v2/](v2/README.md) | v2.0.0 analysis (2026-10-24): fix-before-1.0 list, v1.x backlog, v2 scope, owner decisions, roadmap and risks |
-| [v3/](v3/README.md) | v3.0.0 analysis (2026-10-28): current state vs the v2 plan, v3 scope, owner decisions V3-D1–D11, roadmap to 3.0, parallel-branch task breakdown |
+| [v3/](v3/README.md) | v3.0.0 analysis (2026-10-28): current state vs the v2 plan, v3 scope, owner decisions V3-D1–D17, roadmap, parallel-branch task breakdown; review round of 0.8.0 in [`../reviews/v3/`](../reviews/v3/README.md) |
 
 ## Status
 
@@ -78,6 +78,9 @@ Three findings shape the design:
   in its earliest correct release (lean 3.0 = removals, Q4 2027 – Q1 2028) and splits
   the work from 0.8 to 3.0 into waves of tasks with exclusive file ownership, so they
   can run in separate branches without conflicts.
+- **v3 role review round:** ✎ 2026-10-30: nine senior roles reviewed 0.8.0
+  ([`../reviews/v3/`](../reviews/v3/README.md)); the delegated decisions moved the release
+  labels down one major (0.9 = contracts, 1.0 = platform) and added the wave 1a and §12 tasks.
 - **Next step:** verification against a live Page / ad account (the ✎-marked
   runtime items in [07-risks-and-open-questions.md](07-risks-and-open-questions.md));
   the release rail in [../runbooks/release.md](../runbooks/release.md) has already
