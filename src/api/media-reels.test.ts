@@ -1129,6 +1129,42 @@ test('uploadReelBinary refuses a server offset past the end of the file', async 
   assert.match(err.message, /restart from the start phase/);
 });
 
+test('uploadReelBinary completes when the server offset lands exactly on the file end (overrun boundary, QA-05)', async () => {
+  const { fb, deps } = harness({ chunkBytes: 4 });
+  fb.enqueue(fbOk({}, { file_offset: '4' }));
+  fb.enqueue(fbOk({}, { file_offset: '8' }));
+  // `reported === total`: the in-range edge of the overrun guard.
+  fb.enqueue(fbOk({}, { file_offset: '10' }));
+
+  const result = await uploadReelBinary(deps, { session: SESSION, data: bytes(10) });
+
+  assert.equal(fb.calls.length, 3);
+  assert.equal(result.finalOffset, 10);
+  assert.equal(result.serverReportedOffset, true);
+  assert.equal(result.resumes, 0);
+});
+
+test('uploadReelBinary refuses a server offset one byte past the file end (overrun boundary, QA-05)', async () => {
+  const { fb, deps } = harness({ chunkBytes: 4 });
+  fb.enqueue(fbOk({}, { file_offset: '4' }));
+  fb.enqueue(fbOk({}, { file_offset: '8' }));
+  // `reported === total + 1`: the smallest impossible offset. An off-by-one in
+  // the guard would exit the loop with `finalOffset > byteLength` as a clean upload.
+  fb.enqueue(fbOk({}, { file_offset: '11' }));
+
+  const err = await expectReelError(() =>
+    uploadReelBinary(deps, { session: SESSION, data: bytes(10) }),
+  );
+
+  assert.equal(fb.calls.length, 3, 'the loop stops at the impossible offset');
+  assert.equal(err.reel.kind, 'session');
+  assert.equal(err.reel.phase, 'transfer');
+  assert.match(
+    err.message,
+    /offset 11 for a 10-byte Reel, which is past the end of the file/,
+  );
+});
+
 test('uploadReelBinary rejects a non-integer chunk size instead of reporting an empty upload as done', async () => {
   const { fb, deps } = harness({ chunkBytes: Number.NaN });
 

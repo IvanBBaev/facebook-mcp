@@ -979,6 +979,55 @@ test('a server offset past the file end is a desync, not a completed transfer (C
   );
 });
 
+test('a server offset exactly at the file end completes the transfer (overrun boundary, QA-05)', async () => {
+  const { fb, deps, sessions } = harness();
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  fb.on(isChunk, fbOk(chunkBody(8, 12)), 1);
+  // `acked === total`: the last byte landed. This is the in-range edge of the
+  // overrun guard, so it must complete, not desync.
+  fb.on(isChunk, fbOk(chunkBody(TOTAL, TOTAL)), 1);
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const session = await transferVideoUpload(deps, {
+    uploadSessionId: SESSION_ID,
+    data: bytes(TOTAL),
+  });
+
+  assert.equal(session.startOffset, TOTAL);
+  assert.equal(session.phase, 'transferred');
+  assert.equal(session.resumes, 0);
+  assert.deepEqual(
+    chunksOf(fb).map((c) => c.fileOffset),
+    [0, 4, 8],
+  );
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'transferred');
+});
+
+test('a server offset one byte past the file end is a desync (overrun boundary, QA-05)', async () => {
+  const { fb, deps, sessions } = harness();
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  // `acked === total + 1`: the smallest impossible offset. An off-by-one in the
+  // guard (`acked > total + 1`) would let it through as "done" (CC-MEDIA-3).
+  fb.on(isChunk, fbOk(chunkBody(TOTAL + 1, TOTAL + 1)), 1);
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = asGraphError(
+    await transferVideoUpload(deps, {
+      uploadSessionId: SESSION_ID,
+      data: bytes(TOTAL),
+    }).catch((e: unknown) => e),
+  );
+
+  assert.equal(err.action?.operatorText, SESSION_DESYNC_NOTE);
+  assert.match(err.message, /server offset 13 is past the 12-byte file end/);
+  assert.equal(chunksOf(fb).length, 2, 'nothing more is sent after the desync');
+  const session = sessions.get(SESSION_ID);
+  assert.equal(session?.phase, 'failed');
+  assert.equal(session?.startOffset, 4, 'the last confirmed offset is kept');
+});
+
 test('a missing offset in the accept response assumes the sent window landed', async () => {
   const { fb, deps } = harness();
   fb.on(isStart, fbOk(startBody(4)));
