@@ -1,34 +1,59 @@
-# facebook-mcp — Facebook Pages MCP Server
+# facebook-mcp — an MCP server for Facebook Pages
 
 | [![CI](https://img.shields.io/github/actions/workflow/status/IvanBBaev/facebook-mcp/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/IvanBBaev/facebook-mcp/actions/workflows/ci.yml) | [![CodeQL](https://img.shields.io/github/actions/workflow/status/IvanBBaev/facebook-mcp/codeql.yml?branch=main&style=flat-square&logo=github&label=CodeQL)](https://github.com/IvanBBaev/facebook-mcp/actions/workflows/codeql.yml) |             [![License: MIT](https://img.shields.io/github/license/IvanBBaev/facebook-mcp?style=flat-square&color=blue&label=license)](LICENSE)             |              [![node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen?style=flat-square&logo=nodedotjs&logoColor=white)](package.json)              | [![MCP](https://img.shields.io/badge/MCP-server-orange?style=flat-square)](https://modelcontextprotocol.io) |
 | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------------: | :---------------------------------------------------------------------------------------------------------: |
-|                                                                           [![status](https://img.shields.io/badge/status-pre--1.0-yellow?style=flat-square)](#)                                                                            |              [![last commit](https://img.shields.io/github/last-commit/IvanBBaev/facebook-mcp?style=flat-square&logo=git&logoColor=white&label=last%20commit)](https://github.com/IvanBBaev/facebook-mcp/commits/main)              | [![docs](https://img.shields.io/badge/docs-github.io-1877F2?style=flat-square&logo=readthedocs&logoColor=white)](https://ivanbbaev.github.io/facebook-mcp/) | [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/IvanBBaev) |                                                                                                             |
+|                                                                        [![status](https://img.shields.io/badge/status-pre--1.0-yellow?style=flat-square)](#status)                                                                         |              [![last commit](https://img.shields.io/github/last-commit/IvanBBaev/facebook-mcp?style=flat-square&logo=git&logoColor=white&label=last%20commit)](https://github.com/IvanBBaev/facebook-mcp/commits/main)              | [![docs](https://img.shields.io/badge/docs-github.io-1877F2?style=flat-square&logo=readthedocs&logoColor=white)](https://ivanbbaev.github.io/facebook-mcp/) | [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/IvanBBaev) |                                                                                                             |
 
 📖 **[Documentation site →](https://ivanbbaev.github.io/facebook-mcp/)**
 
-A local-first TypeScript [Model Context Protocol](https://modelcontextprotocol.io)
-(MCP) server for the **Meta Graph API**, focused on **Facebook Pages** —
-publishing, reading & insights, and comment/message moderation — driven from an
-MCP client (Claude, VS Code, the Inspector…) and operated locally by a Page admin
-using their own Meta developer app. Least-privilege tokens, plan-and-apply write
-safety, and no telemetry.
+A local-first, MIT-licensed TypeScript
+[Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for
+**developers who run their own Facebook Page(s)** from an MCP client such as
+Claude Code, Claude Desktop, VS Code or Cursor. It talks to the **Meta Graph
+API** through your own Meta developer app and your own token: publishing,
+reading and insights, comment moderation and Messenger replies. Writes return a
+preview first by default (plan-and-apply), and the server sends no telemetry.
 
-> 🚧 **Status: pre-1.0, in active development.** Published on npm as
+Things you could ask your agent once it is set up (the tools exist; see
+[Status](#status) for what has been verified):
+
+- _"Draft a post with this photo and schedule it for Friday 9:00 — show me the
+  preview first."_
+- _"Triage the unanswered comments on last week's posts."_
+- _"Give me this week's Page report."_
+
+**Not for you if** you do not want to create a Meta developer app and handle an
+App ID, an App Secret and a token yourself — hosted social-media connectors
+with a one-click login are a better fit for that. It is also not for personal
+profiles, Groups, Instagram (there is a [sibling server](#c-instagram-alongside-the-sibling-server))
+or a hosted service for other people's Pages — see [Not in scope](#not-in-scope).
+
+## Status
+
+> 🚧 **Pre-1.0, and not yet verified against a live Page.** The latest release is
 > [`@ivanbaev/facebook-mcp`](https://www.npmjs.com/package/@ivanbaev/facebook-mcp)
-> — and the version number is the warning.
->
-> All seven tool packages are implemented — see the [tool table](#tools) for the
-> exact surface. **Nothing has been verified against the live Graph API yet.**
-> Every test in this repository runs against fakes and recorded fixtures behind a
-> network fence that throws on a real `fetch`, so "the tests pass" means "the code
-> does what the fixtures say", not "Meta accepted it". A live smoke harness
-> exists ([`scripts/smoke/`](scripts/smoke/README.md)) but has not been run
-> against a real Page as part of any released state. Treat every capability below
-> as **implemented but unproven**, expect breaking changes until 1.0, and read
-> [Known limitations](#known-limitations) before you rely on anything.
+> 0.8.0 on npm. This README describes `main`, which can be ahead of that release;
+> unreleased changes are listed in [`changes/unreleased/`](changes/unreleased/).
 
-**Contents:** [Features](#features) · [Requirements](#requirements) ·
-[Setup](#setup) · [Client compatibility](#client-compatibility) ·
+- **Implemented, not live-verified.** All 69 tools in the [tool table](#tools)
+  are implemented. Every test in this repository runs against fakes and recorded
+  fixtures behind a network fence that throws on a real `fetch`, so "the tests
+  pass" means "the code does what the fixtures say", not "Meta accepted it". A
+  live smoke harness exists ([`scripts/smoke/`](scripts/smoke/README.md)) but has
+  not been run against a real Page for any release.
+- **No client verified by hand.** CI starts the packed server with `npx` on
+  Linux, macOS and Windows, but no person has walked an install end-to-end in
+  any MCP client yet — see [Client compatibility](#client-compatibility).
+- **Experimental tools.** Some tools are marked experimental (list under
+  [Not in scope](#not-in-scope)): they may change in any minor release, even
+  after 1.0.
+- **Breaking changes are planned.** 0.9 changes tool contracts (see
+  [Roadmap](#roadmap)). Read [Known limitations](#known-limitations) before you
+  rely on anything.
+
+**Contents:** [Status](#status) · [Features](#features) ·
+[Requirements](#requirements) · [Setup](#setup) ·
+[Client compatibility](#client-compatibility) ·
 [Configure credentials](#configure-credentials) ·
 [Permissions](#permissions-you-need-to-grant) · [Tools](#tools) ·
 [How this compares](#how-this-compares) ·
@@ -40,23 +65,25 @@ safety, and no telemetry.
 
 ## Features
 
-Implementation status only — see the status note above for what "implemented"
-does and does not mean.
+Implementation status only — see [Status](#status) for what "implemented" does
+and does not mean. "Experimental" follows the
+[experimental tier](#shipped-but-experimental).
 
-| Area                   | Capability                                                                      | Status                            |
-| ---------------------- | ------------------------------------------------------------------------------- | --------------------------------- |
-| **Core & diagnostics** | Identity, Page listing, rate-limit usage, `doctor` pre-flight check             | ✅ Implemented, not live-verified |
-| **Reading**            | Page & post reads, Reels, reactions, cursor pagination                          | ✅ Implemented, not live-verified |
-| **Publishing**         | Text / link / photo / video / Reels posts, scheduling, edit & delete            | ✅ Implemented, not live-verified |
-| **Insights**           | Page & post insights, flat rows + per-metric summaries, deprecation-aware       | ✅ Implemented, not live-verified |
-| **Moderation**         | Comment reads, replies, hide/delete, private reply, block/unblock               | ✅ Implemented, not live-verified |
-| **Messaging**          | Conversation reads and replies within the 24-hour window                        | ✅ Implemented, not live-verified |
-| **Ads**                | Campaign/adset/ad reads, insights, status & budget control — **off by default** | ✅ Implemented, not live-verified |
-| **Live verification**  | Every tool exercised against a real Page and a real ad account                  | ❌ Not done — see the status note |
-| **npm / MCPB release** | `npx @ivanbaev/facebook-mcp`, attested bundle, registry listing                 | ✅ Published — 0.8.0              |
+| Area                      | Capability                                                                                                                                           | Status                                                |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| **Core & diagnostics**    | Identity, Page listing, rate-limit usage, `doctor` pre-flight check, `setup-token`                                                                   | ✅ Implemented, not live-verified                     |
+| **Reading**               | Page and post reads, Reels, reactions, Stories, albums and photos, cursor pagination                                                                 | ✅ Implemented, not live-verified                     |
+| **Publishing**            | Text / link / photo / video / Reels posts, Stories, scheduling, edit and delete                                                                      | ✅ Implemented, not live-verified                     |
+| **Insights**              | Page, post and Reel insights, a one-call Page report, a posts comparison table, metric-rename and retirement guidance                                | ✅ Implemented, not live-verified                     |
+| **Moderation**            | Comment reads and triage, replies, comment edits, hide, like, delete, private reply, block/unblock, moderation settings                              | ✅ Implemented, not live-verified                     |
+| **Messaging**             | Conversation reads, "what is new since", replies within the 24-hour window, saved replies; message reactions, attachments and labels                 | ✅ Implemented, not live-verified (some experimental) |
+| **Ads** (opt-in)          | Campaign / ad-set / ad reads, previews, insights, status, budget and spend-cap control; archive/delete, image upload, targeting edits, copies, boost | ✅ Implemented, not live-verified (some experimental) |
+| **Page profile** (opt-in) | Edit the Page's about, description, website, phone, hours, temporary status                                                                          | ✅ Implemented, not live-verified, experimental       |
+| **Live verification**     | Every tool exercised against a real Page and a real ad account                                                                                       | ❌ Not done — see [Status](#status)                   |
+| **npm / MCPB release**    | `npx @ivanbaev/facebook-mcp`, attested `.mcpb` bundle, MCP Registry listing                                                                          | ✅ Published — 0.8.0                                  |
 
-The default profile exposes a deliberately small, curated tool surface — each
-tool wraps one real capability rather than mirroring every Graph edge.
+Each tool wraps one capability rather than mirroring every Graph edge. Six
+packages (53 tools) are on by default; `ads` and `page_admin` are opt-in.
 
 - **Local-first, no telemetry.** Only three Meta hosts are ever reached
   (`graph`, `graph-video`, `rupload`); nothing phones home.
@@ -64,9 +91,9 @@ tool wraps one real capability rather than mirroring every Graph edge.
   (Business Manager) or a long-lived Page token — no App Review required for an
   admin operating their own assets.
 - **Safe writes.** Tiered plan-and-apply gating; irreversible and spend actions
-  require out-of-band confirmation and are never bypassed by an env flag.
-- **Secret hygiene.** Value-based redaction at a single choke-point across logs,
-  errors, tool results, and the write journal.
+  require out-of-band confirmation and are never unlocked by an env flag alone.
+- **Secret hygiene.** Value-based redaction of secrets at a single choke-point
+  across logs, errors, tool results, and the write journal.
 - **Layered architecture.** Lint-enforced `core ← api ← mcp ← tools ← cli ← server` layering,
   tools-as-data with a central package registry.
 
@@ -81,8 +108,8 @@ tool wraps one real capability rather than mirroring every Graph edge.
 
 ## Setup
 
-The first run is five steps, in this order. Budget about 20 minutes; most of it
-is Meta's app UI. [docs/runbooks/onboarding.md](docs/runbooks/onboarding.md) is
+The first run is five steps, in this order. Most of the time goes into Meta's
+app UI. [docs/runbooks/onboarding.md](docs/runbooks/onboarding.md) is
 the long form with troubleshooting.
 
 1. **Meta app** — create a **Business**-type app at
@@ -141,6 +168,11 @@ the same command:
 /plugin marketplace add IvanBBaev/facebook-mcp
 /plugin install facebook-mcp
 ```
+
+The plugin route has not been walked end-to-end yet. The marketplace reads the
+plugin from this repository's `main` branch, and the plugin starts
+`npx -y @ivanbaev/facebook-mcp` without a version pin, so it runs whatever
+release is `latest` on npm.
 
 **Claude Desktop** — Settings → Developer → **Edit Config** opens
 `claude_desktop_config.json` (macOS:
@@ -268,6 +300,9 @@ What **is** verified, by automated test:
   and error mapping are unit-tested against fakes and recorded fixtures.
 - **The HTTP transport** — loopback binding, bearer-token rejection and session
   handling, again against a real local server.
+- **`npx` cold start** — CI packs each commit, starts it with `npx -y` from an
+  empty directory on Linux, macOS and Windows, and requires `initialize` and a
+  non-empty `tools/list`.
 
 None of that involves an MCP client or the Meta API. If you get it working with
 a client, [say so in an issue](https://github.com/IvanBBaev/facebook-mcp/issues) —
@@ -276,7 +311,9 @@ that is how this table turns into ✅.
 ### Platform notes
 
 CI runs the full check on Linux (Node 22/24/26) and Windows (Node 22). macOS is
-the primary development platform but is not in CI. Paths for the env file, the
+the primary development platform; in CI it runs only the `npx` cold-start job
+(pack, start, `initialize` and `tools/list`), which also runs on Linux and
+Windows. Paths for the env file, the
 write journal and `FB_MEDIA_DIR` follow XDG on POSIX and `%APPDATA%` on Windows.
 
 ## Configure credentials
@@ -602,27 +639,39 @@ A name none of them recognize fails at startup rather than being ignored.
 
 ## How this compares
 
-Point-in-time survey (2026-07-21); the full write-up is in
+Point-in-time survey as of **2026-10-29**; this market changes monthly, so check
+the date. Sources and method are in
+[`docs/reviews/v3/07-product-manager.md`](docs/reviews/v3/07-product-manager.md)
+§4; the older long-form write-up (2026-07-21) is
 [`docs/analysis/02-market-and-positioning.md`](docs/analysis/02-market-and-positioning.md).
+Entries marked _unverified_ were not checked beyond their listing.
 
-| Project                            | Focus                 | Language   | License  | Distribution           | Notes                                                                        |
-| ---------------------------------- | --------------------- | ---------- | -------- | ---------------------- | ---------------------------------------------------------------------------- |
-| **facebook-mcp** (this)            | Pages / organic + ads | TypeScript | MIT      | npm + MCPB bundle      | Multi-Page, plan-and-apply writes, redaction, MCP annotations & outputSchema |
-| **Meta's official hosted Ads MCP** | Ads only              | hosted     | Meta ToS | `mcp.facebook.com/ads` | Business OAuth, no developer app, ~29 tools. Free.                           |
-| **pipeboard-co/meta-ads-mcp**      | Ads                   | Python     | BUSL-1.1 | hosted-remote          | Market leader (~1.1k ★), 42 tools. Not OSI open source.                      |
-| **HagaiHen/facebook-mcp-server**   | Pages                 | Python     | MIT      | source only            | The only other notable Pages server: 27 tools, single Page, no tests.        |
+| Project                                                   | Focus                                                | Type                   | Notes                                                                                      |
+| --------------------------------------------------------- | ---------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------ |
+| **facebook-mcp** (this)                                   | Pages, messaging, moderation; ads opt-in             | OSS (MIT), local, TS   | Your own Meta app and token, plan-and-apply writes, local media upload. Not live-verified. |
+| **Meta Ads MCP**                                          | Ads                                                  | Official, hosted, beta | Launched 2026-04-29. OAuth, no developer app of your own. Free.                            |
+| **Meta Social Technologies MCP**                          | App status, webhooks, docs, API troubleshooting      | Official, hosted       | Launched 2026-06-30. Overlaps with `doctor` for diagnosing Graph errors.                   |
+| **WhatsApp Business Tools MCP**                           | WhatsApp Business setup, templates, sending messages | Official, hosted       | Launched 2026-09-15 with a gradual rollout. Meta has no Pages MCP listed as of the survey. |
+| `pipeboard-co/meta-ads-mcp`                               | Ads                                                  | OSS (BUSL-1.1), hosted | About 1.3k stars. BUSL-1.1 is not an OSI open-source licence.                              |
+| `HagaiHen/facebook-mcp-server`                            | Pages, single Page                                   | OSS (MIT), Python      | About 230 stars; no commits since 2026-04-23.                                              |
+| `facebook-pages-mcp`, `@luminarylane/facebook-mcp-server` | Pages / Facebook                                     | OSS on npm             | Similar weekly downloads to this project; scope _unverified_.                              |
+| Hosted social-media connectors                            | Multi-network publishing and scheduling              | Hosted SaaS            | One-click OAuth, no developer app, often with paid tiers; feature claims _unverified_.     |
 
-**If you only need ads, use Meta's official server.** It is free, needs no
+**If you only need ads, use Meta's official Ads MCP.** It is free, needs no
 developer app of your own, is maintained by the vendor, and covers more ads
 surface than this project ever will. The `ads` package here exists for one
 reason: composing ads with Pages, moderation and messaging under a single token
 and config, with the same spend gating. That is why it is **off by default** —
 ads are not the reason to install this.
 
-The reason to install this is the Pages side: multi-Page, video and Reels upload,
-scheduled-post lifecycle, insights that tell you when a metric was renamed or
-retired, and comment/message moderation — in a typed, tested, MIT-licensed
-server that runs entirely on your machine.
+**If you do not write code, a hosted connector is likely the better fit.** The
+setup here needs a Meta developer app and a token you manage yourself.
+
+The reason to install this is the Pages side, run from your own machine: video
+and Reels upload from local files, scheduled-post lifecycle, insights that tell
+you when a metric was renamed or retired, comment and message moderation, and
+writes you preview before they apply — in a typed, tested, MIT-licensed server
+under a token you own.
 
 ## Known limitations
 
@@ -631,7 +680,7 @@ Current, factual, and deliberately unflattering:
 - **No live Graph API verification.** Nothing here has been proven against Meta's
   servers. Fixtures encode what the API is documented to do; reality gets a vote.
 - **Published, but brand new.** 0.8.0 is on npm with provenance, the `.mcpb`
-  bundle is attached to the release and the MCP Registry listing is active — but
+  bundle is attached to the GitHub release and the MCP Registry lists 0.8.0 — but
   no install path has been walked end-to-end by anyone except CI. See
   [Client compatibility](#client-compatibility) for what that means per client.
 - **Clients that cannot prompt need an operator token.** `irreversible` and
@@ -651,16 +700,40 @@ Current, factual, and deliberately unflattering:
   gone instead of silently returning nothing — but the underlying data loss is
   Meta's, and no wrapper can undo it.
 - **Messaging is bound by Meta's 24-hour window.** A conversation that has gone
-  quiet for more than 24 hours cannot be replied to without a message tag, and
-  this server does not paper over that.
-- **Single maintainer, pre-1.0.** Interfaces may change without a deprecation
-  period until 1.0.
+  quiet for more than 24 hours cannot be replied to without a message tag. This
+  server sends no message tags (the only working one, `HUMAN_AGENT`, needs its
+  own App Review approval), so such a reply is refused with an explanation.
+- **Single maintainer, pre-1.0.** Tool names, arguments and result shapes are
+  planned to change in 0.9 (see [Roadmap](#roadmap)). Until 1.0 there is no
+  guaranteed deprecation period.
 
 ## Not in scope
 
-Things people reasonably expect from a "Facebook MCP server" that this one does
-**not** do. Listed so you can rule it out in thirty seconds instead of after an
-install:
+Two different things: tools that **ship but are experimental**, and things this
+server does **not** do and does not plan to. Listed so you can rule it out in
+thirty seconds instead of after an install.
+
+### Shipped but experimental
+
+These tools are in the [tool table](#tools) and work like the rest, but they
+are outside the contract the roadmap stabilises: they may change or be removed
+in any minor release, including after 1.0. Like every other tool, none has been
+verified against a live Page or ad account.
+
+- **Ads writes beyond status and budget** (`ads` package, opt-in):
+  `facebook_boost_post`, `facebook_duplicate_ad_object`,
+  `facebook_update_ad_set_targeting`, `facebook_upload_ad_image`,
+  `facebook_archive_ad_object`, `facebook_delete_ad_object`.
+- **Messenger labels, reactions and attachments** (`messages` package):
+  `facebook_list_labels`, `facebook_create_label`, `facebook_assign_label`,
+  `facebook_delete_label`, `facebook_react_to_message`,
+  `facebook_upload_message_attachment`.
+- **Page profile edits** (`page_admin` package, opt-in):
+  `facebook_update_page_profile`.
+
+The tool descriptions do not carry this marking yet.
+
+### Not planned
 
 - **Personal profiles and Groups.** Publishing to a personal timeline has no
   API, and the Groups API was discontinued in April 2024. This server operates
@@ -672,20 +745,21 @@ install:
   receive callbacks on. Reads are polled, by design.
 - **A general ad-creation surface.** `facebook_boost_post` is the one create
   path: one existing Page post, everything PAUSED, a mandatory campaign spend
-  cap, no special ad categories. Building campaigns from scratch across
-  objectives, placements and new creatives stays with Meta's own tools.
-- **Page Stories.** The publishing endpoints exist but are unverified; Stories
-  are not promised for 1.0 and stay out until a live run proves them.
-- **Events, Live video, album/photo-library reads, Page profile editing,
-  organic post targeting.** Real endpoints, outside the post / video / Reels /
-  scheduling / moderation surface this server commits to.
-- **Multi-tenant or hosted operation, serving other businesses' ad accounts.**
-  The design targets one operator, Standard Access, own assets, own machine.
-  Anything else needs App Review and Business Verification, which is a different
-  product.
+  cap, no special ad categories. Ads breadth beyond boosts, paused copies and
+  narrow edits stays with Meta's own tools.
+- **Events, Live video, organic post targeting, multi-network scheduling.**
+  Real needs, outside the Pages publishing, insights, moderation and messaging
+  surface this server is built around.
+- **Multi-tenant or hosted operation, serving other businesses' Pages or ad
+  accounts.** The design targets one operator, Standard Access, own assets, own
+  machine. Anything else needs App Review and Business Verification, which is a
+  different product.
+- **Telemetry** of any kind.
 
-The full reasoning is in
-[`docs/analysis/01-goals-and-scope.md`](docs/analysis/01-goals-and-scope.md).
+The reasoning is in
+[`docs/analysis/01-goals-and-scope.md`](docs/analysis/01-goals-and-scope.md) and,
+for the current plan, [`docs/analysis/v3/02-v3-scope.md`](docs/analysis/v3/02-v3-scope.md)
+(that document still uses the old release labels; see [Roadmap](#roadmap)).
 
 ## Your responsibilities as the operator
 
@@ -703,6 +777,23 @@ your token. Automating them does not exempt you from the rules that govern them:
 - **Content and consent are yours.** The tools will publish whatever you point
   them at; deciding that you have the rights to it — and, for private replies
   and DMs, that the contact is expected — is not something a wrapper can do.
+- **Ads are your contract with Meta.** Every campaign, ad set or ad this server
+  creates, copies or changes is in your ad account, under the Meta Self-Serve
+  Ad Terms and Advertising Standards you accepted, and you pay for it. Boosts
+  and copies start PAUSED. A boost needs a mandatory `spend_cap_minor` within
+  `FB_ADS_CAMPAIGN_SPEND_CAP_MAX` (it is refused while that is unset), and a
+  budget within `FB_ADS_BUDGET_CEILING` when you set one — but activating a
+  campaign is your decision. `facebook_boost_post` always declares **no special
+  ad category**: never use it for housing, employment, credit, or social issues,
+  elections or politics. Those ads need a declared category (and, in the EU,
+  are subject to the political-advertising rules) and must be created in Ads
+  Manager. This software is provided under the MIT licence, without warranty;
+  the author is not liable for ad spend or ad content.
+- **You answer for this server and the model driving it.** From 20 November
+  2026 Meta's Self-Serve Ad Terms make you solely responsible for the acts or
+  omissions of any third-party software you use with the ads APIs — that
+  includes this server and the AI model driving it. Review every plan before you
+  apply it.
 - **This is not legal advice.** It is the honest note that a capable automation
   tool comes with obligations, and this project would rather say so up front.
 
@@ -715,25 +806,26 @@ stays on disk is described in the [privacy notice](PRIVACY.md).
 ## Roadmap
 
 Work is tracked publicly on the
-[**facebook-mcp roadmap** board](https://github.com/users/IvanBBaev/projects/3)
-and grouped into release milestones:
+[**facebook-mcp roadmap** board](https://github.com/users/IvanBBaev/projects/3).
+The plan below is a target, not a promise; the binding version is
+[`docs/analysis/v3/04-roadmap-and-risks.md`](docs/analysis/v3/04-roadmap-and-risks.md).
 
-| Milestone                                                                               | Scope                                                             |
-| --------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [v0.1.0](https://github.com/IvanBBaev/facebook-mcp/milestone/1) — Core                  | Foundation + `core` tools, live smoke harness                     |
-| [v0.2.0](https://github.com/IvanBBaev/facebook-mcp/milestone/2) — Reader & publishing   | Post/Reels reads, publishing, scheduling, photo/video/Reels media |
-| [v0.3.0](https://github.com/IvanBBaev/facebook-mcp/milestone/3) — Insights & moderation | Page/post insights, comment moderation, blocking                  |
-| [v0.4.0](https://github.com/IvanBBaev/facebook-mcp/milestone/4) — Messaging             | Conversations and message sending                                 |
-| [v1.0.0](https://github.com/IvanBBaev/facebook-mcp/milestone/6) — Stable                | Live verification, metadata SSOT, release rail, npm publish       |
-| [v1.1.0](https://github.com/IvanBBaev/facebook-mcp/milestone/5) — Ads                   | Ads read + control, opt-in and off by default                     |
+| Release   | Target                           | What it carries                                                                                                                                                                                                                                              |
+| --------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **0.8.x** | Nov 2026                         | 0.8.0 is released. 0.8.1 is planned to carry fixes already on `main` (free-text moderation verbs plan-first, Advantage+ audience pinned off on targeting edits). Documentation fixes and directory listings.                                                 |
+| **0.9.0** | Jan 2027                         | The contract changes: a unified error shape, tool renames with deprecated aliases, pagination and argument clean-ups, a stable insights schema, security fixes. Gate: a live test subset passes and two people other than the owner complete the onboarding. |
+| **1.0.0** | Mar–Apr 2027 (before 2027-04-30) | "Verified Pages core": the first release whose core behaviour has been seen working on a real Page, by the owner and at least two other people. Also MCP SDK v2, Node ≥ 24, and removal of the 0.9 deprecations.                                             |
+| **1.x**   | Apr 2027 – Q3 2027               | Additive minors, one theme each.                                                                                                                                                                                                                             |
+| **2.0.0** | Trigger-based, before 2028-04-30 | Removals: only current-era MCP clients, `FB_CONFIRM_TOKEN` gone, Node ≥ 26.                                                                                                                                                                                  |
 
-**v1.0.0 ships without the ads package** — deliberately. The Pages surface is
-the product; ads is opt-in, off by default, and lands in 1.1.0. The code for it
-is already in the working tree, which is exactly why the milestone is about
-_verification_, not implementation: milestones close when a surface has been
-**verified live** against Meta's servers and released, not when the code lands.
-The binding version map is
-[`docs/analysis/10-v1-release-definition.md`](docs/analysis/10-v1-release-definition.md).
+The `ads` and `page_admin` packages ship in 0.8 already, **disabled by default**,
+pre-1.0 and not live-verified; their write tools are mostly
+[experimental](#shipped-but-experimental).
+
+**Older labels.** The planning documents written before 2026-10-30 use other
+numbers for the same releases: their "1.0" is **0.9**, their "2.0" is **1.0**,
+and their "3.0" is **2.0**. The repository's GitHub milestones still carry the
+older titles.
 
 The design behind each item is written up in advance in
 [`docs/analysis/`](docs/analysis/README.md) — the roadmap is a consequence of
@@ -772,8 +864,10 @@ See [SECURITY.md](SECURITY.md) for the full model and vulnerability reporting.
 - **Design corpus** — the full pre-implementation analysis lives in
   [`docs/analysis/`](docs/analysis/README.md): goals & scope, market positioning,
   Graph API landscape, auth & security model, architecture, tool catalog, risks,
-  roadmap, corner cases, the v1.0 release definition, and the parallel
-  task-breakdown that drives development.
+  roadmap, corner cases, the original v1.0 release definition, and the parallel
+  task-breakdown. The current plan is in
+  [`docs/analysis/v3/`](docs/analysis/v3/README.md), and the 2026-10 role
+  reviews are in [`docs/reviews/v3/`](docs/reviews/v3/).
 - **Runbooks** — operational procedures in [`docs/runbooks/`](docs/runbooks/).
 - **Error catalog** — every Graph error the server classifies, whether it is
   retried, and what to do: [`docs/error-catalog.md`](docs/error-catalog.md).
@@ -786,26 +880,15 @@ fails if they drift.
 ## Support
 
 Best-effort, single-maintainer support runs through GitHub — see
-[SUPPORT.md](SUPPORT.md) for how to file bugs, feature requests and security
-reports.
+[SUPPORT.md](SUPPORT.md) for how to ask a question, file a bug or a feature
+request, and report a security issue privately. If you got the server working
+with a client or a live Page, an issue saying so is useful too: it is how the
+[Client compatibility](#client-compatibility) table turns into ✅.
 
-This project is built and maintained in my own time. If it helps, a tip keeps it
-going:
-
-- **[GitHub Sponsors](https://github.com/sponsors/IvanBBaev)** — one-off or
-  recurring, no platform fee.
-- **[Ko-fi](https://ko-fi.com/ivanbbaev)** — quick one-off support (also accepts
-  PayPal), the fallback for anyone without a GitHub account.
-- **[Donatree](https://donatr.ee/ivanbbaev/)** — every donation method on one
-  page, including local payment options.
-
-[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/IvanBBaev)
-[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=flat-square&logo=kofi&logoColor=white)](https://ko-fi.com/ivanbbaev)
-[![Donate via Donatree](https://img.shields.io/badge/Donatree-Donate-34d399?style=flat-square&logo=liberapay&logoColor=white)](https://donatr.ee/ivanbbaev/)
-
-Donating buys no priority support and no SLA — see [SUPPORT.md](SUPPORT.md). If
-money is not an option, starring the repository or filing a good bug report
-helps just as much.
+If the project helps you, you can sponsor it through
+[GitHub Sponsors](https://github.com/sponsors/IvanBBaev) (other channels are
+listed in [`.github/FUNDING.yml`](.github/FUNDING.yml)). Sponsoring buys no
+priority support and no SLA.
 
 ## Trademark
 
