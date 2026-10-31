@@ -429,7 +429,7 @@ definition-of-done rules; generated blocks stay with `npm run metadata`.
 | U-A2a–d | U | Directory submissions, plugin walk-through, one announcement, demo assets | owner |
 | U-A3 | U | Thin live pass on 0.8.0 (META §7 A1, A3, C4, D3; spend cap ≤ 1 unit) | owner |
 | U-A4 | U | Two-week dogfood log (`docs/ai/dogfood-log.md`, local) | owner |
-| U-A5 | U | Response plan for an official Meta Pages MCP (V3-D16) | open |
+| U-A5 | U | Response plan for an official Meta Pages MCP (V3-D16) | done — [04 §4](04-roadmap-and-risks.md#4-response-to-an-official-meta-mcp-u-a5) |
 | U-A6 | U | Maintenance budget and sunset clause in the README | open |
 | U-A7 | U | Release credential and governance: rulesets and `release` environment **done 2026-10-30**; delete `NPM_TOKEN`, verify the trusted publisher — owner | partly done |
 | U-A8 | U | Repo hygiene: Dependabot PRs, milestones, Discussions, 0.8.0 release notes, #40/#41 | open |

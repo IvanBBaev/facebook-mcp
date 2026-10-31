@@ -67,3 +67,50 @@ the phase B gate includes the onboarding trials (U31).
 | R15 | Privacy disclosure gap | medium | operator GDPR exposure, listing rejection | D08 `PRIVACY.md` before U-A2; C14 journal retention |
 | R16 | Ads money semantics wrong | medium | unintended spend | R01 explicit `advantage_audience` (0.8.1); mandatory budget ceiling (SD-4); ads fixtures from U30b |
 | R17 | Supply-chain publish without approval | low after 2026-10-30 | as R11 | The `release` environment gates `npm-publish`; every later job depends on it |
+
+## 4. Response to an official Meta MCP (U-A5)
+
+Pre-written response for risk R7, decided as V3-D16 B (2026-10-30). It is written now so that the
+project does not decide under pressure when the announcement lands.
+
+### 4.1 What survives an official Pages MCP
+
+Each item is something a hosted, first-party server is unlikely to offer. Positioning leads with
+this list today, not after an announcement.
+
+| # | Survivor | Where it lives today |
+|---|---|---|
+| S1 | Plan/apply write gate: every write previews first; free-text and spend writes apply only with the `plan_id` that binds the previewed parameters | `src/mcp/write-mode.ts`, `executeWrite` (R02 made reply, comment and edit plan-first) |
+| S2 | Local write journal: an audit trail of every attempted, applied and failed write on the operator's machine | `src/mcp/journal.ts` |
+| S3 | Local-first: the Page token stays on the operator's machine; no hosted party sees tokens, content or insights | `PRIVACY.md` |
+| S4 | Boost composability: post → boost → targeting edit → copy in one conversation, with explicit Advantage+ and creative-enhancement settings | `src/api/ads-*.ts` (R01) |
+| S5 | Local media: photos, videos and reels from disk, with resumable upload sessions | `src/api/media-*.ts`, `src/api/upload-session.ts` |
+| S6 | Multi-Page profiles under one configuration | `FB_PROFILE_<NAME>_*` settings |
+| S7 | A stable insights schema that survives Meta's metric deprecations | `src/api/insights-schema.ts` (C05) |
+| S8 | An error matrix that tells the operator the next step, not only the Graph error code | `src/core/` error mapping |
+| S9 | Scriptability: stdio server plus CLI; no browser OAuth flow | `src/cli/` |
+
+### 4.2 Trigger
+
+Any one of these starts the response:
+- Meta announces an official MCP server that covers Facebook Pages, or Business Messaging for Pages,
+  in beta or GA;
+- an official Meta MCP that already exists adds Page posts, comments or insights tools.
+
+The monthly watch-list check (§2) looks for both.
+
+### 4.3 Pre-committed actions
+
+| Step | When | Action |
+|---|---|---|
+| A1 | within 1 week | Map the official tool list against ours. For each of our tools, mark it as strictly worse, equal or better. Record the result in a new `docs/analysis/` note. |
+| A2 | within 2 weeks | Add a README section "Use Meta's server when … / use this one when …", built from §4.1 and the A1 map. |
+| A3 | within 2 weeks | Deprecate every tool that A1 marks strictly worse, following the deprecation policy (removal only in a major release). |
+| A4 | within 4 weeks | Re-run V3-D1 (lean or ambitious scope) with the A1 map as input. The default is to re-scope as the developer-operator safety layer: S1–S3 in front of any Graph write. |
+| A5 | at the V3-D1 re-run | If the adoption gate (PM-04) has failed, switch to personal-tool mode: keep the repo public and maintained for the owner's own Page, and stop listings and announcements. |
+
+### 4.4 What we do not do
+
+- We do not race the official server on tool count.
+- We do not wrap or proxy Meta's MCP before A1 shows it is worth doing.
+- We do not drop a survivor in §4.1 to simplify the code base.
