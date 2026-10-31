@@ -238,6 +238,7 @@ State on 2026-10-30, after the delegated decisions.
 | 3 | R01 explicit `advantage_audience`, R02 plan-first moderation free text | Lanes | Done 2026-10-30 (`99ae652`, `ee54de1`) |
 | 4 | Release 0.8.1 (I-A3) | Owner (tag push, then approve the deployment) | R01/R02 are on `main`; waits for the owner's tag push and approval |
 | 5 | `PRIVACY.md` (D08) | Docs | Done 2026-10-30 (`1df6e1f`) |
-| 6 | 2026-11-20 ad terms (U-A9) | Analysis | [10-ad-terms-2026-11-20](10-ad-terms-2026-11-20.md); the liability text goes into D01 |
+| 6 | 2026-11-20 ad terms (U-A9) | Analysis, lanes | [10-ad-terms-2026-11-20](10-ad-terms-2026-11-20.md); follow-ups U-A9a done 2026-10-31 (`a2d64f3`), liability text in the README (D01) |
 | 7 | Thin live pass (U-A3) | Owner | Open — needs a real Page and the test ad account |
 | 8 | Launch U-A2a–d | Owner | Open — after D08 and U-A3; the announcement needs the owner's yes |
+| 9 | README truth pass (D01), Pages site under the generator (I-A4), Meta MCP response plan (U-A5) | Docs, integration | Done 2026-10-31 (`26777af`, `11bdadf`, `b59e372`) |

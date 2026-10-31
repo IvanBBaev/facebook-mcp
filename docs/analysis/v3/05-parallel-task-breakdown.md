@@ -393,7 +393,7 @@ Done when: §2 definition of done is green. Commit on the branch; do not merge, 
 
 | Wave | Tasks | Merged |
 |---|---|---|
-| A | U-A1, I-A1, I-A2, U-A2; R01, R02, D08, U-A7 (governance), U-A9 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). R01 `99ae652`, R02 `ee54de1`, D08 `1df6e1f`, `release` environment gate `8bb78c4`, U-A9 analysed (2026-10-30). Open: I-A3 (0.8.1 tag — owner), U-A2, U-A3, rest of U-A7 |
+| A | U-A1, I-A1, I-A2, U-A2; R01, R02, D08, U-A7 (governance), U-A9 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). R01 `99ae652`, R02 `ee54de1`, D08 `1df6e1f`, `release` environment gate `8bb78c4`, U-A9 analysed (2026-10-30). U-A5 `b59e372`, D01 `26777af`, U-A9a `a2d64f3`, I-A4 `11bdadf` (2026-10-31). Open: I-A3 (0.8.1 tag — owner), U-A2, U-A3, rest of U-A7 |
 | 0 | I00, I01, X01–X07 | All (2026-10-29; `tools/list` byte-identical to the 0.8.0 baseline). Deferred: split `runSetupToken` in `src/cli/setup-token/flow.ts` (825 lines); adopt `src/api/upload-session.ts` in the media upload paths (L2.posts); optional `release.yml` guard against unfolded `changes/unreleased/` fragments; lane ownership of the shared `src/mcp/annotations/messages.ts` fragment (saved replies + activity); remove the `src/mcp/setup-token.ts` facade and its ESLint override; split the large test files |
 | 1a | R10–R18 | R13 (2026-10-31, `4dc5fed`: `scripts/measure-schema.mjs` + `scripts/schema-budget.json`, ceilings at the measured sizes, OD-4 targets reported) |
 | 1 | C01–C06, C07–C14, X08–X11 | C05 (2026-10-29, `2c8d8bd`) |
@@ -425,7 +425,7 @@ definition-of-done rules; generated blocks stay with `npm run metadata`.
 | R01 | L | `src/api/ads-targeting.ts`, `src/api/ads-copy.ts` and their tests: explicit `advantage_audience` | done 2026-10-30 (`99ae652`) |
 | R02 | L | `src/tools/moderation/*`: free-text verbs plan-first; `hide`/`unhide`/`like` keep apply | done 2026-10-30 (`ee54de1`) |
 | I-A3 | I | Release 0.8.1 (fold fragments, tag) — needs the owner's push | open |
-| I-A4 | I | Pages site under the metadata generator; `privacy_policies` in the manifest | open |
+| I-A4 | I | Pages site under the metadata generator; `privacy_policies` in the manifest | done 2026-10-31 (`11bdadf`) |
 | U-A2a–d | U | Directory submissions, plugin walk-through, one announcement, demo assets | owner |
 | U-A3 | U | Thin live pass on 0.8.0 (META §7 A1, A3, C4, D3; spend cap ≤ 1 unit) | owner |
 | U-A4 | U | Two-week dogfood log (`docs/ai/dogfood-log.md`, local) | owner |
@@ -434,8 +434,8 @@ definition-of-done rules; generated blocks stay with `npm run metadata`.
 | U-A7 | U | Release credential and governance: rulesets and `release` environment **done 2026-10-30**; delete `NPM_TOKEN`, verify the trusted publisher — owner | partly done |
 | U-A8 | U | Repo hygiene: Dependabot PRs, milestones, Discussions, 0.8.0 release notes, #40/#41 | open |
 | U-A9 | U | 2026-11-20 ad terms — analysis in [`10-ad-terms-2026-11-20`](../../reviews/v3/10-ad-terms-2026-11-20.md) | analysed |
-| U-A9a | L | Ad terms follow-ups (L2.ads, size S–M): LEG-04 special-ad-category attestation on spend-tier creates (blocks 1.0); new create/copy paths set creative-enhancement and `advantage_audience` explicitly, asserted by a test (blocks 1.0); the operator-liability line in ads write-tool descriptions and the README; copy previews say the copy inherits the source's Advantage+ / creative settings | open |
-| D01–D06, D08, D09 | D | README truth pass, onboarding, verification record, community files, CHANGELOG header, doc-env checker, `PRIVACY.md`, logo | D08 done 2026-10-30 (`1df6e1f`); others open |
+| U-A9a | L | Ad terms follow-ups (L2.ads, size S–M): LEG-04 special-ad-category attestation on spend-tier creates (blocks 1.0); new create/copy paths set creative-enhancement and `advantage_audience` explicitly, asserted by a test (blocks 1.0); the operator-liability line in ads write-tool descriptions and the README; copy previews say the copy inherits the source's Advantage+ / creative settings | done 2026-10-31 (`a2d64f3`); `facebook_boost_post` takes `special_ad_category: "none"` |
+| D01–D06, D08, D09 | D | README truth pass, onboarding, verification record, community files, CHANGELOG header, doc-env checker, `PRIVACY.md`, logo | D08 done 2026-10-30 (`1df6e1f`); D01 done 2026-10-31 (`26777af`); others open |
 
 ### Wave 1a (gates C01)
 
