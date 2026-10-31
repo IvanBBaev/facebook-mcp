@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "docs",
+    "graph_version": "v26.0",
+    "endpoint": "POST /{page-id}/video_stories"
+  },
   "video_id": "300000000000031",
-  "upload_url": "https://rupload.facebook.com/video-upload/v25.0/300000000000031"
+  "upload_url": "https://rupload.facebook.com/video-upload/v26.0/300000000000031"
 }

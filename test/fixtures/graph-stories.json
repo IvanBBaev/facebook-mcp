@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "synthetic",
+    "graph_version": "v26.0",
+    "endpoint": "GET /{page-id}/stories"
+  },
   "data": [
     {
       "post_id": "100000000000001_300000000000001",
@@ -22,6 +27,6 @@
       "before": "U1RPUllfYmVmb3Jl",
       "after": "U1RPUllfYWZ0ZXI"
     },
-    "next": "https://graph.facebook.com/v21.0/100000000000001/stories?after=U1RPUllfYWZ0ZXI&limit=25"
+    "next": "https://graph.facebook.com/v26.0/100000000000001/stories?after=U1RPUllfYWZ0ZXI&limit=25"
   }
 }

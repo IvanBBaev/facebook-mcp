@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "synthetic",
+    "graph_version": "v26.0",
+    "endpoint": "GET /{album-id}/photos"
+  },
   "data": [
     {
       "id": "500000000000001",

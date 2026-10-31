@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "docs",
+    "graph_version": "v26.0",
+    "endpoint": "POST /{page-id}/photo_stories"
+  },
   "success": true,
   "post_id": "100000000000001_300000000000021"
 }

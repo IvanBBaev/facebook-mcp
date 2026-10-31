@@ -1,29 +1,56 @@
 # Graph API fixtures
 
-Committed JSON captures of **real** Graph API responses, redacted, used by the
-hermetic unit suite. They exist so tests assert against shapes Meta actually
-returns rather than shapes we imagined (task F03).
+Committed JSON response bodies used by the hermetic unit suite, redacted. They
+exist so tests assert against shapes Meta returns rather than shapes we imagined
+(task F03).
 
 Anything in this directory is **public repository content**. Treat every byte
 here as published.
 
-## What belongs here
+## Provenance: every fixture says where it came from
 
-- A response body from a **read** edge, recorded once and pruned to what a test
-  needs. `graph-me.json` (`/me`) and `graph-feed.json` (`/{page-id}/feed`) are
-  the original set.
-- Synthetic bodies are fine too — a fixture does not have to come from the wire.
-  What matters is that a fixture never claims to be a recording it is not.
-  `graph-stories.json` (`/{page-id}/stories`), `graph-albums.json`
-  (`/{page-id}/albums`), `graph-photos.json` (`/{album-id}/photos`) and
-  `graph-page-profile.json` (`/{page-id}` with the profile fields) are
-  synthetic: hand-written to the documented field sets, with placeholder ids.
-  `graph-comment-create.json` is the synthetic `{id}` acknowledgement of
-  `POST /{post-id}/comments` — hand-written, not a recording, so it does not
-  break the no-write-recordings rule below. `graph-photo-stories.json`
-  (`POST /{page-id}/photo_stories`) and `graph-video-stories-start.json`
-  (`POST /{page-id}/video_stories`, `upload_phase=start`) are synthetic too,
-  hand-written from Meta's Page Stories docs (`source: docs`).
+Every fixture starts with a `_meta` block (R16, QA-03). `loadFixture` strips
+it, so a test only ever sees the body.
+
+```json
+{
+  "_meta": {
+    "source": "synthetic",
+    "graph_version": "v26.0",
+    "endpoint": "GET /{page-id}/feed"
+  },
+  "data": []
+}
+```
+
+| Key             | Meaning                                                                                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`        | `recorded` (captured by the recorder below), `synthetic` (hand-written to the documented field set) or `docs` (hand-written from an example in Meta's docs) |
+| `graph_version` | the API version the body stands for: the Graph pin, or the directory version under `ads/<version>/`                                                         |
+| `endpoint`      | `METHOD /path` with ids as placeholders (`GET /{page-id}/feed`); a real-looking id (6+ digits) is refused                                                   |
+| `fields`        | optional: the `fields` param the body answers                                                                                                               |
+| `recorded_at`   | ISO-8601 capture time; required for `recorded`, refused for any other source                                                                                |
+
+## What is here today
+
+**No fixture in this directory is a recording.** Every one is hand-written, with
+placeholder ids, and its `_meta.source` says so:
+
+| Fixture                          | Endpoint                          | Source      |
+| -------------------------------- | --------------------------------- | ----------- |
+| `graph-me.json`                  | `GET /me`                         | `synthetic` |
+| `graph-feed.json`                | `GET /{page-id}/feed`             | `synthetic` |
+| `graph-stories.json`             | `GET /{page-id}/stories`          | `synthetic` |
+| `graph-albums.json`              | `GET /{page-id}/albums`           | `synthetic` |
+| `graph-photos.json`              | `GET /{album-id}/photos`          | `synthetic` |
+| `graph-page-profile.json`        | `GET /{page-id}` (profile fields) | `synthetic` |
+| `graph-comment-create.json`      | `POST /{post-id}/comments`        | `synthetic` |
+| `graph-photo-stories.json`       | `POST /{page-id}/photo_stories`   | `docs`      |
+| `graph-video-stories-start.json` | `POST /{page-id}/video_stories`   | `docs`      |
+
+The two `POST` acknowledgements are hand-written, not recordings, so they do not
+break the no-write-recordings rule below. Re-recording `me` and `feed` from a
+live Page is part of the live gate (U30), not of this directory's tooling.
 
 ## What does not
 
@@ -52,8 +79,10 @@ and the error matrix cannot fork from what we ship. It refuses to run without
 `--token` flag — a token on a command line is visible via `ps` and lands in shell
 history), and will not overwrite an existing fixture without `--force`.
 
-Every recording is passed through value-based redaction and then through the
-fixture-lint **before** it is written, so a capture that would fail the suite is
+Every recording is stamped with its `_meta` block (`source: recorded`, the
+version the request went out on, the templated endpoint, `fields`,
+`recorded_at`), passed through value-based redaction, and then through both
+fixture-lints **before** it is written, so a capture that would fail the suite is
 never put on disk. That is not a licence to skip reading the diff: always eyeball
 a new fixture before committing it.
 
@@ -104,8 +133,20 @@ directory is refused as a whole if any of its files exists without `--force`.
 ## The fixture-lint
 
 `src/testing/fixtures.ts` scans every `*.json` file in this directory (and its
-subdirectories, so `ads/<ads-version>/` is covered) and fails
-the test suite on five secret shapes:
+subdirectories, so `ads/<ads-version>/` is covered) twice.
+
+**Provenance** (`lintFixtureProvenance`) fails the suite when a fixture has no
+valid `_meta` block (rules `meta-missing`, `meta-unknown-key`, `meta-source`,
+`meta-graph-version`, `meta-endpoint`, `meta-fields`, `meta-recorded-at`), and
+when any versioned Meta URL in the body (`graph.facebook.com/vNN.N/`,
+`graph-video.facebook.com/vNN.N/`, `rupload.facebook.com/video-upload/vNN.N/`)
+is on a version other than the one the fixture stands for (`graph-version-url`).
+Top-level fixtures stand for `DEFAULT_API_VERSION`; files under
+`ads/<version>/` stand for their directory version. A stale paging URL can
+therefore not hide a version-sensitive bug, and a pin bump has to touch every
+fixture.
+
+**Secrets** (`lintFixtureDir`) fails the suite on five secret shapes:
 
 | Rule                    | Fires on                                           |
 | ----------------------- | -------------------------------------------------- |
@@ -155,11 +196,16 @@ npm run build
 cp -R test/fixtures "${TMPDIR:-/tmp}/fixtures-baseline"   # the known-good shapes
 FB_RECORD_FIXTURE=1 FB_API_VERSION=v24.0 node scripts/record-fixture.mjs \
   --endpoint "me?fields=id,name,category,tasks" --out graph-me.json --force
-# ...repeat for every fixture, with the endpoint and fields it was recorded from
+# ...repeat for every fixture, with the endpoint and fields from its _meta block
 npm run fixtures:shape-diff -- \
   --baseline "${TMPDIR:-/tmp}/fixtures-baseline" --candidate test/fixtures
 git checkout -- test/fixtures   # unless you mean to keep (and prune) the new captures
 ```
+
+While the candidate captures sit in `test/fixtures/`, `npm test` fails the
+provenance lint on them (`meta-graph-version`, `graph-version-url`): they stand
+for the new version, the pin still names the old one. That is the intended
+signal. Keeping them means moving the pin in the same change.
 
 For an **ads** pin bump no snapshot is needed: the ads fixtures are already
 versioned by directory, so record the new version next to the old one and diff

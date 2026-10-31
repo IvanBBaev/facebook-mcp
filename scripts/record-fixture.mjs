@@ -99,6 +99,14 @@
 //   Even so, ALWAYS eyeball the output before committing — redaction cannot know
 //   that a post message or a Page name is something you did not mean to publish.
 //
+// Provenance
+//   Every written fixture starts with a `_meta` block (R16, QA-03):
+//   `source: "recorded"`, `graph_version` (the version the request went out
+//   on), `endpoint` (`GET /{id}/feed` — id-looking runs templated away),
+//   `fields` (the request's fields param, when it had one) and `recorded_at`.
+//   The provenance lint in `src/testing/fixtures.ts` runs before the write too,
+//   and `loadFixture` strips the block, so tests only ever see the body.
+//
 // Exit status (mirrors the smoke harness)
 //   0  the fixture was recorded and written
 //   1  the recording failed (Graph error, network fault, unwritable path)
@@ -440,7 +448,7 @@ function collectSecrets(settings) {
  * function that knows this run's real secret values.
  */
 export async function recordEndpoint(options) {
-  const { fbRequest, scrub } = await createRecorderClient();
+  const { settings, fbRequest, scrub } = await createRecorderClient();
 
   const { path, params } = parseEndpoint(options.endpoint);
   const response = await fbRequest({
@@ -451,7 +459,14 @@ export async function recordEndpoint(options) {
     params,
   });
 
-  return { data: response.data, status: response.status, scrub };
+  return {
+    data: response.data,
+    status: response.status,
+    scrub,
+    path,
+    params,
+    version: settings.apiVersion,
+  };
 }
 
 /** Read the server's settings (env + env file) through the compiled core. No I/O beyond that. */
@@ -768,9 +783,10 @@ export async function recordAdsSet(options) {
 
   const raw = [];
   const skippedDetails = [];
+  const recordedAt = new Date();
   for (const plan of planAdsRecordings(accountId, fields)) {
     const response = await send(plan);
-    raw.push({ out: plan.out, status: response.status, data: response.data });
+    raw.push({ plan, out: plan.out, status: response.status, data: response.data });
     const levelSpec = ADS_LEVELS.find((l) => l.listOut === plan.out);
     if (levelSpec === undefined) continue;
     const detail = planAdsObjectRead(levelSpec, response.data, fields);
@@ -780,6 +796,7 @@ export async function recordAdsSet(options) {
     }
     const detailResponse = await send(detail);
     raw.push({
+      plan: detail,
       out: detail.out,
       status: detailResponse.status,
       data: detailResponse.data,
@@ -787,14 +804,72 @@ export async function recordAdsSet(options) {
   }
 
   // Secrets first (exact values, then shapes), then the ads anonymiser — ONE
-  // instance for the whole run, so ids stay consistent across the files.
+  // instance for the whole run, so ids stay consistent across the files. The
+  // provenance block goes on last, so the anonymiser never rewrites it.
   const anonymizer = createAdsAnonymizer();
   const files = raw.map((r) => ({
     out: r.out,
     status: r.status,
-    data: anonymizer.anonymize(redactSecrets(r.data, client.scrub)),
+    data: withProvenance(
+      anonymizer.anonymize(redactSecrets(r.data, client.scrub)),
+      buildProvenance({ ...r.plan, version, recordedAt }),
+    ),
   }));
   return { skipped: false, dir, version, files, skippedDetails };
+}
+
+// ---------------------------------------------------------------------------
+// Provenance (R16, QA-03): every fixture says where it came from
+// ---------------------------------------------------------------------------
+
+/** Top-level key of the provenance block; `loadFixture` strips it. */
+export const FIXTURE_META_KEY = '_meta';
+
+/**
+ * `METHOD /path` with every id-looking run (6+ digits, as in `act_<id>`,
+ * `<page>_<post>`) replaced by `{id}`, so the provenance block names the edge
+ * without publishing the Page, post or ad account it was recorded from.
+ */
+export function endpointTemplate(method, path) {
+  const withSlash = path.startsWith('/') ? path : `/${path}`;
+  return `${method.toUpperCase()} ${withSlash.replace(/\d{6,}/g, '{id}')}`;
+}
+
+/**
+ * The `_meta` block of a recording: `source: recorded`, the API version the
+ * request went out on, the templated endpoint, the `fields` param (when there
+ * was one) and the capture time. Shape-checked by the same provenance lint the
+ * suite runs (`src/testing/fixtures.ts`).
+ */
+export function buildProvenance({
+  method = 'GET',
+  path,
+  params = {},
+  version,
+  recordedAt,
+}) {
+  const fields = params.fields;
+  return {
+    source: 'recorded',
+    graph_version: version,
+    endpoint: endpointTemplate(method, path),
+    ...(typeof fields === 'string' && fields.length > 0 ? { fields } : {}),
+    recorded_at: recordedAt.toISOString(),
+  };
+}
+
+/** Prefix a recorded body with its `_meta` block. Only a JSON object can carry one. */
+export function withProvenance(body, meta) {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    throw new RecordError(
+      'the response body is not a JSON object, so it cannot carry the `_meta` ' +
+        'provenance block every fixture needs. Record an edge that answers with an object.',
+      EXIT.failed,
+    );
+  }
+  // Spread after the block so the key order puts `_meta` first, then let the
+  // recorder's block win over any `_meta` the response itself carried.
+  return { [FIXTURE_META_KEY]: meta, ...body, [FIXTURE_META_KEY]: meta };
 }
 
 // ---------------------------------------------------------------------------
@@ -806,9 +881,24 @@ export async function recordAdsSet(options) {
  * a recording that would fail `npm test` never reaches the disk in the first
  * place. This is the same module the suite runs, not a second opinion.
  */
-async function assertLintClean(redacted, out) {
+async function assertLintClean(redacted, out, version) {
   const fixtures = await importBuilt('testing', 'fixtures.js');
   const findings = fixtures.findSecrets(redacted, { file: out });
+  // Held to the version the request went out on, not the pin: a pin-bump
+  // candidate set (FB_API_VERSION=<new>) is consistent with itself, and the
+  // suite's own provenance lint then says it is not the pin yet.
+  const provenance = fixtures.findProvenanceIssues(redacted, {
+    file: out,
+    expectedVersion: version,
+  });
+  if (provenance.length > 0) {
+    const lines = provenance.map((f) => `  ${f.path}: ${f.rule} (${f.detail})`);
+    throw new RecordError(
+      `refusing to write ${out}: the recording fails the provenance lint:\n` +
+        `${lines.join('\n')}`,
+      EXIT.failed,
+    );
+  }
   if (findings.length > 0) {
     const lines = findings.map((f) => `  ${f.path}: ${f.rule} (${f.sample})`);
     throw new RecordError(
@@ -833,7 +923,7 @@ async function runAds(options) {
   }
 
   for (const file of result.files) {
-    await assertLintClean(file.data, `${result.dir}${file.out}`);
+    await assertLintClean(file.data, `${result.dir}${file.out}`, result.version);
   }
 
   const dirUrl = new URL(result.dir, FIXTURES_DIR);
@@ -893,9 +983,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     );
   }
 
-  const { data, status, scrub } = await recordEndpoint(options);
-  const redacted = redactSecrets(data, scrub);
-  await assertLintClean(redacted, options.out);
+  const { data, status, scrub, path, params, version } = await recordEndpoint(options);
+  const redacted = withProvenance(
+    redactSecrets(data, scrub),
+    buildProvenance({ method: 'GET', path, params, version, recordedAt: new Date() }),
+  );
+  await assertLintClean(redacted, options.out, version);
 
   await writeFile(target, `${JSON.stringify(redacted, null, 2)}\n`, 'utf8');
   process.stdout.write(

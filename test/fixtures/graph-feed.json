@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "synthetic",
+    "graph_version": "v26.0",
+    "endpoint": "GET /{page-id}/feed"
+  },
   "data": [
     {
       "id": "100000000000001_200000000000002",
@@ -16,6 +21,6 @@
       "before": "QVFIUmExX2JlZm9yZQ",
       "after": "QVFIUmExX2FmdGVy"
     },
-    "next": "https://graph.facebook.com/v21.0/100000000000001/feed?after=QVFIUmExX2FmdGVy&limit=25"
+    "next": "https://graph.facebook.com/v26.0/100000000000001/feed?after=QVFIUmExX2FmdGVy&limit=25"
   }
 }

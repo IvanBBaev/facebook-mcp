@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { findSecrets } from './testing/fixtures.js';
+import { findProvenanceIssues, findSecrets, splitFixture } from './testing/fixtures.js';
 
 /** This file compiles to `build/record-fixture.test.js`, so the root is one level up. */
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,6 +54,15 @@ interface Recorder {
   };
   readonly redactString: (value: string) => string;
   readonly redactSecrets: (value: unknown, scrub?: (s: string) => string) => unknown;
+  readonly endpointTemplate: (method: string, path: string) => string;
+  readonly buildProvenance: (input: {
+    method?: string;
+    path: string;
+    params?: Record<string, unknown>;
+    version: string;
+    recordedAt: Date;
+  }) => Record<string, unknown>;
+  readonly withProvenance: (body: unknown, meta: unknown) => Record<string, unknown>;
 }
 
 // A computed specifier on purpose: the script lives outside `rootDir`, so it is
@@ -70,6 +79,9 @@ const {
   parseEndpoint,
   redactString,
   redactSecrets,
+  endpointTemplate,
+  buildProvenance,
+  withProvenance,
 } = recorder;
 
 /** Assert `fn` throws a `RecordError` whose message mentions `expected`. */
@@ -325,4 +337,77 @@ test('non-string leaves are passed through untouched', () => {
   >;
 
   assert.deepEqual(out, { n: 1, b: true, nil: null, arr: [1, 'me'] });
+});
+
+// ---------------------------------------------------------------------------
+// Provenance (R16, QA-03)
+// ---------------------------------------------------------------------------
+
+const RECORDED_AT = new Date('2026-10-31T09:15:00.000Z');
+
+test('the endpoint template keeps the edge and drops real ids', () => {
+  assert.equal(endpointTemplate('get', 'me'), 'GET /me');
+  assert.equal(endpointTemplate('GET', '/123456789012345/feed'), 'GET /{id}/feed');
+  assert.equal(
+    endpointTemplate('GET', '/act_1234567/campaigns'),
+    'GET /act_{id}/campaigns',
+  );
+  assert.equal(endpointTemplate('GET', '/1234567_7654321'), 'GET /{id}_{id}');
+});
+
+test('a recording is stamped recorded, with version, endpoint, fields and time', () => {
+  const meta = buildProvenance({
+    path: '/123456789012345/feed',
+    params: { fields: 'id,message', limit: 5 },
+    version: 'v26.0',
+    recordedAt: RECORDED_AT,
+  });
+  assert.deepEqual(meta, {
+    source: 'recorded',
+    graph_version: 'v26.0',
+    endpoint: 'GET /{id}/feed',
+    fields: 'id,message',
+    recorded_at: '2026-10-31T09:15:00.000Z',
+  });
+  assert.ok(
+    !(
+      'fields' in
+      buildProvenance({ path: 'me', version: 'v26.0', recordedAt: RECORDED_AT })
+    ),
+  );
+});
+
+test('the stamped recording passes both committed lints', () => {
+  // pollutedBody()'s paging URL is on v23.0, so the recording went out on v23.0.
+  const redacted = redactSecrets(pollutedBody());
+  const body = withProvenance(
+    redacted,
+    buildProvenance({ path: 'me', version: 'v23.0', recordedAt: RECORDED_AT }),
+  );
+  assert.equal(Object.keys(body)[0], '_meta', 'the provenance block leads the file');
+  assert.deepEqual(findSecrets(body), []);
+  assert.deepEqual(findProvenanceIssues(body, { expectedVersion: 'v23.0' }), []);
+  // The body a test loads is exactly the redacted response.
+  assert.deepEqual(splitFixture(body).body, redacted);
+});
+
+test('a pin-bump recording is consistent with its own version, not the pin', () => {
+  const body = withProvenance(
+    { paging: { next: 'https://graph.facebook.com/v27.0/1/feed' } },
+    buildProvenance({ path: 'me', version: 'v27.0', recordedAt: RECORDED_AT }),
+  );
+  assert.deepEqual(findProvenanceIssues(body, { expectedVersion: 'v27.0' }), []);
+  assert.ok(findProvenanceIssues(body, { expectedVersion: 'v26.0' }).length > 0);
+});
+
+test('only a JSON object can carry provenance', () => {
+  const meta = buildProvenance({ path: 'me', version: 'v26.0', recordedAt: RECORDED_AT });
+  for (const body of [[1], null, 'text', 3]) {
+    refuses(() => withProvenance(body, meta), /not a JSON object/);
+  }
+  // A body that already has a `_meta` key gets the recorder's block, not Graph's.
+  assert.deepEqual(withProvenance({ _meta: 'x', id: '1' }, meta), {
+    _meta: meta,
+    id: '1',
+  });
 });

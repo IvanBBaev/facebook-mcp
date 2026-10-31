@@ -1,4 +1,9 @@
 {
+  "_meta": {
+    "source": "synthetic",
+    "graph_version": "v26.0",
+    "endpoint": "GET /{page-id}"
+  },
   "id": "100000000000001",
   "name": "Example Page",
   "about": "Synthetic Page for the unit suite.",
