@@ -10,7 +10,19 @@
   "homepage": "https://ivanbbaev.github.io/facebook-mcp/",
   "repository": "https://github.com/IvanBBaev/facebook-mcp",
   "license": "MIT",
-  "keywords": ["mcp", "facebook", "meta", "graph-api", "pages", "llm", "ai"],
+  "keywords": [
+    "mcp",
+    "facebook",
+    "meta",
+    "graph-api",
+    "pages",
+    "llm",
+    "ai",
+    "mcp-server",
+    "facebook-api",
+    "meta-graph-api",
+    "social-media"
+  ],
   "mcpServers": {
     "facebook": {
       "command": "npx",

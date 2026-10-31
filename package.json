@@ -9,7 +9,7 @@
     "type": "git",
     "url": "git+https://github.com/IvanBBaev/facebook-mcp.git"
   },
-  "homepage": "https://github.com/IvanBBaev/facebook-mcp#readme",
+  "homepage": "https://ivanbbaev.github.io/facebook-mcp/",
   "bugs": {
     "url": "https://github.com/IvanBBaev/facebook-mcp/issues"
   },
@@ -81,7 +81,11 @@
     "graph-api",
     "pages",
     "llm",
-    "ai"
+    "ai",
+    "mcp-server",
+    "facebook-api",
+    "meta-graph-api",
+    "social-media"
   ],
   "trademark": "This is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta and related marks are trademarks of Meta Platforms, Inc., used here only nominatively to indicate compatibility."
 }

@@ -10,6 +10,8 @@
 //   .claude-plugin/*.json   (Claude Code plugin + marketplace manifests)
 //   .env.example            (the operator-facing env template)
 //   README.md               (the `<!-- BEGIN GENERATED: … -->` blocks)
+//   docs/index.html         (the Pages site's generated fact blocks)
+//   docs/runbooks/onboarding.md (the scope table)
 //
 // Nothing here is read at runtime by the server: the server resolves its own
 // version from `package.json` and its settings from `src/core/settings.ts`.
@@ -77,8 +79,11 @@ export const identity = Object.freeze({
     url: 'https://github.com/IvanBBaev',
   },
   repository: 'https://github.com/IvanBBaev/facebook-mcp',
-  homepage: 'https://github.com/IvanBBaev/facebook-mcp#readme',
+  /** The GitHub Pages site — npm's "Homepage" link and the MCPB `homepage`. */
+  homepage: 'https://ivanbbaev.github.io/facebook-mcp/',
   documentation: 'https://ivanbbaev.github.io/facebook-mcp/',
+  /** MCPB `privacy_policies` (an array of URLs in manifest v0.2 and v0.3). */
+  privacyPolicy: 'https://github.com/IvanBBaev/facebook-mcp/blob/main/PRIVACY.md',
   issues: 'https://github.com/IvanBBaev/facebook-mcp/issues',
   /** Long form — package.json, plugin.json, MCPB `long_description`. */
   description:
@@ -101,6 +106,10 @@ export const identity = Object.freeze({
     'pages',
     'llm',
     'ai',
+    'mcp-server',
+    'facebook-api',
+    'meta-graph-api',
+    'social-media',
   ],
   trademark:
     'This is an independent, community-built project and is not affiliated with, ' +

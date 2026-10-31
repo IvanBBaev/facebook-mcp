@@ -60,18 +60,22 @@ only when a **setup-blocking** scope is missing; a missing package scope is a
 warning naming the exact scope and the exact package, because the install still
 works with a smaller tool surface.
 
-| Scope                     | Required by package              | Blocking? |
-| ------------------------- | -------------------------------- | --------- |
-| `pages_show_list`         | `core` — Page discovery, token derivation | **yes** — without it `/me/accounts` returns nothing and no Page token can be derived |
-| `pages_read_engagement`   | `core`, `reader`, `posts`        | no        |
-| `pages_read_user_content` | `reader`, `moderation`           | no        |
-| `pages_manage_posts`      | `posts`                          | no        |
-| `pages_manage_engagement` | `moderation` (hide/delete/reply) | no        |
-| `pages_messaging`         | `messages`                       | no        |
-| `pages_manage_metadata`   | `messages` (conversation listing) | no       |
-| `read_insights`           | `insights`                       | no        |
-| `ads_read`                | `ads` reads                      | no        |
-| `ads_management`          | `ads` writes                     | no        |
+<!-- BEGIN GENERATED: scopes -->
+
+| Scope                     | Required by package                                                                  | Blocking?                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `pages_show_list`         | `core`, `reader`                                                                     | **yes** — without it `/me/accounts` returns nothing and no Page token can be derived |
+| `pages_read_engagement`   | `core`, `reader`, `posts`, `insights`, `moderation`, `messages`, `ads`, `page_admin` | no                                                                                   |
+| `pages_read_user_content` | `reader`, `moderation`, `messages`                                                   | no                                                                                   |
+| `pages_manage_posts`      | `posts`                                                                              | no                                                                                   |
+| `read_insights`           | `insights`                                                                           | no                                                                                   |
+| `pages_manage_engagement` | `moderation`                                                                         | no                                                                                   |
+| `pages_messaging`         | `moderation`, `messages`                                                             | no                                                                                   |
+| `pages_manage_metadata`   | `moderation`, `messages`, `page_admin`                                               | no                                                                                   |
+| `ads_read`                | `ads`                                                                                | no                                                                                   |
+| `ads_management`          | `ads`                                                                                | no                                                                                   |
+
+<!-- END GENERATED -->
 
 `business_management` is deliberately **not** on that list: no package asks for
 it, so neither `setup-token` nor `doctor` will ever mention it. It is a

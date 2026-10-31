@@ -10,9 +10,10 @@
     "email": "ivanbbaev@gmail.com",
     "url": "https://github.com/IvanBBaev"
   },
-  "homepage": "https://github.com/IvanBBaev/facebook-mcp#readme",
+  "homepage": "https://ivanbbaev.github.io/facebook-mcp/",
   "documentation": "https://ivanbbaev.github.io/facebook-mcp/",
   "support": "https://github.com/IvanBBaev/facebook-mcp/issues",
+  "privacy_policies": ["https://github.com/IvanBBaev/facebook-mcp/blob/main/PRIVACY.md"],
   "license": "MIT",
   "keywords": [
     "mcp",
@@ -22,7 +23,11 @@
     "graph-api",
     "pages",
     "llm",
-    "ai"
+    "ai",
+    "mcp-server",
+    "facebook-api",
+    "meta-graph-api",
+    "social-media"
   ],
   "repository": {
     "type": "git",

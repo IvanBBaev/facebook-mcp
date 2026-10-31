@@ -20,7 +20,11 @@
 //      the error -> action matrix with the category and retry verdict each one
 //      really emits, and must not hard-code a launch form;
 //   5. Node floor — the supported runtime version, restated in the launcher
-//      guard, `.nvmrc`, the MCPB manifest and both workflows, must not fork.
+//      guard, `.nvmrc`, the MCPB manifest and both workflows, must not fork;
+//   6. Pages site — every fact `docs/index.html` states (version, counts,
+//      package table, tiers, Graph pin, JSON-LD, attestation filename) and the
+//      onboarding scope table must match the registry (DX-01, DX-07), and the
+//      MCPB manifest must point at the privacy notice (LEG-05).
 //
 // Deliberately no network, no token and no shelling out to git: the package
 // factories are pure, so the tool inventory is obtained by calling them.
@@ -29,7 +33,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   PACKAGE_NAMES,
@@ -39,6 +43,9 @@ import {
   type ToolSpec,
 } from './core/index.js';
 import { ERROR_MATRIX } from './core/error-matrix.js';
+import { DEFAULT_API_VERSION } from './core/settings.js';
+import { REQUIRED_SETUP_SCOPES } from './cli/setup-token/constants.js';
+import { PACKAGE_PERMISSIONS } from './mcp/doctor/permissions.js';
 import * as toolsIndex from './tools/index.js';
 
 /** This file compiles to `build/metadata.test.js`, so the root is one level up. */
@@ -720,5 +727,224 @@ test('CI and the release rail run the declared Node floor', async () => {
     floor,
     `release.yml builds on Node ${nodeVersion[1]}, but the floor is ${floor} — ` +
       'the published artifact must be built on the oldest runtime it claims to support',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 6. Pages site, onboarding scopes, privacy notice
+// ---------------------------------------------------------------------------
+
+/** The body of every `<!-- BEGIN GENERATED: id -->` block of `text`, in order. */
+function generatedBlocks(text: string, id: string): readonly string[] {
+  const re = new RegExp(
+    `<!-- BEGIN GENERATED: ${id} -->([\\s\\S]*?)<!-- END GENERATED -->`,
+    'g',
+  );
+  const bodies = [...text.matchAll(re)].map((m) => m[1] ?? '');
+  assert.ok(bodies.length > 0, `no generated \`${id}\` block`);
+  return bodies;
+}
+
+const onlyBlock = (text: string, id: string): string =>
+  generatedBlocks(text, id)[0] ?? '';
+
+/** Visible text of an HTML fragment (tags dropped, whitespace collapsed). */
+const visible = (html: string): string =>
+  html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+test('the Pages site states the package.json version and no other', async () => {
+  const version = String((await readJson('package.json'))['version']);
+  const site = await readText('docs', 'index.html');
+
+  // Any other 0.x.y release number on the page is a stale release number (the DX-01 defect:
+  // the site advertised 0.7.0 long after 0.8.0 shipped).
+  const stale = [...site.matchAll(/(?<![\d.])0\.\d+\.\d+(?![\d.])/g)]
+    .map((m) => m[0])
+    .filter((v) => v !== version);
+  assert.deepEqual(stale, [], `docs/index.html names a version other than ${version}`);
+
+  assert.match(site, new RegExp(`v${version.replace(/\./g, '\\.')} on npm`));
+  // The attestation command must name the asset the release rail uploads
+  // (`scripts/pack-mcpb.mjs`: `<basename(pkg.name)>-<version>.mcpb`).
+  const name = String((await readJson('package.json'))['name']);
+  const bundle = `${name.split('/').pop() ?? name}-${version}.mcpb`;
+  assert.match(
+    visible(onlyBlock(site, 'faq-npm')),
+    new RegExp(`gh attestation verify ${bundle.replace(/\./g, '\\.')} `),
+    'the site attestation command names the wrong .mcpb asset',
+  );
+});
+
+test('the Pages site JSON-LD parses and mirrors the release and the visible FAQ', async () => {
+  const version = String((await readJson('package.json'))['version']);
+  const site = await readText('docs', 'index.html');
+  const script = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(site);
+  assert.ok(script, 'docs/index.html has no JSON-LD block');
+  const graph = (JSON.parse(script[1] ?? '') as { '@graph': Record<string, unknown>[] })[
+    '@graph'
+  ];
+  const app = graph.find((node) => node['@type'] === 'SoftwareApplication');
+  assert.equal(app?.['softwareVersion'], version, 'JSON-LD softwareVersion drifted');
+
+  const faq = graph.find((node) => node['@type'] === 'FAQPage');
+  const questions = (faq?.['mainEntity'] ?? []) as { name: string }[];
+  const visibleQuestions = [
+    ...site.matchAll(/<details id="faq-[a-z0-9-]+">\s*<summary>([\s\S]*?)<\/summary>/g),
+  ].map((m) => visible(m[1] ?? ''));
+  assert.deepEqual(
+    questions.map((q) => q.name),
+    visibleQuestions,
+    'the JSON-LD FAQ does not mirror the visible FAQ',
+  );
+});
+
+test('the Pages site counts and package table match the registry', async () => {
+  const packages = loadPackages();
+  const tools = packages.flatMap((pkg) => pkg.tools);
+  const reads = tools.filter((tool) => tierOf(tool) === 'read').length;
+  const site = await readText('docs', 'index.html');
+
+  assert.match(
+    onlyBlock(site, 'badges'),
+    new RegExp(`${tools.length} tools · ${packages.length} packages`),
+  );
+  assert.match(
+    onlyBlock(site, 'badges'),
+    new RegExp(`Graph API ${DEFAULT_API_VERSION}<`),
+  );
+  assert.match(
+    visible(onlyBlock(site, 'stats').replace(/<[^>]+>/g, ' ')),
+    new RegExp(
+      `^${tools.length} tools in ${packages.length} packages ${reads} / ${tools.length - reads} `,
+    ),
+  );
+  assert.equal(visible(onlyBlock(site, 'tool-count')), String(tools.length));
+
+  for (const tier of ['read', 'reversible', 'irreversible', 'spend']) {
+    const count = tools.filter((tool) => tierOf(tool) === tier).length;
+    assert.equal(
+      visible(onlyBlock(site, `tier-${tier}`)),
+      `${count} tool${count === 1 ? '' : 's'}`,
+      `the site's ${tier} tier count drifted`,
+    );
+  }
+
+  // One row per registered package, in registry order, with its read/write split.
+  const rows = [
+    ...onlyBlock(site, 'packages-table').matchAll(/<tr>([\s\S]*?)<\/tr>/g),
+  ].map((m) => visible(m[1] ?? ''));
+  assert.deepEqual(
+    rows.map((row) => row.split(' ')[0]),
+    packages.map((pkg) => pkg.name),
+    'the site package table drifted from the registry',
+  );
+  for (const [i, pkg] of packages.entries()) {
+    const r = pkg.tools.filter((tool) => tierOf(tool) === 'read').length;
+    const w = pkg.tools.length - r;
+    const expected = [
+      ...(r > 0 ? [`${r} read`] : []),
+      ...(w > 0 ? [`${w} write`] : []),
+    ].join(' ');
+    assert.ok(
+      rows[i]?.includes(expected),
+      `site row for ${pkg.name} lacks "${expected}"`,
+    );
+  }
+
+  const permissionRows = [
+    ...onlyBlock(site, 'permissions-table').matchAll(/<tr>([\s\S]*?)<\/tr>/g),
+  ].map((m) => visible(m[1] ?? '').split(' ')[0]);
+  assert.deepEqual(
+    permissionRows,
+    packages.map((pkg) => pkg.name),
+  );
+});
+
+test('the Pages site environment table counts its own rows', async () => {
+  const site = await readText('docs', 'index.html');
+  const rows = [...onlyBlock(site, 'env-table').matchAll(/<tr>/g)].length;
+  assert.equal(visible(onlyBlock(site, 'env-count')), String(rows));
+  // Every variable `.env.example` documents is on the site too.
+  const example = await readText('.env.example');
+  for (const m of example.matchAll(/^#?\s*(FB_[A-Z0-9_]+)=/gm)) {
+    assert.match(onlyBlock(site, 'env-table'), new RegExp(`<code>${m[1] ?? ''}</code>`));
+  }
+});
+
+test('the onboarding runbook scope table covers every package scope', async () => {
+  const runbook = onlyBlock(
+    await readText('docs', 'runbooks', 'onboarding.md'),
+    'scopes',
+  );
+  const rows = new Map(
+    [...runbook.matchAll(/^\| `([a-z_]+)` +\|(.*)\|(.*)\|$/gm)].map((m) => [
+      m[1] ?? '',
+      { pkgs: m[2] ?? '', blocking: (m[3] ?? '').trim().startsWith('**yes**') },
+    ]),
+  );
+  for (const [pkg, scopes] of Object.entries(PACKAGE_PERMISSIONS)) {
+    for (const scope of scopes ?? []) {
+      assert.ok(
+        rows.get(scope)?.pkgs.includes(`\`${pkg}\``),
+        `${scope} row omits ${pkg}`,
+      );
+    }
+  }
+  for (const [scope, row] of rows) {
+    assert.equal(
+      row.blocking,
+      REQUIRED_SETUP_SCOPES.includes(scope),
+      `${scope} blocking flag`,
+    );
+  }
+});
+
+test('the MCPB manifest links the privacy notice that ships in the repo', async () => {
+  const manifest = await readJson('manifest.json');
+  assert.deepEqual(manifest['privacy_policies'], [
+    'https://github.com/IvanBBaev/facebook-mcp/blob/main/PRIVACY.md',
+  ]);
+  await readText('PRIVACY.md');
+});
+
+interface GenSite {
+  spliceBlocks: (
+    text: string | undefined,
+    blocks: Record<string, string | { lines: string[] }>,
+    options: { label: string; pad?: string },
+  ) => string;
+  GenError: new (message: string) => Error;
+}
+
+test('the site splicer rewrites every occurrence and refuses unknown or missing blocks', async () => {
+  const gen = (await import(
+    pathToFileURL(repoFile('scripts', 'gen-site.mjs')).href
+  )) as GenSite;
+  const B = (id: string): string => `<!-- BEGIN GENERATED: ${id} -->`;
+  const E = '<!-- END GENERATED -->';
+  const opts = { label: 't' };
+
+  assert.equal(
+    gen.spliceBlocks(`a ${B('n')}1${E} b ${B('n')}2${E}`, { n: '9' }, opts),
+    `a ${B('n')}9${E} b ${B('n')}9${E}`,
+  );
+  assert.equal(
+    gen.spliceBlocks(
+      `<ul>\n  ${B('l')}\n  old\n  ${E}\n</ul>`,
+      { l: { lines: ['x', 'y'] } },
+      opts,
+    ),
+    `<ul>\n  ${B('l')}\n  x\n  y\n  ${E}\n</ul>`,
+  );
+  assert.throws(() => gen.spliceBlocks(`${B('n')}${E}`, {}, opts), gen.GenError);
+  assert.throws(() => gen.spliceBlocks('no markers', { n: '1' }, opts), gen.GenError);
+  assert.throws(() => gen.spliceBlocks(`${B('n')} open`, { n: '1' }, opts), gen.GenError);
+  assert.throws(
+    () => gen.spliceBlocks(`text ${B('l')}${E}`, { l: { lines: ['x'] } }, opts),
+    gen.GenError,
   );
 });

@@ -4,10 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>facebook-mcp — Facebook Pages MCP Server for the Meta Graph API</title>
+    <!-- BEGIN GENERATED: meta-description -->
     <meta
       name="description"
       content="An open-source, local-first MCP server that lets your AI assistant drive a Facebook Page through the Meta Graph API — publishing, insights, moderation and Messenger replies, with least-privilege tokens and tiered plan-and-apply writes. TypeScript, MIT, Node 22+."
     />
+    <!-- END GENERATED -->
     <meta name="author" content="Ivan Baev" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#f6f8fb" media="(prefers-color-scheme: light)" />
@@ -55,6 +57,7 @@
 
     <!-- Structured data: SoftwareApplication + FAQ. Every answer below mirrors
          copy that is visible on the page. -->
+    <!-- BEGIN GENERATED: jsonld -->
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -66,12 +69,12 @@
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "MCP Server",
             "operatingSystem": "Cross-platform (Node.js 22+)",
-            "description": "A local-first Model Context Protocol (MCP) server for the Meta Graph API, focused on Facebook Pages: publishing, reading & insights, comment moderation and Messenger replies, operated locally by a Page admin using their own Meta developer app.",
+            "description": "Local-first TypeScript MCP server for the Meta Graph API that lets an MCP client publish, read and moderate Facebook Pages through your own Meta developer app, with least-privilege tokens, plan-and-apply write safety and no telemetry.",
             "url": "https://ivanbbaev.github.io/facebook-mcp/",
             "codeRepository": "https://github.com/IvanBBaev/facebook-mcp",
             "license": "https://opensource.org/licenses/MIT",
             "programmingLanguage": "TypeScript",
-            "softwareVersion": "0.7.0",
+            "softwareVersion": "0.8.0",
             "downloadUrl": "https://www.npmjs.com/package/@ivanbaev/facebook-mcp",
             "author": {
               "@type": "Person",
@@ -109,7 +112,7 @@
                 "name": "Is it safe to let an AI assistant write to my Page?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Writes are split into tiers. Reversible writes are governed by FB_WRITE_MODE: the compiled-in default is plan, which returns a preview and performs zero network mutations, and each package may ship its own default — posts, messages and ads default to plan, moderation defaults to apply because hiding a comment is one click to undo. An explicit FB_WRITE_MODE always wins, in both directions. Irreversible actions — delete a post, delete a comment, send a private reply, change an ads object — ignore FB_WRITE_MODE entirely and require a per-call apply flag, the plan_id of a preview you just ran, and an out-of-band human confirmation the model cannot supply itself. The recommended starting posture is read-only."
+                  "text": "Writes are split into tiers. Reversible writes are governed by FB_WRITE_MODE: the compiled-in default is plan, which returns a preview and performs zero network mutations, and each package may ship its own default — posts, messages, ads and page_admin default to plan, moderation defaults to apply because hiding a comment is one click to undo. An explicit FB_WRITE_MODE always wins, in both directions. Irreversible and spend actions — deleting a post or a comment, sending a private reply, publishing a Story, deleting a conversation label, archiving, deleting, duplicating or boosting an ads object, and changing an ads object's status, budget, spend cap or targeting — ignore FB_WRITE_MODE entirely and require a per-call apply flag, the plan_id of a preview you just ran, and an out-of-band human confirmation the model cannot supply itself. The recommended starting posture is read-only."
                 }
               },
               {
@@ -117,7 +120,7 @@
                 "name": "What actually works today?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "All seven tool packages are implemented: 37 tools across core, reader, posts, insights, moderation, messages and ads. Six packages are on by default; ads is opt-in via FB_TOOL_PACKAGES. Version 0.7.0 is published on npm, but the project is still pre-1.0 and the automated test suite runs entirely against fakes and recorded fixtures behind a network fence — no behaviour has been verified against the live Graph API yet. A manual smoke harness exists for that, gated behind FB_SMOKE=1 and never run in CI."
+                  "text": "All eight tool packages are implemented: 69 tools across core, reader, posts, insights, moderation, messages, ads and page_admin. Six are on by default; ads and page_admin are opt-in via FB_TOOL_PACKAGES. Version 0.8.0 is published on npm, but the project is still pre-1.0 and the automated test suite runs entirely against fakes and recorded fixtures behind a network fence — no behaviour has been verified against the live Graph API yet. A manual smoke harness exists for exactly that, gated behind FB_SMOKE=1 and never run in CI."
                 }
               },
               {
@@ -125,7 +128,7 @@
                 "name": "Is it published to npm?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Yes. The package is @ivanbaev/facebook-mcp — the npm scope carries one b, unlike the GitHub user IvanBBaev — and version 0.7.0 is the current latest, so npx -y @ivanbaev/facebook-mcp runs the server without an install step. It was published with npm provenance by the OIDC release workflow from the tagged commit. The same release rail ships the .mcpb desktop bundle on the v0.7.0 GitHub Release, with a build-provenance attestation you can check yourself using gh attestation verify, and the MCP registry listing io.github.IvanBBaev/facebook-mcp is live. It is still a pre-1.0 release: published, implemented and tested in isolation, not proven in production. Building from source stays supported as an alternative."
+                  "text": "Yes. The package is @ivanbaev/facebook-mcp — the npm scope carries one b, unlike the GitHub user IvanBBaev — and version 0.8.0 is the current latest, so npx -y @ivanbaev/facebook-mcp runs the server without an install step. It was published with npm provenance by the OIDC release workflow from the tagged commit. The same rail ships the .mcpb desktop bundle on the v0.8.0 GitHub Release, with a build-provenance attestation you can check yourself using gh attestation verify facebook-mcp-0.8.0.mcpb --repo IvanBBaev/facebook-mcp, and the MCP registry listing io.github.IvanBBaev/facebook-mcp is live. It is still a pre-1.0 release: published, implemented and tested in isolation, not proven in production. Building from source stays supported as an alternative."
                 }
               },
               {
@@ -133,7 +136,7 @@
                 "name": "Which MCP clients does it work with?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Any client that speaks the Model Context Protocol over stdio — for example Claude Desktop, Claude Code, VS Code and Cursor. Optional client capabilities degrade honestly: without elicitation.form support the server falls back to the FB_CONFIRM_TOKEN route for high-consequence writes instead of silently allowing them. An optional loopback-only Streamable HTTP transport is available for advanced setups."
+                  "text": "Any client that speaks the Model Context Protocol over stdio — Claude Desktop, Claude Code, VS Code and Cursor among them. Optional client capabilities degrade honestly: without elicitation.form support the server falls back to the FB_CONFIRM_TOKEN route for high-consequence writes rather than silently allowing them, and without progress support an upload simply reports no progress. An optional loopback-only Streamable HTTP transport is available for advanced setups."
                 }
               },
               {
@@ -141,7 +144,7 @@
                 "name": "How can I support the project?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "facebook-mcp is MIT-licensed and free, with no paid tier. It is maintained by one person in their own time, so donations are welcome through GitHub Sponsors (github.com/sponsors/IvanBBaev), Ko-fi (ko-fi.com/ivanbbaev) or Donatree (donatr.ee/ivanbbaev). Donating buys no priority support and no SLA; starring the repository or filing a good bug report helps just as much."
+                  "text": "facebook-mcp is MIT-licensed and free, with no paid tier. It is maintained by one person in their own time, so donations are welcome — see Support below. Donating buys no priority support and no SLA; starring the repository or filing a good bug report helps just as much."
                 }
               }
             ]
@@ -149,6 +152,7 @@
         ]
       }
     </script>
+    <!-- END GENERATED -->
 
     <script>
       // Theme bootstrap — runs before first paint so a stored choice never flashes.
@@ -1291,7 +1295,7 @@
             </svg>
           </span>
           facebook-mcp
-          <span class="ver">pre-1.0</span>
+          <span class="ver"><!-- BEGIN GENERATED: stage -->pre-1.0<!-- END GENERATED --></span>
         </a>
 
         <nav class="nav" aria-label="Sections">
@@ -1352,12 +1356,14 @@
           </p>
 
           <div class="badges">
+            <!-- BEGIN GENERATED: badges -->
             <span class="badge hi">TypeScript</span>
             <span class="badge">MIT</span>
             <span class="badge">Node 22+</span>
             <span class="badge">Graph API v26.0</span>
-            <span class="badge">37 tools · 7 packages</span>
-            <span class="badge warn">v0.7.0 on npm · pre-1.0</span>
+            <span class="badge">69 tools · 8 packages</span>
+            <span class="badge warn">v0.8.0 on npm · pre-1.0</span>
+            <!-- END GENERATED -->
           </div>
 
           <div class="cta">
@@ -1409,20 +1415,24 @@
           </div>
 
           <div class="stats">
-            <div><b>37</b><span>tools in 7 packages</span></div>
-            <div><b>22 / 14</b><span>read tools / write tools</span></div>
+            <!-- BEGIN GENERATED: stats -->
+            <div><b>69</b><span>tools in 8 packages</span></div>
+            <div><b>35 / 34</b><span>read tools / write tools</span></div>
             <div><b>3</b><span>hosts the process may reach</span></div>
             <div><b>0</b><span>telemetry calls, by design</span></div>
+            <!-- END GENERATED -->
           </div>
 
+          <!-- BEGIN GENERATED: status -->
           <p class="note warn" style="margin-top: 32px">
-            <strong>Status, honestly.</strong> All seven packages are implemented and
-            covered by 1,349 hermetic tests (99.1% statement coverage), but every one of
-            those tests runs against fakes and recorded fixtures behind a network fence.
-            Version 0.7.0 is published on npm with provenance — published, implemented
-            and tested in isolation, not proven in production. Nothing has been verified
-            against the live Graph API yet. Treat this as a pre-1.0 project.
+            <strong>Status, honestly.</strong> All eight packages are implemented and
+            covered by hermetic tests, but every one of those tests runs against fakes
+            and recorded fixtures behind a network fence. Version 0.8.0 is published on
+            npm with provenance — published, implemented and tested in isolation, not
+            proven in production. Nothing has been verified against the live Graph API
+            yet. Treat this as a pre-1.0 project.
           </p>
+          <!-- END GENERATED -->
         </div>
       </section>
 
@@ -1432,13 +1442,15 @@
           <div>
             <span class="eyebrow">Install</span>
             <h2 id="h-install">Running in four steps</h2>
+            <!-- BEGIN GENERATED: install-intro -->
             <p class="sub">
               The package is on npm as <code>@ivanbaev/facebook-mcp</code> — one
-              <code>b</code> in the scope, unlike the GitHub user
-              <code>IvanBBaev</code> — so <code>npx</code> fetches it and there is no
-              install step. Node 22 or newer. Building from source stays supported if
-              you would rather compile it yourself.
+              <code>b</code> in the scope, unlike the GitHub user <code>IvanBBaev</code> —
+              so <code>npx</code> fetches it and there is no install step. Node 22 or
+              newer. Building from source stays supported if you would rather compile it
+              yourself.
             </p>
+            <!-- END GENERATED -->
           </div>
 
           <div class="steps">
@@ -1451,12 +1463,12 @@
                     <button class="copy" type="button" data-copy="c-run">Copy</button>
                   </div>
                   <pre id="c-run"><span class="c"># nothing is installed and nothing runs at install time</span>
-npx -y @ivanbaev/facebook-mcp --version</pre>
+<!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --> --version</pre>
                 </div>
                 <p class="sub" style="margin-top: 10px; font-size: 14px">
                   Prefer source? Clone and compile, then read
                   <code>node build/index.js</code> everywhere the steps below write
-                  <code>npx -y @ivanbaev/facebook-mcp</code>.
+                  <code><!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --></code>.
                 </p>
                 <div class="code">
                   <div class="code-head">
@@ -1488,7 +1500,7 @@ npm run build</pre>
                   </div>
                   <pre id="c-token"><span class="c"># --page pins the Page; add --dry-run first to rehearse without writing</span>
 FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
-  npx -y @ivanbaev/facebook-mcp setup-token --page=1234567890</pre>
+  <!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --> setup-token --page=1234567890</pre>
                 </div>
               </div>
             </div>
@@ -1506,8 +1518,8 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
                     <span>shell</span>
                     <button class="copy" type="button" data-copy="c-doctor">Copy</button>
                   </div>
-                  <pre id="c-doctor">npx -y @ivanbaev/facebook-mcp doctor
-npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node version, no credential needed</span></pre>
+                  <pre id="c-doctor"><!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --> doctor
+<!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --> --version   <span class="c"># server + Node version, no credential needed</span></pre>
                 </div>
                 <p class="sub">
                   <code>doctor</code>, <code>setup-token</code> and
@@ -1570,7 +1582,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                         Copy
                       </button>
                     </div>
-                    <pre id="c-claude">{
+                    <pre id="c-claude"><!-- BEGIN GENERATED: client-claude -->{
   <span class="p">"mcpServers"</span>: {
     <span class="p">"facebook"</span>: {
       <span class="p">"command"</span>: "npx",
@@ -1582,7 +1594,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
       }
     }
   }
-}</pre>
+}<!-- END GENERATED --></pre>
                   </div>
                   <p class="sub" style="margin-top: 10px; font-size: 14px">
                     On Windows the file lives at
@@ -1602,19 +1614,27 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <span>.vscode/mcp.json</span>
                       <button class="copy" type="button" data-copy="c-vscode">Copy</button>
                     </div>
-                    <pre id="c-vscode">{
+                    <pre id="c-vscode"><!-- BEGIN GENERATED: client-vscode -->{
+  <span class="p">"inputs"</span>: [
+    {
+      <span class="p">"type"</span>: "promptString",
+      <span class="p">"id"</span>: "fb-system-token",
+      <span class="p">"description"</span>: "Facebook System User token",
+      <span class="p">"password"</span>: true
+    }
+  ],
   <span class="p">"servers"</span>: {
     <span class="p">"facebook"</span>: {
       <span class="p">"type"</span>: "stdio",
       <span class="p">"command"</span>: "npx",
       <span class="p">"args"</span>: ["-y", "@ivanbaev/facebook-mcp"],
       <span class="p">"env"</span>: {
-        <span class="p">"FB_SYSTEM_TOKEN"</span>: "&lt;system-user-token&gt;",
+        <span class="p">"FB_SYSTEM_TOKEN"</span>: "${input:fb-system-token}",
         <span class="p">"FB_PAGE_ID"</span>: "1234567890"
       }
     }
   }
-}</pre>
+}<!-- END GENERATED --></pre>
                   </div>
                 </div>
 
@@ -1630,7 +1650,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <span>~/.cursor/mcp.json</span>
                       <button class="copy" type="button" data-copy="c-cursor">Copy</button>
                     </div>
-                    <pre id="c-cursor">{
+                    <pre id="c-cursor"><!-- BEGIN GENERATED: client-cursor -->{
   <span class="p">"mcpServers"</span>: {
     <span class="p">"facebook"</span>: {
       <span class="p">"command"</span>: "npx",
@@ -1641,7 +1661,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
       }
     }
   }
-}</pre>
+}<!-- END GENERATED --></pre>
                   </div>
                 </div>
               </div>
@@ -1655,7 +1675,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
         <div class="wrap stack-lg">
           <div>
             <span class="eyebrow">Capabilities</span>
-            <h2 id="h-capabilities">Seven packages, 37 tools</h2>
+            <h2 id="h-capabilities"><!-- BEGIN GENERATED: packages-heading -->Eight packages, 69 tools<!-- END GENERATED --></h2>
             <p class="sub">
               Packages are the unit of exposure: <code>FB_TOOL_PACKAGES</code> enables or
               disables whole packages, <code>FB_PACKAGES_DENY</code> removes one
@@ -1663,7 +1683,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
               while dropping its writes. <code>core</code> is always on. All three read
               the same namespace of packages <em>and</em> profiles, and a profile wins
               over a same-spelled package — so <code>FB_PACKAGES_DENY=core</code> denies
-              the whole six-package core profile, not the single <code>core</code>
+              the whole <!-- BEGIN GENERATED: core-profile-size -->six<!-- END GENERATED -->-package core profile, not the single <code>core</code>
               package.
             </p>
           </div>
@@ -1685,24 +1705,24 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                 </tr>
               </thead>
               <tbody>
+                <!-- BEGIN GENERATED: packages-table -->
                 <tr>
                   <td><code>core</code></td>
                   <td><span class="tag on">on</span></td>
                   <td><span class="tag read">4 read</span></td>
                   <td>—</td>
                   <td>
-                    Identity, Page discovery and rate-limit diagnostics. Read-only, always
-                    registered.
+                    Always-on identity, Page discovery and rate-limit diagnostics (read-only).
                   </td>
                 </tr>
                 <tr>
                   <td><code>reader</code></td>
                   <td><span class="tag on">on</span></td>
-                  <td><span class="tag read">4 read</span></td>
+                  <td><span class="tag read">7 read</span></td>
                   <td>—</td>
                   <td>
-                    A Page's own content: posts across four edges, single posts, Reels and
-                    reaction totals.
+                    Read-only access to a Page's own content: posts (four edges), single posts,
+                    Reels, reaction totals, Stories, albums and photos.
                   </td>
                 </tr>
                 <tr>
@@ -1710,64 +1730,84 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                   <td><span class="tag on">on</span></td>
                   <td>
                     <span class="tag read">2 read</span>
-                    <span class="tag write">6 write</span>
+                    <span class="tag write">7 write</span>
                   </td>
                   <td><code>plan</code></td>
                   <td>
-                    Publish, schedule, edit and delete Page posts, photos, videos and
-                    Reels; poll the upload state of a large video or Reel.
+                    Publish, schedule, edit and delete Page posts, photos, videos, Reels and
+                    stories (plan-first: every write previews before it applies).
                   </td>
                 </tr>
                 <tr>
                   <td><code>insights</code></td>
                   <td><span class="tag on">on</span></td>
-                  <td><span class="tag read">3 read</span></td>
+                  <td><span class="tag read">5 read</span></td>
                   <td>—</td>
                   <td>
-                    Page, post and Reel insights in a compact flat shape, with guidance for
-                    the metrics Meta renamed or removed. Reels read their own Graph edge, so
-                    they get their own tool.
+                    Page, post and Reel insights: compact reshaped metric series,
+                    semantics-aware summaries, a one-call Page report, a posts comparison table
+                    and post-2025 metric-rename guidance (read-only).
                   </td>
                 </tr>
                 <tr>
                   <td><code>moderation</code></td>
                   <td><span class="tag on">on</span></td>
                   <td>
-                    <span class="tag read">2 read</span>
-                    <span class="tag write">6 write</span>
+                    <span class="tag read">4 read</span>
+                    <span class="tag write">11 write</span>
                   </td>
                   <td><code>apply</code></td>
                   <td>
-                    Read and moderate comments — list, reply, hide, delete, private reply —
-                    and maintain the blocked-users list.
+                    Read and moderate comments on Page content (list, reply, comment on a post,
+                    edit the Page's own comments, hide, like, delete, private reply) and
+                    maintain the blocked-users list and the Page moderation settings (blocked
+                    words, profanity filter).
                   </td>
                 </tr>
                 <tr>
                   <td><code>messages</code></td>
                   <td><span class="tag on">on</span></td>
                   <td>
-                    <span class="tag read">2 read</span>
-                    <span class="tag write">1 write</span>
+                    <span class="tag read">5 read</span>
+                    <span class="tag write">8 write</span>
                   </td>
                   <td><code>plan</code></td>
                   <td>
-                    Messenger for a Page: poll the inbox, read a thread with untrusted
-                    content wrapped, send one reply inside the 24-hour window.
+                    Messenger conversations for a Page: poll the inbox, read a thread (untrusted
+                    content wrapped, attachments as placeholders) and send one private reply
+                    inside the 24-hour window, or react to a message; or ask what is new since
+                    the last look; keep local saved replies to send verbatim; tag threads with
+                    custom labels. Plan-first by default.
                   </td>
                 </tr>
                 <tr>
                   <td><code>ads</code></td>
                   <td><span class="tag">opt-in</span></td>
                   <td>
-                    <span class="tag read">6 read</span>
-                    <span class="tag write">1 write</span>
+                    <span class="tag read">8 read</span>
+                    <span class="tag write">7 write</span>
                   </td>
                   <td><code>plan</code></td>
                   <td>
-                    Marketing API: campaign / ad-set / ad listings with delivery truth,
-                    insights with async report runs, plan-gated status and budget control.
+                    Marketing API access: campaign / ad-set / ad listings with delivery truth,
+                    single-object reads, placement previews, insights with async report runs,
+                    plan-gated status, budget and campaign spend-cap control, single-object
+                    archive/delete, ad image uploads, ad-set targeting reads with a narrow
+                    countries/ages edit, paused copies of campaigns, ad sets and ads, and paused
+                    boosts of Page posts. Off by default.
                   </td>
                 </tr>
+                <tr>
+                  <td><code>page_admin</code></td>
+                  <td><span class="tag">opt-in</span></td>
+                  <td><span class="tag write">1 write</span></td>
+                  <td><code>plan</code></td>
+                  <td>
+                    Edit the Page itself: its public profile (about, description, website,
+                    phone, hours, temporary status). Opt-in; needs pages_manage_metadata.
+                  </td>
+                </tr>
+                <!-- END GENERATED -->
               </tbody>
             </table>
           </div>
@@ -1776,10 +1816,12 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
             <div class="card">
               <h3>What it deliberately does not do</h3>
               <p class="sub" style="font-size: 15px">
-                Instagram and Threads, Stories, Events, Live video, Page profile
-                management, organic post targeting and boosting a post are all out of
-                scope for now. The <code>business_management</code> permission is never
-                requested.
+                Personal profiles and Groups, Instagram, Threads and WhatsApp, webhooks,
+                Events, Live video and organic post targeting are all out of scope. Ads
+                are managed, not authored: there is no general ad or campaign creation —
+                <code>facebook_boost_post</code> is the one path that creates anything,
+                and it is plan-gated and confirmed out of band. The
+                <code>business_management</code> permission is never requested.
               </p>
             </div>
             <div class="card">
@@ -1794,7 +1836,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
           </div>
 
           <p class="sub">
-            The full 37-tool table, with the exact Graph permission each tool needs, lives
+            The full <!-- BEGIN GENERATED: tool-count -->69<!-- END GENERATED -->-tool table, with the exact Graph permission each tool needs, lives
             in the
             <a href="https://github.com/IvanBBaev/facebook-mcp#tools">README</a>.
           </p>
@@ -1817,45 +1859,51 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
             <div class="tier">
               <div>
                 <h3>read</h3>
-                <span class="tag read">22 tools</span>
+                <span class="tag read"><!-- BEGIN GENERATED: tier-read -->35 tools<!-- END GENERATED --></span>
               </div>
               <p>Never mutates anything. Safe to expose first, and to leave on.</p>
             </div>
             <div class="tier">
               <div>
                 <h3>reversible</h3>
-                <span class="tag write">10 tools</span>
+                <span class="tag write"><!-- BEGIN GENERATED: tier-reversible -->23 tools<!-- END GENERATED --></span>
               </div>
               <p>
                 Governed by the effective write mode. Under <code>plan</code> the tool
                 returns a preview with a <code>plan_id</code> and performs zero network
                 mutations; under <code>apply</code> it executes. Creating a post, editing
                 one, replying to or hiding a comment, blocking a user, sending a Messenger
-                reply.
+                reply, labelling a conversation, uploading an ad image, updating the Page
+                profile.
               </p>
             </div>
             <div class="tier">
               <div>
                 <h3>irreversible</h3>
-                <span class="tag irr">4 tools</span>
+                <span class="tag irr"><!-- BEGIN GENERATED: tier-irreversible -->9 tools<!-- END GENERATED --></span>
               </div>
               <p>
                 Ignores <code>FB_WRITE_MODE</code> completely — no environment variable
                 unlocks it. Requires a per-call <code>apply</code> flag,
                 <em>plus</em> the <code>plan_id</code> of a preview you just ran,
-                <em>plus</em> an out-of-band human confirmation. Deleting a post, deleting
-                a comment, sending a private reply, changing an ads object.
+                <em>plus</em> an out-of-band human confirmation. Deleting a post or a
+                comment, sending a private reply, publishing a Story, deleting a
+                conversation label, and archiving, deleting, duplicating or boosting an
+                ads object.
               </p>
             </div>
             <div class="tier">
               <div>
                 <h3>spend</h3>
-                <span class="tag">0 tools</span>
+                <span class="tag"><!-- BEGIN GENERATED: tier-spend -->2 tools<!-- END GENERATED --></span>
               </div>
               <p>
-                The money-moving tier. It is defined and enforced, but no shipped tool
-                carries it today — ads control is <code>irreversible</code> instead, and
-                <code>FB_ADS_BUDGET_CEILING</code> caps what a budget change may set.
+                The money-moving tier, gated exactly like <code>irreversible</code>:
+                changing an ads object's status, budget or spend cap, and changing an ad
+                set's targeting. On top of the gate, <code>FB_ADS_BUDGET_CEILING</code>
+                caps the budget a write may set and
+                <code>FB_ADS_CAMPAIGN_SPEND_CAP_MAX</code> caps a campaign spend cap; a
+                value above either is refused, never clamped.
               </p>
             </div>
           </div>
@@ -1870,8 +1918,9 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                   gate.
                 </li>
                 <li>
-                  Otherwise the package default applies. <code>posts</code>,
-                  <code>messages</code> and <code>ads</code> ship <code>plan</code>;
+                  Otherwise the package default applies.
+                  <!-- BEGIN GENERATED: plan-default-packages --><code>posts</code>, <code>messages</code>, <code>ads</code> and <code>page_admin</code><!-- END GENERATED -->
+                  ship <code>plan</code>;
                   <code>moderation</code> ships <code>apply</code>, because hiding a
                   comment is one click to undo and a moderation queue that previews twice
                   is a moderation queue nobody uses.
@@ -2099,6 +2148,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                   </tr>
                 </thead>
                 <tbody>
+                  <!-- BEGIN GENERATED: permissions-table -->
                   <tr>
                     <td><code>core</code></td>
                     <td>
@@ -2108,8 +2158,8 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                   <tr>
                     <td><code>reader</code></td>
                     <td>
-                      <code>pages_read_engagement</code>,
-                      <code>pages_read_user_content</code>
+                      <code>pages_read_engagement</code>, <code>pages_read_user_content</code>,
+                      <code>pages_show_list</code>
                     </td>
                   </tr>
                   <tr>
@@ -2120,32 +2170,46 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                   </tr>
                   <tr>
                     <td><code>insights</code></td>
-                    <td><code>read_insights</code></td>
+                    <td>
+                      <code>read_insights</code>, <code>pages_read_engagement</code>
+                    </td>
                   </tr>
                   <tr>
                     <td><code>moderation</code></td>
                     <td>
-                      <code>pages_read_user_content</code>,
-                      <code>pages_manage_engagement</code>
+                      <code>pages_read_engagement</code>, <code>pages_read_user_content</code>,
+                      <code>pages_manage_engagement</code>, <code>pages_messaging</code>,
+                      <code>pages_manage_metadata</code>
                     </td>
                   </tr>
                   <tr>
                     <td><code>messages</code></td>
                     <td>
-                      <code>pages_messaging</code>, <code>pages_manage_metadata</code>
+                      <code>pages_messaging</code>, <code>pages_manage_metadata</code>,
+                      <code>pages_read_engagement</code>, <code>pages_read_user_content</code>
                     </td>
                   </tr>
                   <tr>
                     <td><code>ads</code></td>
-                    <td><code>ads_read</code>, <code>ads_management</code></td>
+                    <td>
+                      <code>ads_read</code>, <code>ads_management</code>,
+                      <code>pages_read_engagement</code>
+                    </td>
                   </tr>
+                  <tr>
+                    <td><code>page_admin</code></td>
+                    <td>
+                      <code>pages_manage_metadata</code>, <code>pages_read_engagement</code>
+                    </td>
+                  </tr>
+                  <!-- END GENERATED -->
                 </tbody>
               </table>
             </div>
           </div>
 
           <details id="env">
-            <summary>All 25 environment variables</summary>
+            <summary>All <!-- BEGIN GENERATED: env-count -->30<!-- END GENERATED --> environment variables</summary>
             <div class="details-body" style="max-width: none; padding: 0">
               <div
                 class="tw"
@@ -2163,45 +2227,46 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                     </tr>
                   </thead>
                   <tbody>
+                    <!-- BEGIN GENERATED: env-table -->
                     <tr>
                       <td><code>FB_SYSTEM_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> System User token (Business Manager).
-                        Recommended; wins over the other two.
+                        <strong>Secret.</strong> System User token (Business Manager). Recommended;
+                        wins over the other two.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_ACCESS_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> Meta user access token, long-lived
-                        preferred.
+                        <strong>Secret.</strong> Meta user access token (a long-lived one
+                        preferred).
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PAGE_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> Long-lived Page token — the
-                        no-Business-Manager fallback.
+                        <strong>Secret.</strong> Long-lived Page token — the no-Business-Manager
+                        fallback. Belongs to exactly one Page: set <code>FB_PAGE_ID</code> to that
+                        Page alongside it, or no Page-scoped tool can use it.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_APP_ID</code></td>
                       <td>—</td>
                       <td>
-                        Meta app ID. With <code>FB_APP_SECRET</code> it forms the app token
-                        used to inspect tokens.
+                        Meta app ID. With <code>FB_APP_SECRET</code> it forms the app token used to
+                        inspect tokens.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_APP_SECRET</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> When set,
-                        <code>appsecret_proof</code> is attached so a stolen bare token is
-                        unusable.
+                        <strong>Secret.</strong> When set, <code>appsecret_proof</code> is attached
+                        so a stolen bare token is unusable.
                       </td>
                     </tr>
                     <tr>
@@ -2209,106 +2274,124 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <td>—</td>
                       <td>
                         Default Page ID for Page-scoped tools when a call omits
-                        <code>profile</code>.
+                        <code>profile</code>. Required when <code>FB_PAGE_TOKEN</code> is the only
+                        credential (it names the Page the token belongs to).
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_API_VERSION</code></td>
                       <td><code>v26.0</code></td>
                       <td>
-                        Graph API version to pin. Off-default values are accepted, but only
-                        the default is tested.
+                        Graph API version to pin. Off-default values are accepted, but only the
+                        default is tested.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_ADS_API_VERSION</code></td>
                       <td><code>v26.0</code></td>
                       <td>
-                        Marketing API version for the ads tools, pinned separately because
-                        the Marketing API retires versions on its own, shorter schedule.
+                        Marketing API version for the ads tools (own lifecycle, separate from
+                        FB_API_VERSION). Off-default values are accepted, but only the default is
+                        tested.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_REQUEST_TIMEOUT_MS</code></td>
                       <td><code>60000</code></td>
-                      <td>Per-request timeout in milliseconds (1–600000).</td>
+                      <td>
+                        Per-request timeout in milliseconds (1–600000).
+                      </td>
                     </tr>
                     <tr>
                       <td><code>FB_HOST_CONCURRENCY</code></td>
                       <td><code>4</code></td>
-                      <td>Max parallel requests per Graph host (1–64).</td>
+                      <td>
+                        Max parallel requests per Graph host (1–64).
+                      </td>
                     </tr>
                     <tr>
                       <td><code>FB_MAX_RESULT_CHARS</code></td>
                       <td><code>25000</code></td>
                       <td>
-                        Character budget before a tool result is truncated
-                        (500–10&nbsp;000&nbsp;000).
+                        Character budget before a tool result is truncated (500–10000000).
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_WRITE_MODE</code></td>
                       <td><code>plan</code></td>
                       <td>
-                        <code>plan</code> previews a write without mutating;
-                        <code>apply</code> executes. Never covers the irreversible or spend
-                        tiers.
+                        <code>plan</code> (default) previews a write without mutating;
+                        <code>apply</code> executes. Never covers the irreversible/spend tiers.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_CONFIRM_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> Out-of-band confirmation token authorizing
-                        gated write / spend actions, for clients that cannot prompt.
+                        <strong>Secret.</strong> Out-of-band confirmation token authorizing gated
+                        write / spend actions, for clients that cannot prompt. At least 16
+                        characters.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_MEDIA_DIR</code></td>
                       <td>—</td>
                       <td>
-                        Directory permitted as a source for local media uploads. Unset ⇒
-                        URL-only, local file access disabled.
+                        Directory permitted as a source for local media uploads. Unset ⇒ URL-only,
+                        local file access disabled.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_JOURNAL_PATH</code></td>
-                      <td>XDG / <code>%APPDATA%</code> state path</td>
+                      <td>XDG / %APPDATA% state path</td>
                       <td>
-                        Path to the append-only, rotating write journal
-                        (<code>0600</code>).
+                        Path to the append-only, rotating write journal (0600).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_ACTIVITY_STATE_PATH</code></td>
+                      <td>XDG / %APPDATA% state path</td>
+                      <td>
+                        Path to the local high-water marks of facebook_get_activity_since (0600).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_EXPORT_DIR</code></td>
+                      <td>XDG / %APPDATA% state path</td>
+                      <td>
+                        Directory for insights file exports (<code>output</code> argument; 0700 dir,
+                        0600 files).
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_TOOL_PACKAGES</code></td>
-                      <td><code>core</code> profile (all except <code>ads</code>)</td>
+                      <td>core profile (all packages except <code>ads</code>)</td>
                       <td>
-                        Comma-separated packages or profiles to enable.
-                        <code>core</code> is always forced on; <code>ads</code> is opt-in.
+                        Comma-separated packages or profiles to enable. <code>core</code> is always
+                        forced on; <code>ads</code> is opt-in.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PACKAGES_DENY</code></td>
                       <td>—</td>
                       <td>
-                        Packages or profiles to exclude even if enabled by
-                        <code>FB_TOOL_PACKAGES</code>; the <code>core</code> package
-                        always survives.
+                        Packages or profiles to exclude even if <code>FB_TOOL_PACKAGES</code>
+                        enables them; the <code>core</code> package always survives.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PACKAGES_READONLY</code></td>
                       <td>—</td>
                       <td>
-                        Packages or profiles whose write tools are not registered; their
-                        read tools stay.
+                        Packages or profiles whose write tools are not registered; their read tools
+                        stay.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_TRANSPORT</code></td>
                       <td><code>stdio</code></td>
                       <td>
-                        <code>stdio</code> or <code>http</code> (loopback-only Streamable
+                        <code>stdio</code> (default) or <code>http</code> (loopback-only Streamable
                         HTTP for local agent clients).
                       </td>
                     </tr>
@@ -2316,28 +2399,39 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <td><code>FB_HTTP_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> Bearer token required by the
-                        <code>http</code> transport; it fails closed without it.
+                        <strong>Secret.</strong> Bearer token required by the <code>http</code>
+                        transport; it fails closed without it. At least 16 characters.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_HTTP_PORT</code></td>
                       <td><code>3000</code></td>
                       <td>
-                        TCP port for the <code>http</code> transport; the bind host is
-                        fixed to <code>127.0.0.1</code>.
+                        TCP port for the <code>http</code> transport (the bind host is fixed to
+                        loopback <code>127.0.0.1</code>).
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_AD_ACCOUNT_ID</code></td>
                       <td>—</td>
-                      <td>Ad account ID for the opt-in <code>ads</code> package.</td>
+                      <td>
+                        Ad account ID for the opt-in <code>ads</code> package.
+                      </td>
                     </tr>
                     <tr>
                       <td><code>FB_ADS_BUDGET_CEILING</code></td>
                       <td>—</td>
                       <td>
-                        Hard budget ceiling for ads writes, in minor currency units.
+                        Hard budget ceiling for ads writes, in minor units of the ad account
+                        currency (non-negative integer, no currency conversion).
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_ADS_CAMPAIGN_SPEND_CAP_MAX</code></td>
+                      <td>—</td>
+                      <td>
+                        Largest campaign spend cap an ads write may set, in minor units of the ad
+                        account currency (non-negative integer, no currency conversion).
                       </td>
                     </tr>
                     <tr>
@@ -2353,26 +2447,26 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                       <td>—</td>
                       <td>
                         <strong>Secret.</strong> Short-lived user token consumed once by
-                        <code>setup-token</code>; the safe alternative to passing it as a
-                        CLI argument.
+                        <code>setup-token</code>; the safe alternative to passing it as a CLI
+                        argument.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PROFILE_&lt;NAME&gt;_PAGE_ID</code></td>
                       <td>—</td>
                       <td>
-                        Page ID for a named profile, e.g.
-                        <code>FB_PROFILE_BRAND_A_PAGE_ID</code>.
+                        Page ID for a named profile, e.g. FB_PROFILE_BRAND_A_PAGE_ID.
                       </td>
                     </tr>
                     <tr>
                       <td><code>FB_PROFILE_&lt;NAME&gt;_TOKEN</code></td>
                       <td>—</td>
                       <td>
-                        <strong>Secret.</strong> Optional per-profile token override for
-                        the matching Page ID.
+                        <strong>Secret.</strong> Optional per-profile token override for the
+                        matching FB_PROFILE_&lt;NAME&gt;_PAGE_ID.
                       </td>
                     </tr>
+                    <!-- END GENERATED -->
                   </tbody>
                 </table>
               </div>
@@ -2432,16 +2526,19 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
                 Writes are split into tiers. Reversible writes are governed by
                 <code>FB_WRITE_MODE</code>: the compiled-in default is <code>plan</code>,
                 which returns a preview and performs zero network mutations, and each
-                package may ship its own default — <code>posts</code>,
-                <code>messages</code> and <code>ads</code> default to <code>plan</code>,
+                package may ship its own default —
+                <!-- BEGIN GENERATED: plan-default-packages --><code>posts</code>, <code>messages</code>, <code>ads</code> and <code>page_admin</code><!-- END GENERATED -->
+                default to <code>plan</code>,
                 <code>moderation</code> defaults to <code>apply</code> because hiding a
                 comment is one click to undo. An explicit <code>FB_WRITE_MODE</code> always
                 wins, in both directions.
               </p>
               <p>
-                Irreversible actions — delete a post, delete a comment, send a private
-                reply, change an ads object — ignore <code>FB_WRITE_MODE</code> entirely
-                and require a per-call <code>apply</code> flag, the
+                Irreversible and spend actions — deleting a post or a comment, sending a
+                private reply, publishing a Story, deleting a conversation label,
+                archiving, deleting, duplicating or boosting an ads object, and changing an
+                ads object's status, budget, spend cap or targeting — ignore
+                <code>FB_WRITE_MODE</code> entirely and require a per-call <code>apply</code> flag, the
                 <code>plan_id</code> of a preview you just ran, and an out-of-band human
                 confirmation the model cannot supply itself. The recommended starting
                 posture is read-only.
@@ -2452,47 +2549,47 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
           <details id="faq-status">
             <summary>What actually works today?</summary>
             <div class="details-body">
+              <!-- BEGIN GENERATED: faq-status -->
               <p>
-                All seven tool packages are implemented: 37 tools across
-                <code>core</code>, <code>reader</code>, <code>posts</code>,
-                <code>insights</code>, <code>moderation</code>, <code>messages</code> and
-                <code>ads</code>. Six are on by default; <code>ads</code> is opt-in via
-                <code>FB_TOOL_PACKAGES</code>.
+                All eight tool packages are implemented: 69 tools across <code>core</code>,
+                <code>reader</code>, <code>posts</code>, <code>insights</code>,
+                <code>moderation</code>, <code>messages</code>, <code>ads</code> and
+                <code>page_admin</code>. Six are on by default; <code>ads</code> and
+                <code>page_admin</code> are opt-in via <code>FB_TOOL_PACKAGES</code>.
               </p>
               <p>
-                Version 0.7.0 is published on npm, but the project is still pre-1.0 and
-                the automated test suite runs entirely against fakes and recorded
-                fixtures behind a network fence — no behaviour has been verified against
-                the live Graph API yet. A manual smoke harness exists for exactly that,
-                gated behind <code>FB_SMOKE=1</code> and never run in CI.
+                Version 0.8.0 is published on npm, but the project is still pre-1.0 and the
+                automated test suite runs entirely against fakes and recorded fixtures
+                behind a network fence — no behaviour has been verified against the live
+                Graph API yet. A manual smoke harness exists for exactly that, gated behind
+                <code>FB_SMOKE=1</code> and never run in CI.
               </p>
+              <!-- END GENERATED -->
             </div>
           </details>
 
           <details id="faq-npm">
             <summary>Is it published to npm?</summary>
             <div class="details-body">
+              <!-- BEGIN GENERATED: faq-npm -->
               <p>
                 Yes. The package is <code>@ivanbaev/facebook-mcp</code> — the npm scope
-                carries one <code>b</code>, unlike the GitHub user
-                <code>IvanBBaev</code> — and version 0.7.0 is the current
-                <code>latest</code>, so <code>npx -y @ivanbaev/facebook-mcp</code> runs
-                the server without an install step. It was published with npm provenance
-                by the OIDC release workflow from the tagged commit.
+                carries one <code>b</code>, unlike the GitHub user <code>IvanBBaev</code> —
+                and version 0.8.0 is the current <code>latest</code>, so <code>npx -y
+                @ivanbaev/facebook-mcp</code> runs the server without an install step. It
+                was published with npm provenance by the OIDC release workflow from the
+                tagged commit.
               </p>
               <p>
                 The same rail ships the <code>.mcpb</code> desktop bundle on the
-                <code>v0.7.0</code> GitHub Release, with a build-provenance attestation
-                you can check yourself using
-                <code
-                  >gh attestation verify facebook-mcp-0.7.0.mcpb --repo
-                  IvanBBaev/facebook-mcp</code
-                >, and the MCP registry listing
-                <code>io.github.IvanBBaev/facebook-mcp</code> is live. It is still a
-                pre-1.0 release: published, implemented and tested in isolation, not
-                proven in production. Building from source stays supported as an
-                alternative.
+                <code>v0.8.0</code> GitHub Release, with a build-provenance attestation you
+                can check yourself using <code>gh attestation verify facebook-mcp-0.8.0.mcpb
+                --repo IvanBBaev/facebook-mcp</code>, and the MCP registry listing
+                <code>io.github.IvanBBaev/facebook-mcp</code> is live. It is still a pre-1.0
+                release: published, implemented and tested in isolation, not proven in
+                production. Building from source stays supported as an alternative.
               </p>
+              <!-- END GENERATED -->
             </div>
           </details>
 
@@ -2560,7 +2657,7 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
               <h3>Found a bug?</h3>
               <p class="sub" style="font-size: 15px">
                 Open an issue with the output of
-                <code>npx -y @ivanbaev/facebook-mcp --version</code> and the summary from
+                <code><!-- BEGIN GENERATED: launch -->npx -y @ivanbaev/facebook-mcp<!-- END GENERATED --> --version</code> and the summary from
                 <code>doctor</code> — that pair answers most of the first round of
                 questions.
               </p>
@@ -2601,6 +2698,9 @@ npx -y @ivanbaev/facebook-mcp --version   <span class="c"># server + Node versio
           >
           <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/SECURITY.md"
             >Security</a
+          >
+          <a href="https://github.com/IvanBBaev/facebook-mcp/blob/main/PRIVACY.md"
+            >Privacy</a
           >
           <a href="https://github.com/IvanBBaev/facebook-mcp/tree/main/docs/runbooks"
             >Runbooks</a

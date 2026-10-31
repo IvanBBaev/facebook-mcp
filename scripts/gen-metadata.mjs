@@ -15,6 +15,8 @@
 //   .env.example           operator-facing env template
 //   README.md              the `<!-- BEGIN GENERATED: … -->` blocks
 //   docs/error-catalog.md  operator error catalog, from the error → action matrix
+//   docs/index.html        the Pages site's generated fact blocks (gen-site.mjs)
+//   docs/runbooks/onboarding.md  the scope table (gen-site.mjs)
 //
 // The tool inventory is not written down anywhere in the SSOT: it is read from
 // the COMPILED server (`build/tools/index.js`) by instantiating every package
@@ -35,12 +37,15 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
+import {
+  GenError,
+  renderOnboardingScopes,
+  renderSite,
+  spliceBlocks,
+} from './gen-site.mjs';
 import { dynamicEnv, env as ENV, identity } from './metadata.config.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-
-/** Thrown for expected, operator-actionable failures: reported without a stack. */
-class GenError extends Error {}
 
 const USAGE = `gen-metadata — project the metadata SSOT onto the generated artifacts
 
@@ -108,7 +113,8 @@ function table(headers, aligns, rows) {
 
 /**
  * @returns {Promise<{packages: object[], toolPermissions: Record<string, readonly string[]>,
- *   packagePermissions: Record<string, readonly string[]>, defaultPackages: readonly string[]}>}
+ *   packagePermissions: Record<string, readonly string[]>, defaultPackages: readonly string[],
+ *   graphVersion: string, setupBlockingScopes: readonly string[]}>}
  */
 async function loadInventory() {
   const toolsEntry = repoPath('build', 'tools', 'index.js');
@@ -126,6 +132,12 @@ async function loadInventory() {
     pathToFileURL(repoPath('build', 'mcp', 'packages.js')).href
   );
   const types = await import(pathToFileURL(repoPath('build', 'core', 'types.js')).href);
+  const settings = await import(
+    pathToFileURL(repoPath('build', 'core', 'settings.js')).href
+  );
+  const setupToken = await import(
+    pathToFileURL(repoPath('build', 'cli', 'setup-token', 'constants.js')).href
+  );
 
   // Every `create<X>Package` export is a package factory. Core takes options;
   // the rest ignore the extra argument, so one call shape fits all of them.
@@ -151,6 +163,8 @@ async function loadInventory() {
     toolPermissions: doctor.TOOL_PERMISSIONS,
     packagePermissions: doctor.PACKAGE_PERMISSIONS,
     defaultPackages: packagesMod.DEFAULT_PROFILE_PACKAGES,
+    graphVersion: settings.DEFAULT_API_VERSION,
+    setupBlockingScopes: setupToken.REQUIRED_SETUP_SCOPES,
   };
 }
 
@@ -303,6 +317,7 @@ function generateManifestJson(inventory) {
       homepage: identity.homepage,
       documentation: identity.documentation,
       support: identity.issues,
+      privacy_policies: [identity.privacyPolicy],
       license: identity.license,
       keywords: [...identity.keywords],
       repository: { type: 'git', url: identity.repository },
@@ -840,29 +855,6 @@ function renderErrorCatalog({ errors, matrix, http }) {
   ].join('\n');
 }
 
-/** Replace the body of every `<!-- BEGIN GENERATED: id -->` block. */
-function spliceReadme(currentText, blocks) {
-  if (currentText === undefined) throw new GenError('README.md is missing.');
-  let out = currentText;
-  for (const [id, body] of Object.entries(blocks)) {
-    const begin = `<!-- BEGIN GENERATED: ${id} -->`;
-    const end = '<!-- END GENERATED -->';
-    const start = out.indexOf(begin);
-    if (start === -1) {
-      throw new GenError(
-        `README.md has no \`${begin}\` marker. Add the marker pair around the ` +
-          'section this generator owns.',
-      );
-    }
-    const stop = out.indexOf(end, start);
-    if (stop === -1) {
-      throw new GenError(`README.md: \`${begin}\` is never closed by \`${end}\`.`);
-    }
-    out = `${out.slice(0, start + begin.length)}\n\n${body}\n\n${out.slice(stop)}`;
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Diff (compact, generated-file oriented: trim the common head and tail)
 // ---------------------------------------------------------------------------
@@ -938,18 +930,52 @@ async function buildTargets() {
     { path: repoPath('.env.example'), text: generateEnvExample(), format: false },
     {
       path: readmePath,
-      text: spliceReadme(readmeCurrent, {
-        packages: renderPackagesBlock(inventory),
-        tools: renderToolsBlock(inventory),
-        scopes: renderScopesBlock(inventory),
-        env: renderEnvBlock(),
-      }),
+      text: spliceBlocks(
+        readmeCurrent,
+        {
+          packages: renderPackagesBlock(inventory),
+          tools: renderToolsBlock(inventory),
+          scopes: renderScopesBlock(inventory),
+          env: renderEnvBlock(),
+        },
+        { label: 'README.md', pad: '\n\n' },
+      ),
       format: true,
     },
     {
       path: repoPath('docs', 'error-catalog.md'),
       text: renderErrorCatalog(await loadErrorCatalog()),
       format: true,
+    },
+    // `docs/` is prettier-ignored (hand-laid-out HTML), so these two are emitted
+    // exactly as rendered; the onboarding table is formatted on its own below.
+    {
+      path: repoPath('docs', 'index.html'),
+      text: renderSite(readTextIfPresent(repoPath('docs', 'index.html')), {
+        identity,
+        env: ENV,
+        dynamicEnv,
+        inventory,
+        graphVersion: inventory.graphVersion,
+        firstSentence,
+      }),
+      format: false,
+    },
+    {
+      path: repoPath('docs', 'runbooks', 'onboarding.md'),
+      text: spliceBlocks(
+        readTextIfPresent(repoPath('docs', 'runbooks', 'onboarding.md')),
+        {
+          scopes: (
+            await prettier.format(
+              renderOnboardingScopes(inventory, inventory.setupBlockingScopes),
+              { parser: 'markdown' },
+            )
+          ).trimEnd(),
+        },
+        { label: 'docs/runbooks/onboarding.md', pad: '\n\n' },
+      ),
+      format: false,
     },
   ];
 
