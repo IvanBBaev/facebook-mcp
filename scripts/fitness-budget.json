@@ -1,0 +1,54 @@
+{
+  "$comment": "Fitness baselines (R14, D-ARC-7): orphan allowlist, file-size soft gate, tool-name literal ratchet. Every list only shrinks; see scripts/fitness.mjs.",
+  "orphans": {
+    "src/api/insights-schema.ts": "expand-only (C05); L2.insights adopts it in wave 2",
+    "src/api/upload-session.ts": "expand-only (X06); L2.posts-upload adopts it by the end of wave 2, else it is reverted (ARC-02)"
+  },
+  "fileSize": {
+    "limits": {
+      "production": 1200,
+      "test": 2500
+    },
+    "slack": 100,
+    "allowlist": {
+      "src/api/ads-read.ts": 1667,
+      "src/api/comments.ts": 1525,
+      "src/api/insights.ts": 1763,
+      "src/api/media-photos.ts": 1678,
+      "src/api/media-reels.ts": 1732,
+      "src/api/media-video.ts": 1657,
+      "src/api/messaging.ts": 1351,
+      "src/api/posts-write.ts": 1619,
+      "src/core/http.test.ts": 3417,
+      "src/core/http.ts": 1623,
+      "src/index.test.ts": 3619,
+      "src/mcp/doctor.test.ts": 3274,
+      "src/tools/ads.test.ts": 3026,
+      "src/tools/messages.test.ts": 2587,
+      "src/tools/messages.ts": 1352,
+      "src/tools/moderation.test.ts": 3460,
+      "src/tools/posts.test.ts": 4622
+    }
+  },
+  "toolNameLiterals": {
+    "src/api/ads-control.ts": 1,
+    "src/api/ads-copy.ts": 1,
+    "src/api/ads-create.ts": 1,
+    "src/api/ads-lifecycle.ts": 1,
+    "src/api/ads-targeting.ts": 1,
+    "src/api/albums.ts": 1,
+    "src/api/comments.ts": 4,
+    "src/api/media-photos.ts": 1,
+    "src/api/media-reels.ts": 4,
+    "src/api/media-video.ts": 1,
+    "src/api/messaging.ts": 6,
+    "src/api/page-profile.ts": 2,
+    "src/api/posts-read.ts": 1,
+    "src/api/posts-write.ts": 1,
+    "src/api/stories.ts": 1,
+    "src/core/auth.ts": 3,
+    "src/core/error-matrix.ts": 23,
+    "src/core/errors.ts": 2,
+    "src/core/http.ts": 1
+  }
+}
