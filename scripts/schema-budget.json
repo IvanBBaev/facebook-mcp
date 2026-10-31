@@ -1,0 +1,20 @@
+{
+  "$comment": "tools/list byte budget per profile (R13, OD-4). Ceilings ratchet down; see scripts/measure-schema.mjs.",
+  "slack": 1000,
+  "targets": {
+    "core": 90000,
+    "all": 110000,
+    "reader": 40000,
+    "publisher": 40000,
+    "moderator": 40000,
+    "ads": 40000
+  },
+  "ceilings": {
+    "core": 127338,
+    "all": 172699,
+    "reader": 19915,
+    "publisher": 32825,
+    "moderator": 37629,
+    "ads": 47114
+  }
+}
