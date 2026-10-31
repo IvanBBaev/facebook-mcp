@@ -45,7 +45,9 @@ import type {
 } from '../core/index.js';
 import { createWriteGate } from '../mcp/index.js';
 import { planAdObjectUpdate } from '../api/ads-control.js';
+import { COPY_INHERITS_AI_NOTE } from '../api/ads-copy.js';
 import { createAdsPackage } from './ads.js';
+import { ADS_TERMS_NOTE } from './ads-shared.js';
 import type { WriteToolContext } from './shared.js';
 
 /**
@@ -288,6 +290,7 @@ const SAFE_TO_LOG: ReadonlySet<string> = new Set([
   'page_id',
   'post_id',
   'objective',
+  'special_ad_category',
 ]);
 
 test('every log allowlist in the package names real, non-secret arguments', () => {
@@ -313,7 +316,14 @@ test('every log allowlist in the package names real, non-secret arguments', () =
     facebook_upload_ad_image: ['ad_account_id', 'apply', 'plan_id'],
     facebook_update_ad_set_targeting: ['adset_id', 'apply', 'plan_id'],
     facebook_duplicate_ad_object: ['object_id', 'level', 'deep_copy', 'apply', 'plan_id'],
-    facebook_boost_post: ['page_id', 'post_id', 'objective', 'apply', 'plan_id'],
+    facebook_boost_post: [
+      'page_id',
+      'post_id',
+      'objective',
+      'special_ad_category',
+      'apply',
+      'plan_id',
+    ],
   };
 
   for (const spec of PACKAGE.tools) {
@@ -2682,6 +2692,10 @@ test('a duplicate is an irreversible preview that copies nothing', async () => {
   assert.equal(result.tier, 'irreversible');
   assert.match(str(result.summary), /PAUSED copy/);
   assert.ok(arr(result.warnings).some((w) => str(w).startsWith('If activated: ')));
+  assert.ok(
+    arr(result.warnings).includes(COPY_INHERITS_AI_NOTE),
+    'the preview says the copy inherits the Advantage+ / creative-enhancement settings',
+  );
   assert.equal(writes(fb).length, 0, 'a dry run may not copy');
   assert.equal(journal.entries.length, 0);
 });
@@ -2824,6 +2838,7 @@ const BOOST_ARGS = {
   daily_budget_minor: 1000,
   spend_cap_minor: 10_000,
   countries: ['US'],
+  special_ad_category: 'none',
 };
 
 test('a boost is an irreversible preview that creates nothing', async () => {
@@ -2886,6 +2901,22 @@ test('an applied boost runs the four POSTs and journals every step under the pla
     const sentBody = obj(req.body);
     if ('status' in sentBody) assert.equal(sentBody.status, 'PAUSED');
     assert.match(str(sentBody.name), /\[fbmcp:plan1\]$/);
+  }
+  const sentTo = (e: string) => {
+    const req = sent.find((r) => r.path === `/${ACCOUNT_ID}/${e}`);
+    assert.ok(req && isJson(req));
+    return obj(req.body);
+  };
+  assert.deepEqual(sentTo('campaigns').special_ad_categories, []);
+  assert.deepEqual(obj(sentTo('adsets').targeting).targeting_automation, {
+    advantage_audience: 0,
+  });
+  const features = obj(
+    obj(sentTo('adcreatives').degrees_of_freedom_spec).creative_features_spec,
+  );
+  assert.ok(Object.keys(features).length > 0);
+  for (const [name, value] of Object.entries(features)) {
+    assert.deepEqual(value, { enroll_status: 'OPT_OUT' }, `${name} is pinned off`);
   }
   const steps = journal.entries.filter((e) => e.metadata?.chain === 'boost');
   assert.equal(steps.length, 8);
@@ -2950,5 +2981,46 @@ test('a boost is refused before any write when the inputs are unsafe', async () 
     const args: unknown = boost.inputSchema.parse({ ...BOOST_ARGS, ...extra });
     await assert.rejects(() => boost.handler(args, ctx), pattern);
     assert.equal(writes(fb).length, 0);
+  }
+});
+
+test('a boost needs the special-ad-category attestation, bound to the plan (LEG-04)', async () => {
+  const boost = tool('facebook_boost_post');
+  const withoutAttestation: Record<string, unknown> = { ...BOOST_ARGS };
+  delete withoutAttestation.special_ad_category;
+
+  assert.throws(
+    () => boost.inputSchema.parse(withoutAttestation),
+    /Required: special_ad_category/,
+  );
+  for (const category of ['housing', 'EMPLOYMENT', 'ISSUES_ELECTIONS_POLITICS', '']) {
+    assert.throws(
+      () => boost.inputSchema.parse({ ...BOOST_ARGS, special_ad_category: category }),
+      /does not support special-category ads/,
+      category,
+    );
+  }
+
+  const { fb, ctx } = makeHarness(COPY_SETTINGS);
+  stubBoostReads(fb);
+  const preview = body(await boost.handler(boost.inputSchema.parse(BOOST_ARGS), ctx));
+  assert.match(str(preview.summary), /Special ad category: none — the operator attests/);
+  assert.match(str(preview.summary), /Advantage\+ audience off .* OPT_OUT/);
+  // The handler re-parses strictly, so a schema-bypassing call is refused too.
+  await assert.rejects(
+    () => boost.handler(withoutAttestation, ctx),
+    /Required: special_ad_category/,
+  );
+  assert.equal(writes(fb).length, 0);
+});
+
+test('every ads write tool states the Self-Serve Ad Terms line', () => {
+  const writeTools = PACKAGE.tools.filter((t) => t.writeTier !== undefined);
+  assert.equal(writeTools.length, 7);
+  for (const spec of writeTools) {
+    assert.ok(
+      spec.description.includes(ADS_TERMS_NOTE),
+      `${spec.name} misses the terms line`,
+    );
   }
 });

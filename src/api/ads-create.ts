@@ -2,8 +2,9 @@
 // (v2 ads §1, owner decision D3 = B: the narrow chain).
 //
 //   POST /act_<id>/campaigns    status PAUSED, special_ad_categories [], spend_cap
-//   POST /act_<id>/adsets       status PAUSED, one budget, countries + ages only
-//   POST /act_<id>/adcreatives  object_story_id, Meta's creative enhancements OFF
+//   POST /act_<id>/adsets       status PAUSED, one budget, countries + ages only,
+//                               Advantage+ audience explicitly 0
+//   POST /act_<id>/adcreatives  object_story_id, Meta's creative enhancements OPT_OUT
 //   POST /act_<id>/ads          status PAUSED
 //
 // Every object is created PAUSED and nothing spends until the operator
@@ -11,6 +12,13 @@
 // always capped within `FB_ADS_CAMPAIGN_SPEND_CAP_MAX`, the ad set budget within
 // `FB_ADS_BUDGET_CEILING`, and no special ad category is ever declared, so the
 // chain refuses rather than creates anything the control tools would refuse.
+//
+// Declaring no special ad category is the OPERATOR's statement, not this
+// server's (LEG-04): the caller must pass `special_ad_category: "none"`
+// explicitly, the preview repeats it, and it is bound into the plan. Meta's
+// AI features are never left to a server-side default: the ad set pins
+// Advantage+ audience to 0 and the creative opts out of every creative
+// enhancement (Self-Serve Ad Terms, 2026-11-20).
 //
 // The planner is PURE: the caller reads the account and the post and passes
 // them in, so every refusal happens with certainty that nothing was created.
@@ -99,6 +107,35 @@ export const BOOST_NO_RETRY_NOTE =
 
 export const CREATIVE_KEPT_NOTE = 'creative kept (shared/idempotent, does not spend)';
 
+/**
+ * The only special-ad-category attestation this server accepts (LEG-04). Meta
+ * requires housing, employment, credit and social issues / elections /
+ * politics ads to declare their category; this server never declares one, so
+ * the operator must state that the ad is in none of them.
+ */
+export const NO_SPECIAL_AD_CATEGORY = 'none';
+export type SpecialAdCategoryAttestation = typeof NO_SPECIAL_AD_CATEGORY;
+
+/** The categories the attestation rules out, as the preview and refusals name them. */
+export const SPECIAL_AD_CATEGORIES_TEXT =
+  'housing, employment, credit, or social issues / elections / politics';
+
+export const SPECIAL_AD_CATEGORY_REFUSAL =
+  `Refused: this server does not support special-category ads (${SPECIAL_AD_CATEGORIES_TEXT}). ` +
+  'Meta requires those to declare their category and to follow its restricted-targeting rules; create them in Ads Manager. ' +
+  'If the ad is in none of those categories, pass special_ad_category:"none" to attest it. Nothing was created.';
+
+export const SPECIAL_AD_CATEGORY_MISSING =
+  'Required: special_ad_category. Pass special_ad_category:"none" only after the operator confirms the ad is NOT about ' +
+  `${SPECIAL_AD_CATEGORIES_TEXT}; this server declares no special ad category to Meta and does not support those ads. Nothing was created.`;
+
+/** The preview line that repeats the operator's attestation. */
+export const SPECIAL_AD_CATEGORY_ATTESTATION_LINE = `Special ad category: none — the operator attests the ad is not about ${SPECIAL_AD_CATEGORIES_TEXT}; declared to Meta as special_ad_categories [].`;
+
+/** The preview line naming the AI features the chain pins off. */
+export const BOOST_AI_FEATURES_LINE =
+  "Meta AI features: Advantage+ audience off (advantage_audience 0) and every creative enhancement OPT_OUT; none is left to Meta's default.";
+
 /** What the planner needs from the post read. */
 export interface BoostPost {
   /** `<page-id>_<post-id>`, Graph's `object_story_id`. */
@@ -147,6 +184,12 @@ export interface BoostPlanInput {
   readonly ageMin: number;
   readonly ageMax: number;
   readonly dsa?: BoostDsa;
+  /**
+   * The operator's attestation that the ad is in no special ad category
+   * (LEG-04). Typed as the literal, and re-checked at run time for callers
+   * that bypass the tool schema.
+   */
+  readonly specialAdCategory: SpecialAdCategoryAttestation;
   /** True when the account carries both DSA defaults (best-effort read). */
   readonly accountHasDsaDefaults: boolean;
   readonly spendCapMaxMinor?: number;
@@ -181,6 +224,8 @@ export interface BoostPlan {
   readonly ageMax: number;
   /** DSA fields set on the ad set; absent when the account defaults apply. */
   readonly dsa?: BoostDsa;
+  /** The operator's special-ad-category attestation; always "none". */
+  readonly specialAdCategory: SpecialAdCategoryAttestation;
   readonly euTargeted: boolean;
   readonly envelope: SpendEnvelope;
   readonly summary: string;
@@ -350,6 +395,16 @@ export function planBoost(input: BoostPlanInput): BoostPlan {
   const currency = account.currency;
   const accountId = account.id;
 
+  // LEG-04: the operator, not this server, states that the ad is in no
+  // special ad category. Anything but the explicit "none" is refused.
+  const attestation: unknown = input.specialAdCategory;
+  if (attestation === undefined || attestation === null || attestation === '') {
+    throw validationError(SPECIAL_AD_CATEGORY_MISSING);
+  }
+  if (attestation !== NO_SPECIAL_AD_CATEGORY) {
+    throw validationError(SPECIAL_AD_CATEGORY_REFUSAL);
+  }
+
   // Spend cap: mandatory, never the removal sentinel, within the configured
   // maximum and at or above Meta's minimum.
   const spendCap = validateSpendCapMinor('spend_cap_minor', input.spendCapMinor);
@@ -504,6 +559,8 @@ export function planBoost(input: BoostPlanInput): BoostPlan {
     `Campaign spend cap ${formatMinor(spendCap, currency)}; ${budgetLine}; bid strategy ${input.bidStrategy}${bidAmount !== undefined ? ` at ${formatMinor(bidAmount, currency)} per 1000 impressions` : ''}.`,
     `Schedule: from ${startTime}${endTime !== undefined ? ` to ${endTime}` : ', no end'}${account.timezone !== undefined ? ` (account time zone ${account.timezone})` : ''}.`,
     `Audience: ${countries.join(', ')}, ages ${String(input.ageMin)}–${String(input.ageMax)}, Advantage+ audience off.`,
+    SPECIAL_AD_CATEGORY_ATTESTATION_LINE,
+    BOOST_AI_FEATURES_LINE,
     ...describeEnvelope(envelope, currency),
   ].join('\n');
 
@@ -525,6 +582,7 @@ export function planBoost(input: BoostPlanInput): BoostPlan {
     ageMin: input.ageMin,
     ageMax: input.ageMax,
     ...(euTargeted && input.dsa !== undefined ? { dsa: input.dsa } : {}),
+    specialAdCategory: NO_SPECIAL_AD_CATEGORY,
     euTargeted,
     envelope,
     summary,
@@ -575,6 +633,7 @@ export function boostStepBody(
         name,
         objective: plan.objective,
         status: 'PAUSED',
+        // The operator attested "none" (LEG-04); planBoost refuses anything else.
         special_ad_categories: [],
         buying_type: 'AUCTION',
         bid_strategy: plan.bidStrategy,

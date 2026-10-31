@@ -17,9 +17,11 @@ import {
 } from '../core/index.js';
 
 import {
+  BOOST_AI_FEATURES_LINE,
   BOOST_PAUSED_NOTE,
   CREATIVE_KEPT_NOTE,
   DEFAULT_START_OFFSET_MS,
+  SPECIAL_AD_CATEGORY_ATTESTATION_LINE,
   boostPlanTag,
   boostReport,
   boostStepBody,
@@ -54,6 +56,7 @@ function input(overrides: Partial<BoostPlanInput> = {}): BoostPlanInput {
     ageMin: 18,
     ageMax: 65,
     accountHasDsaDefaults: false,
+    specialAdCategory: 'none',
     spendCapMaxMinor: 50_000,
     now: NOW,
     ...overrides,
@@ -207,6 +210,31 @@ test('the planner refuses every unsafe or unworkable boost', () => {
   }
 });
 
+test('the plan refuses a missing or special-category attestation and shows the given one (LEG-04)', () => {
+  // Callers that bypass the tool schema still meet the refusal.
+  const loose = (value: unknown): Partial<BoostPlanInput> =>
+    ({ specialAdCategory: value }) as unknown as Partial<BoostPlanInput>;
+  assert.throws(() => plan(loose(undefined)), /Required: special_ad_category/);
+  assert.throws(() => plan(loose('')), /Required: special_ad_category/);
+  for (const category of [
+    'housing',
+    'EMPLOYMENT',
+    'credit',
+    'ISSUES_ELECTIONS_POLITICS',
+  ]) {
+    assert.throws(
+      () => plan(loose(category)),
+      /does not support special-category ads.*Nothing was created/,
+      category,
+    );
+  }
+
+  const p = plan();
+  assert.equal(p.specialAdCategory, 'none');
+  assert.ok(p.summary.includes(SPECIAL_AD_CATEGORY_ATTESTATION_LINE));
+  assert.ok(p.summary.includes(BOOST_AI_FEATURES_LINE));
+});
+
 test('EU targeting passes with a dsa argument or account defaults', () => {
   const withDsa = plan({
     countries: ['de'],
@@ -265,7 +293,16 @@ test('every step is created PAUSED with no special category and the plan tag in 
 
   const creative = boostStepBody(p, 'creative', TAG, ids);
   assert.equal(creative.object_story_id, STORY_ID);
-  assert.ok(creative.degrees_of_freedom_spec);
+  // No Meta AI feature is left to a server-side default (Ad Terms 2026-11-20).
+  assert.deepEqual(creative.degrees_of_freedom_spec, {
+    creative_features_spec: {
+      image_template: { enroll_status: 'OPT_OUT' },
+      image_touchups: { enroll_status: 'OPT_OUT' },
+      text_optimizations: { enroll_status: 'OPT_OUT' },
+      inline_comment: { enroll_status: 'OPT_OUT' },
+      video_auto_crop: { enroll_status: 'OPT_OUT' },
+    },
+  });
 
   const ad = boostStepBody(p, 'ad', TAG, ids);
   assert.equal(ad.status, 'PAUSED');

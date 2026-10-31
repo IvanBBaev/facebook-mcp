@@ -784,8 +784,9 @@ your token. Automating them does not exempt you from the rules that govern them:
   `FB_ADS_CAMPAIGN_SPEND_CAP_MAX` (it is refused while that is unset), and a
   budget within `FB_ADS_BUDGET_CEILING` when you set one — but activating a
   campaign is your decision. `facebook_boost_post` always declares **no special
-  ad category**: never use it for housing, employment, credit, or social issues,
-  elections or politics. Those ads need a declared category (and, in the EU,
+  ad category**, and it requires `special_ad_category: "none"` as your
+  attestation of that: never pass it for housing, employment, credit, or social
+  issues, elections or politics. Those ads need a declared category (and, in the EU,
   are subject to the political-advertising rules) and must be created in Ads
   Manager. This software is provided under the MIT licence, without warranty;
   the author is not liable for ad spend or ad content.

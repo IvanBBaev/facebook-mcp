@@ -11,10 +11,10 @@
   },
   "ceilings": {
     "core": 127338,
-    "all": 172699,
+    "all": 173991,
     "reader": 19915,
     "publisher": 32825,
     "moderator": 37629,
-    "ads": 47114
+    "ads": 48406
   }
 }

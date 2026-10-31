@@ -19,6 +19,9 @@ import {
   BOOST_OBJECTIVES,
   MAX_BOOST_NAME_LENGTH,
   MAX_DSA_LENGTH,
+  NO_SPECIAL_AD_CATEGORY,
+  SPECIAL_AD_CATEGORY_MISSING,
+  SPECIAL_AD_CATEGORY_REFUSAL,
   boostPlanTag,
   boostReport,
   boostStoryId,
@@ -49,6 +52,7 @@ import {
   planIdArg,
 } from './shared.js';
 import {
+  ADS_TERMS_NOTE,
   accountForWrite,
   adAccountIdArg,
   classifyUpdateFailure,
@@ -126,13 +130,13 @@ export const boostPostTool = defineTool({
     'Boost one existing Page post: create a campaign, ad set, ad creative and ad that promote it. ' +
     'Everything is created PAUSED; nothing spends until the campaign is activated with a separate ' +
     'facebook_update_ad_object call. Requires a campaign spend cap (spend_cap_minor) within ' +
-    'FB_ADS_CAMPAIGN_SPEND_CAP_MAX and a budget within FB_ADS_BUDGET_CEILING; never declares a ' +
-    'special ad category (housing, employment, credit, politics are out of scope). Audience is ' +
+    'FB_ADS_CAMPAIGN_SPEND_CAP_MAX and a budget within FB_ADS_BUDGET_CEILING, and special_ad_category:"none", ' +
+    "the operator's attestation that the ad is not housing, employment, credit or politics (those are not supported). Audience is " +
     'countries plus an age range only. EU/EEA targeting needs DSA payor/beneficiary info. ' +
     'Plan-first: without apply:true this returns the four planned requests, the worst-case spend ' +
     'once activated, and creates NOTHING (facebook_get_ad_preview renders the ad); applying requires apply:true plus ' +
     'the plan_id. If a step fails, the objects already created are deleted again. Never retry an ' +
-    'apply whose outcome is unknown — every call creates another campaign.',
+    `apply whose outcome is unknown — every call creates another campaign. ${ADS_TERMS_NOTE}`,
   inputSchema: z.object({
     page_id: z
       .string()
@@ -214,6 +218,18 @@ export const boostPostTool = defineTool({
       .describe(
         'EU Digital Services Act info: who pays for the ad and who benefits. Needed for EU/EEA targeting unless the ad account has defaults.',
       ),
+    // LEG-04: no default, so the model cannot satisfy it by omission; any value
+    // but "none" is refused with the reason, before anything is read.
+    special_ad_category: z
+      .enum([NO_SPECIAL_AD_CATEGORY], {
+        error: (issue) =>
+          issue.input === undefined
+            ? SPECIAL_AD_CATEGORY_MISSING
+            : SPECIAL_AD_CATEGORY_REFUSAL,
+      })
+      .describe(
+        'REQUIRED attestation. Pass "none" only after the operator confirms the ad is NOT housing, employment, credit, or social issues/elections/politics. Special-category ads are refused.',
+      ),
     ad_account_id: adAccountIdArg,
     apply: applyArg,
     plan_id: planIdArg,
@@ -221,7 +237,14 @@ export const boostPostTool = defineTool({
   }),
   annotations: BOOST_ANNOTATIONS,
   writeTier: 'irreversible',
-  logFields: ['page_id', 'post_id', 'objective', 'apply', 'plan_id'],
+  logFields: [
+    'page_id',
+    'post_id',
+    'objective',
+    'special_ad_category',
+    'apply',
+    'plan_id',
+  ],
   handler: async (input, ctx) => {
     // The chain creates objects that can spend once activated: an account in
     // payment trouble is refused before anything is read further (CC-ADS-6).
@@ -278,6 +301,7 @@ export const boostPostTool = defineTool({
       ageMin: input.age_min,
       ageMax: input.age_max,
       ...(input.dsa !== undefined ? { dsa: input.dsa } : {}),
+      specialAdCategory: input.special_ad_category,
       accountHasDsaDefaults,
       ...(ctx.settings.adsCampaignSpendCapMax !== undefined
         ? { spendCapMaxMinor: ctx.settings.adsCampaignSpendCapMax }
@@ -327,6 +351,8 @@ export const boostPostTool = defineTool({
         age_min: plan.ageMin,
         age_max: plan.ageMax,
         ...(input.dsa !== undefined ? { dsa: input.dsa } : {}),
+        // The attestation is bound: a plan previewed without it cannot be applied.
+        special_ad_category: plan.specialAdCategory,
       },
       ...gateArgs(input),
       summary: [
@@ -376,6 +402,7 @@ export const boostPostTool = defineTool({
         accountId: account.id,
         objective: plan.objective,
         spendCapMinor: plan.spendCapMinor,
+        specialAdCategory: plan.specialAdCategory,
       },
     });
   },

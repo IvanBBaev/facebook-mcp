@@ -38,7 +38,12 @@ import {
   planIdArg,
   shapeFor,
 } from '../shared.js';
-import { accountForWrite, adAccountIdArg, classifyUpdateFailure } from '../ads-shared.js';
+import {
+  ADS_TERMS_NOTE,
+  accountForWrite,
+  adAccountIdArg,
+  classifyUpdateFailure,
+} from '../ads-shared.js';
 import {
   READ_ONLY,
   UPDATE_ANNOTATIONS,
@@ -130,7 +135,8 @@ export const updateAdSetTargetingTool = defineTool({
   name: 'facebook_update_ad_set_targeting',
   title: 'Update Ad Set Targeting',
   description:
-    "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is, except that an unset Advantage+ audience is written explicitly OFF so Meta cannot default it on. Refused when the audience is more complex than that (custom audiences, detailed targeting, regions/cities/zips, exclusions, Advantage+ audience on) — check editable_by_this_server with facebook_get_ad_set_targeting first. Adding EU countries to an audience that had none needs DSA payor/beneficiary info on the ad set or the account. Plan-first: without apply:true this returns a preview (before → after) and changes NOTHING; applying requires apply:true plus the plan_id from that preview, and is refused if the targeting changed in between.",
+    "Change only the countries and/or the age range of one ad set's audience; everything else in its targeting is kept exactly as it is, except that an unset Advantage+ audience is written explicitly OFF so Meta cannot default it on. Refused when the audience is more complex than that (custom audiences, detailed targeting, regions/cities/zips, exclusions, Advantage+ audience on) — check editable_by_this_server with facebook_get_ad_set_targeting first. Adding EU countries to an audience that had none needs DSA payor/beneficiary info on the ad set or the account. Plan-first: without apply:true this returns a preview (before → after) and changes NOTHING; applying requires apply:true plus the plan_id from that preview, and is refused if the targeting changed in between. " +
+    ADS_TERMS_NOTE,
   inputSchema: z.object({
     adset_id: adsetIdArg,
     ad_account_id: adAccountIdArg,

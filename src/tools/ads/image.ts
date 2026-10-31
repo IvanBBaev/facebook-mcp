@@ -32,7 +32,12 @@ import {
   gateArgs,
   planIdArg,
 } from '../shared.js';
-import { accountForWrite, adAccountIdArg, classifyUpdateFailure } from '../ads-shared.js';
+import {
+  ADS_TERMS_NOTE,
+  accountForWrite,
+  adAccountIdArg,
+  classifyUpdateFailure,
+} from '../ads-shared.js';
 
 /**
  * `facebook_upload_ad_image` (v2 ads §2). It adds a library entry and overwrites
@@ -60,7 +65,8 @@ export const uploadAdImageTool = defineTool({
   name: 'facebook_upload_ad_image',
   title: 'Upload Ad Image',
   description:
-    "Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives reference it by. Creates no ad and changes no delivery. Plan-first: without apply:true this returns a preview (file, size, account) and uploads NOTHING; applying requires apply:true plus the plan_id from that preview. Uploads are deduplicated by content hash, so re-running one is safe.",
+    "Upload one local image (JPEG, PNG, GIF, BMP, TIFF or WEBP, at most 30 MB, inside FB_MEDIA_DIR) to the ad account's image library and return its hash, which creatives reference it by. Creates no ad and changes no delivery. Plan-first: without apply:true this returns a preview (file, size, account) and uploads NOTHING; applying requires apply:true plus the plan_id from that preview. Uploads are deduplicated by content hash, so re-running one is safe. " +
+    ADS_TERMS_NOTE,
   inputSchema: z.object({
     ad_account_id: adAccountIdArg,
     file_path: z

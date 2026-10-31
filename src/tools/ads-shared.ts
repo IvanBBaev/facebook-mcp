@@ -23,6 +23,14 @@ export const adAccountIdArg = z
     'Ad account to read, as "act_1234567890" or the bare digits. Omitted ⇒ the account configured in FB_AD_ACCOUNT_ID. A Page id or a Business id will not work here.',
   );
 
+/**
+ * The sentence every ads write-tool description ends with (Meta's Self-Serve
+ * Ad Terms, 2026-11-20: the advertiser answers for third-party software). One
+ * constant so the wording, and its share of the schema budget, stays single.
+ */
+export const ADS_TERMS_NOTE =
+  "Changes are made in the operator's ad account under Meta's Self-Serve Ad Terms; the operator is billed and responsible for the result.";
+
 /** `signal` spread, present only when the call carries an abort seam. */
 export function signalOf(ctx: ToolContext): { signal?: AbortSignal } {
   return ctx.signal !== undefined ? { signal: ctx.signal } : {};

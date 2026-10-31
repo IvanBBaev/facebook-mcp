@@ -478,6 +478,7 @@ const LOGGABLE_VOCABULARY: ReadonlySet<string> = new Set([
   'remove',
   'scheduled_publish_time',
   'since',
+  'special_ad_category',
   'status',
   'type',
   'unlike',

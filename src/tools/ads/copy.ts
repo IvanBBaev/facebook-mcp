@@ -27,6 +27,7 @@ import {
   planIdArg,
 } from '../shared.js';
 import {
+  ADS_TERMS_NOTE,
   accountForWrite,
   adAccountIdArg,
   classifyUpdateFailure,
@@ -85,7 +86,7 @@ export const duplicateAdObjectTool = defineTool({
     'copied budget is above FB_ADS_BUDGET_CEILING, and for special-ad-category or Advantage+ ' +
     'shopping/app campaigns. Plan-first: without apply:true this returns a preview (budgets, spend ' +
     'cap, worst-case spend if activated, children) and creates NOTHING; applying requires apply:true ' +
-    'plus the plan_id. Never retry an apply whose outcome is unknown — every call makes another copy.',
+    `plus the plan_id. Never retry an apply whose outcome is unknown — every call makes another copy. ${ADS_TERMS_NOTE}`,
   inputSchema: z.object({
     object_id: objectIdArg,
     level: z

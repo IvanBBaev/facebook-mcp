@@ -33,6 +33,7 @@ import {
   planIdArg,
 } from '../shared.js';
 import {
+  ADS_TERMS_NOTE,
   accountForWrite,
   adAccountIdArg,
   classifyUpdateFailure,
@@ -158,13 +159,13 @@ export function lifecycleTool(target: LifecycleTarget) {
         'cannot resume them. Plan-first: without apply:true this returns a preview (current status, ' +
         'children affected) and changes NOTHING; applying requires apply:true plus the plan_id from ' +
         'that preview. Pass `level` so the children can be counted. An already archived or deleted ' +
-        'object is refused.'
+        `object is refused. ${ADS_TERMS_NOTE}`
       : 'Delete one campaign, ad set or ad by id — permanently. Its ad sets and ads are deleted with ' +
         'it, and a deleted object cannot be restored or edited. Plan-first: without apply:true this ' +
         'returns a preview (current status, children affected, a warning when it delivered in the ' +
         'last 28 days) and changes NOTHING; applying requires apply:true plus the plan_id from that ' +
         'preview. An archived object can be deleted; an already deleted one is refused. Pass `level` ' +
-        'so the children can be counted. Never deletes more than this one object tree.',
+        `so the children can be counted. Never deletes more than this one object tree. ${ADS_TERMS_NOTE}`,
     inputSchema: z.object({
       object_id: objectIdArg,
       level: levelArg,
@@ -300,8 +301,8 @@ export function createUpdateAdObjectTool() {
       'budgets; archived and deleted objects are read-only and are refused before ' +
       'the request. Setting status:"ACTIVE" sets the CONFIGURATION — check ' +
       '`effective_status` afterwards to learn whether the object actually ' +
-      'delivers. Creating ads objects is out of scope for this server; to archive or ' +
-      'delete one, use facebook_archive_ad_object / facebook_delete_ad_object.',
+      'delivers. This tool never creates ads objects (a boost uses facebook_boost_post); to archive or ' +
+      `delete one, use facebook_archive_ad_object / facebook_delete_ad_object. ${ADS_TERMS_NOTE}`,
     inputSchema: z.object({
       object_id: objectIdArg,
       level: levelArg,

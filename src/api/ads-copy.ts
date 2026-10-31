@@ -55,6 +55,13 @@ export const MAX_CHECKED_ADSETS = 50;
 export const COPY_PAUSED_NOTE =
   'The copy is created PAUSED; activating it is a separate spend-tier call (facebook_update_ad_object status:"ACTIVE").';
 
+/**
+ * `/copies` takes no override for Meta's AI features, so a copy keeps whatever
+ * the source had (Self-Serve Ad Terms, 2026-11-20): the preview says so.
+ */
+export const COPY_INHERITS_AI_NOTE =
+  "The copy inherits the source's Advantage+ / creative-enhancement settings; this server does not change them. Check them in Ads Manager before activating the copy.";
+
 export const COPY_NO_RETRY_NOTE =
   'A copy cannot be retried safely: every retry creates another copy. If the outcome is unknown, look for the rename suffix in facebook_list_campaigns / _adsets / _ads before trying again.';
 
@@ -400,7 +407,7 @@ export function planCopy(input: CopyPlanInput): CopyPlan {
       `Campaign ${campaignId}'s special ad categories were not returned by the read; this copy assumes NONE.`,
     );
   }
-  warnings.push(COPY_PAUSED_NOTE, COPY_NO_RETRY_NOTE);
+  warnings.push(COPY_INHERITS_AI_NOTE, COPY_PAUSED_NOTE, COPY_NO_RETRY_NOTE);
 
   const name = stringOf(tree.source, 'name');
   const summary =
