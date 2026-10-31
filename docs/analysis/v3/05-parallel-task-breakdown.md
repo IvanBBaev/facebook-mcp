@@ -395,7 +395,7 @@ Done when: §2 definition of done is green. Commit on the branch; do not merge, 
 |---|---|---|
 | A | U-A1, I-A1, I-A2, U-A2; R01, R02, D08, U-A7 (governance), U-A9 | U-A1, I-A1, I-A2 (2026-10-28: PR #41 recorded as merged, superseded by `c7ce5b8`; zod ^4.6.7 for GHSA-mrhx-c7xc-m3w5; 0.8.0 on npm). R01 `99ae652`, R02 `ee54de1`, D08 `1df6e1f`, `release` environment gate `8bb78c4`, U-A9 analysed (2026-10-30). Open: I-A3 (0.8.1 tag — owner), U-A2, U-A3, rest of U-A7 |
 | 0 | I00, I01, X01–X07 | All (2026-10-29; `tools/list` byte-identical to the 0.8.0 baseline). Deferred: split `runSetupToken` in `src/cli/setup-token/flow.ts` (825 lines); adopt `src/api/upload-session.ts` in the media upload paths (L2.posts); optional `release.yml` guard against unfolded `changes/unreleased/` fragments; lane ownership of the shared `src/mcp/annotations/messages.ts` fragment (saved replies + activity); remove the `src/mcp/setup-token.ts` facade and its ESLint override; split the large test files |
-| 1a | R10–R18 | — |
+| 1a | R10–R18 | R13 (2026-10-31, `4dc5fed`: `scripts/measure-schema.mjs` + `scripts/schema-budget.json`, ceilings at the measured sizes, OD-4 targets reported) |
 | 1 | C01–C06, C07–C14, X08–X11 | C05 (2026-10-29, `2c8d8bd`) |
 | 2 | L2.* (8), C01b | — |
 | 3 | I30–I32, U30 | — |
