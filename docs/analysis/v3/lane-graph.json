@@ -49,6 +49,7 @@
     "src/tools/ads-create.ts": "ads",
     "src/tools/ads-shared.ts": "ads",
     "src/api/ads-*.ts": "ads",
+    "src/api/ads-read/*": "ads",
     "src/mcp/annotations/ads.ts": "ads",
     "src/mcp/doctor/ads.ts": "ads",
     "src/tools/page-admin.ts": "page-admin",

@@ -13,6 +13,7 @@
     "build/cli/setup-token/types.js",
     "build/mcp/doctor/types.js",
     "build/api/insights/model.js",
+    "build/api/ads-read/model.js",
     "**/*.d.ts",
     "coverage/**",
     "node_modules/**"
