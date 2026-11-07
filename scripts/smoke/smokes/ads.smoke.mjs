@@ -796,7 +796,7 @@ registerSmoke({
 // takes the current record and the requested change and returns the tier, the
 // summary, the warnings and the refusals (read-only object, both budget kinds at
 // once, an amount over FB_ADS_BUDGET_CEILING) with no request involved — which is
-// why those live in the unit tests (src/tools/ads.test.ts, src/api/ads-control.test.ts)
+// why those live in the unit tests (src/tools/ads.update.test.ts, src/api/ads-control.test.ts)
 // and not here. A live smoke would add nothing they do not already pin.
 //
 // What an operator must do BY HAND, once, on an account they own:

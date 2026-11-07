@@ -844,7 +844,7 @@ test('toGraphApiError carries error_user_title / error_user_msg past a message o
 // ---------------------------------------------------------------------------
 
 // The body snippet itself is bounded and redacted by the transport, so the
-// end-to-end shape of a non-JSON error lives in `./http.test.ts`; what belongs
+// end-to-end shape of a non-JSON error lives in `./http.non-json.test.ts`; what belongs
 // here is the classification the transport asks this module for.
 
 test('CC-NET-4: a body with no Graph envelope is transient on 5xx, unknown otherwise', () => {

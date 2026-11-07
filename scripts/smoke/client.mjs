@@ -3,7 +3,7 @@
 // The whole point of a live smoke is that it exercises the SHIPPED server the
 // way a real MCP host does: a spawned `node build/index.js` speaking JSON-RPC
 // over stdio, driven by the official `@modelcontextprotocol/sdk` client — the
-// same client `src/index.test.ts` uses, just over a real stdio transport
+// same client the `src/index.*.test.ts` suites use, just over a real stdio transport
 // instead of the in-memory pair. Nothing about the protocol is reimplemented
 // here; this module only adds the three things a smoke needs on top:
 //

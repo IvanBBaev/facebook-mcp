@@ -19,15 +19,8 @@
       "src/api/media-video.ts": 1657,
       "src/api/messaging.ts": 1351,
       "src/api/posts-write.ts": 1619,
-      "src/core/http.test.ts": 3417,
       "src/core/http.ts": 1623,
-      "src/index.test.ts": 3619,
-      "src/mcp/doctor.test.ts": 3274,
-      "src/tools/ads.test.ts": 3026,
-      "src/tools/messages.test.ts": 2587,
-      "src/tools/messages.ts": 1352,
-      "src/tools/moderation.test.ts": 3460,
-      "src/tools/posts.test.ts": 4622
+      "src/tools/messages.ts": 1352
     }
   },
   "toolNameLiterals": {

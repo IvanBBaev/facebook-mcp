@@ -29,7 +29,7 @@ import {
 import { withFetch, type FetchMock } from '../testing/index.js';
 
 // ---------------------------------------------------------------------------
-// Test helpers (mirrors src/core/http.test.ts)
+// Test helpers (mirrors src/testing/harness/http.ts)
 // ---------------------------------------------------------------------------
 
 const TOKEN = 'EAAtestTOKENvalue1234567890abcdef';
