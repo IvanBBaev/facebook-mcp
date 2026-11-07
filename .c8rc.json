@@ -12,6 +12,7 @@
     "build/mcp/annotations/**",
     "build/cli/setup-token/types.js",
     "build/mcp/doctor/types.js",
+    "build/api/insights/model.js",
     "**/*.d.ts",
     "coverage/**",
     "node_modules/**"

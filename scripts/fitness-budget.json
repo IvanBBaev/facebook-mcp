@@ -14,7 +14,6 @@
     "allowlist": {
       "src/api/ads-read.ts": 1667,
       "src/api/comments.ts": 1525,
-      "src/api/insights.ts": 1763,
       "src/api/media-photos.ts": 1678,
       "src/api/media-reels.ts": 1732,
       "src/api/media-video.ts": 1657,

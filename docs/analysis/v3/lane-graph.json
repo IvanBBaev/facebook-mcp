@@ -24,6 +24,7 @@
     "src/tools/report.ts": "insights",
     "src/tools/insights-export.ts": "insights",
     "src/api/insights.ts": "insights",
+    "src/api/insights/*": "insights",
     "src/api/insights-batch.ts": "insights",
     "src/api/page-report.ts": "insights",
     "src/mcp/annotations/insights.ts": "insights",
