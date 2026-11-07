@@ -253,31 +253,61 @@ async function requestPage<T>(
 // Internal: Page<T> construction
 // ---------------------------------------------------------------------------
 
+/**
+ * One page of a listing under the list contract (C02): {@link Page} plus the
+ * advisory notes as a list. `note` is still emitted, joined with `"; "`, for
+ * callers that predate `notes` (deprecated in 1.0, removed in 2.0). A subtype of
+ * `Page<T>`, so every existing caller keeps compiling unchanged.
+ */
+export interface ListPage<T> extends Page<T> {
+  /** Every advisory note the page owes the caller, in order; absent when none. */
+  readonly notes?: readonly string[];
+}
+
+/** The separator the deprecated singular `note` joins {@link ListPage.notes} with. */
+export const NOTE_SEPARATOR = '; ';
+
+/**
+ * The notes of a page as a list. Reads `notes` when the page came from this
+ * module; a hand-built `Page` that only carries the singular `note` yields it as
+ * the one entry (never split, since a note may itself contain the separator).
+ */
+export function pageNotes(page: Page<unknown>): readonly string[] {
+  const listed = (page as ListPage<unknown>).notes;
+  if (listed !== undefined) return listed;
+  return page.note !== undefined && page.note.length > 0 ? [page.note] : [];
+}
+
 function makePage<T>(
   data: readonly T[],
   truncated: boolean,
   nextCursor: Cursor | undefined,
-  note: string | undefined,
-): Page<T> {
+  notes: readonly (string | undefined)[],
+): ListPage<T> {
   const page: {
     data: readonly T[];
     truncated: boolean;
     nextCursor?: Cursor;
     note?: string;
+    notes?: readonly string[];
   } = { data, truncated };
   if (nextCursor !== undefined) page.nextCursor = nextCursor;
-  if (note !== undefined) page.note = note;
+  const present = presentNotes(notes);
+  if (present.length > 0) {
+    page.note = present.join(NOTE_SEPARATOR);
+    page.notes = present;
+  }
   return page;
 }
 
 /**
- * Join the notes a single result may owe the caller. A dropped-row count and a
- * budget note describe different things — how trustworthy the rows are, and
- * whether there are more of them — so one must never overwrite the other.
+ * The notes a single result owes the caller, with the absent ones dropped. A
+ * dropped-row count and a budget note describe different things — how
+ * trustworthy the rows are, and whether there are more of them — so one must
+ * never overwrite the other.
  */
-function joinNotes(...notes: (string | undefined)[]): string | undefined {
-  const present = notes.filter((n): n is string => n !== undefined && n.length > 0);
-  return present.length > 0 ? present.join('; ') : undefined;
+function presentNotes(notes: readonly (string | undefined)[]): string[] {
+  return notes.filter((n): n is string => n !== undefined && n.length > 0);
 }
 
 function itemBudgetNote(maxItems: number): string {
@@ -297,13 +327,13 @@ function finish<T>(
   items: readonly T[],
   maxItems: number | undefined,
   truncated: boolean,
-  note: string | undefined,
+  notes: readonly (string | undefined)[],
   nextCursor: Cursor | undefined,
-): Page<T> {
+): ListPage<T> {
   let data = items;
   let cursor = nextCursor;
   let partial = truncated;
-  let reason = note;
+  let reasons = notes;
   if (maxItems !== undefined && data.length > maxItems) {
     // The slice is the only place that knows rows were discarded, so it also
     // owns saying so. Callers that stop because the edge ENDED arrive here with
@@ -313,9 +343,9 @@ function finish<T>(
     data = data.slice(0, maxItems);
     cursor = undefined;
     partial = true;
-    reason = joinNotes(reason, itemBudgetNote(maxItems));
+    reasons = [...reasons, itemBudgetNote(maxItems)];
   }
-  return makePage(data, partial, cursor, reason);
+  return makePage(data, partial, cursor, reasons);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,14 +365,14 @@ export async function fetchPage<T>(
   fbRequest: FbRequestFn,
   edge: EdgeRequest,
   page: PageRequest = {},
-): Promise<Page<T>> {
+): Promise<ListPage<T>> {
   const limit = page.limit ?? DEFAULT_PAGE_LIMIT;
   try {
     const parsed = await requestPage<T>(fbRequest, edge, limit, page.after);
     if (!parsed.listed) {
       // No `data` array is no answer about the rows, and `data: []` with
       // `truncated: false` is the one shape that means "there is nothing here".
-      return makePage<T>([], true, undefined, NO_LIST_RETURNED_NOTE);
+      return makePage<T>([], true, undefined, [NO_LIST_RETURNED_NOTE]);
     }
     const dropNote = parsed.dropped > 0 ? malformedRowsNote(parsed.dropped) : undefined;
     if (parsed.hasNext && parsed.after === undefined) {
@@ -352,30 +382,20 @@ export async function fetchPage<T>(
       // complete while rows remain. `fetchAll` already treats this exact wire
       // shape as truncated (MISSING_CURSOR_NOTE); the two must not disagree
       // about the same response.
-      return makePage(
-        parsed.items,
-        true,
-        undefined,
-        joinNotes(dropNote, MISSING_CURSOR_NOTE),
-      );
+      return makePage(parsed.items, true, undefined, [dropNote, MISSING_CURSOR_NOTE]);
     }
     if (parsed.hasNext && page.after !== undefined && parsed.after === page.after) {
       // Graph advertised a next page whose cursor is the one this request was
       // made with. Handing it back as `nextCursor` sends the caller round the
       // same page indefinitely; `fetchAll` stops on this exact response with
       // LOOP_GUARD_NOTE, and the single-page read must say the same thing.
-      return makePage(
-        parsed.items,
-        true,
-        undefined,
-        joinNotes(dropNote, LOOP_GUARD_NOTE),
-      );
+      return makePage(parsed.items, true, undefined, [dropNote, LOOP_GUARD_NOTE]);
     }
     const nextCursor = parsed.hasNext ? parsed.after : undefined;
-    return makePage(parsed.items, false, nextCursor, dropNote);
+    return makePage(parsed.items, false, nextCursor, [dropNote]);
   } catch (err) {
     if (isCursorExpiryError(err)) {
-      return makePage<T>([], true, undefined, CURSOR_EXPIRED_NOTE);
+      return makePage<T>([], true, undefined, [CURSOR_EXPIRED_NOTE]);
     }
     throw err;
   }
@@ -393,7 +413,7 @@ export async function fetchAll<T>(
   edge: EdgeRequest,
   budget: FetchAllBudget = {},
   page: PageRequest = {},
-): Promise<Page<T>> {
+): Promise<ListPage<T>> {
   const limit = page.limit ?? DEFAULT_PAGE_LIMIT;
   const maxItems =
     budget.maxItems !== undefined &&
@@ -426,12 +446,12 @@ export async function fetchAll<T>(
     truncated: boolean,
     note: string | undefined,
     nextCursor: Cursor | undefined,
-  ): Page<T> =>
+  ): ListPage<T> =>
     finish<T>(
       items,
       maxItems,
       truncated,
-      joinNotes(droppedTotal > 0 ? malformedRowsNote(droppedTotal) : undefined, note),
+      [droppedTotal > 0 ? malformedRowsNote(droppedTotal) : undefined, note],
       nextCursor,
     );
 

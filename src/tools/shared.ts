@@ -29,6 +29,9 @@ import {
   type WriteGate,
 } from '../mcp/index.js';
 
+// The list contract (C02): pagination, notes[], fields, time windows, list taint.
+export * from './shared/list.js';
+
 // ---------------------------------------------------------------------------
 // 1. Shared input fields
 // ---------------------------------------------------------------------------

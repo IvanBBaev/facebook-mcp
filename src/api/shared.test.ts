@@ -20,7 +20,9 @@ import {
   LOOP_GUARD_NOTE,
   MISSING_CURSOR_NOTE,
   NO_LIST_RETURNED_NOTE,
+  NOTE_SEPARATOR,
   malformedRowsNote,
+  pageNotes,
   type EdgeRequest,
 } from './shared.js';
 
@@ -908,4 +910,49 @@ test('parsePage: a token-bearing next URL is never returned, only its opaque cur
     false,
     'the URL itself is not surfaced',
   );
+});
+
+// ---------------------------------------------------------------------------
+// notes[] beside the deprecated joined note (C02)
+// ---------------------------------------------------------------------------
+
+test('notes: a clean page carries neither notes nor note', async () => {
+  const fb = createFakeFbRequest().enqueue(fbOk(lastPage([{ id: 'a' }])));
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+  assert.equal('notes' in page, false);
+  assert.equal('note' in page, false);
+  assert.deepEqual(pageNotes(page), []);
+});
+
+test('notes: each fact is its own entry and note is their join', async () => {
+  const fb = createFakeFbRequest().enqueue(
+    fbOk(pageWithNext([{ id: 'a' }, null], 'SEED')),
+  );
+  const page = await fetchPage<Item>(fb.fn, EDGE, { after: 'SEED' });
+  assert.deepEqual(page.notes, [malformedRowsNote(1), LOOP_GUARD_NOTE]);
+  assert.equal(page.note, page.notes?.join(NOTE_SEPARATOR));
+});
+
+test('notes: a single fact is a single entry', async () => {
+  const fb = createFakeFbRequest().enqueue(fbOk({ error_free: true }));
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+  assert.deepEqual(page.notes, [NO_LIST_RETURNED_NOTE]);
+  assert.deepEqual(pageNotes(page), [NO_LIST_RETURNED_NOTE]);
+});
+
+test('notes: a fetchAll walk lists the dropped rows before the budget', async () => {
+  const fb = createFakeFbRequest()
+    .enqueue(fbOk(pageWithNext([{ id: 'a' }, null], 'c1')))
+    .enqueue(fbOk(pageWithNext([{ id: 'b' }], 'c2')));
+  const page = await fetchAll<Item>(fb.fn, EDGE, { maxPages: 2 });
+  assert.equal(page.notes?.length, 2);
+  assert.equal(page.notes?.[0], malformedRowsNote(1));
+  assert.match(page.notes?.[1] ?? '', /page budget reached/);
+});
+
+test('pageNotes: a plain Page with only note reads as one entry, never split', () => {
+  const note = `first${NOTE_SEPARATOR}second`;
+  assert.deepEqual(pageNotes({ data: [], truncated: false, note }), [note]);
+  assert.deepEqual(pageNotes({ data: [], truncated: false }), []);
+  assert.deepEqual(pageNotes({ data: [], truncated: false, note: '' }), []);
 });
