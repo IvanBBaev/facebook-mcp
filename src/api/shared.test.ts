@@ -798,3 +798,114 @@ test('fetchAll: a later page with no data array keeps the rows so far and is tru
   assert.equal(page.nextCursor, undefined);
   assert.equal(page.note, NO_LIST_RETURNED_NOTE);
 });
+
+// ---------------------------------------------------------------------------
+// parsePage cursor semantics, pinned explicitly (QA-13)
+// ---------------------------------------------------------------------------
+//
+// `parsePage` is internal, so its contract is pinned through `fetchPage`, the
+// thinnest public path over it. Each case is one wire shape of `paging`; until
+// now only the album fixture mapping killed mutant M14 (`hasNext` derived from
+// `cursors.after` instead of `next`).
+
+test('parsePage: no paging object at all is a terminal page', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(() => true, fbOk({ data: items('a') }));
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], items('a'));
+  assert.equal(page.truncated, false);
+  assert.equal('nextCursor' in page, false, 'nextCursor is omitted, not null');
+  assert.equal(page.note, undefined);
+});
+
+test('parsePage: next present with no cursors lifts the after value out of the URL', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({
+      data: items('a'),
+      paging: { next: 'https://graph.facebook.com/v23.0/123/feed?limit=25&after=URLCUR' },
+    }),
+  );
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.equal(page.nextCursor, 'URLCUR');
+  assert.equal(page.truncated, false);
+});
+
+test('parsePage: next present with neither cursors nor an after param is truncated, not terminal', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({
+      data: items('a'),
+      paging: { next: 'https://graph.facebook.com/v23.0/123/feed?limit=25' },
+    }),
+  );
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.equal(page.nextCursor, undefined);
+  assert.equal(page.truncated, true);
+  assert.equal(page.note, MISSING_CURSOR_NOTE);
+});
+
+test('parsePage: cursors.after without next means hasNext is false (mutant M14)', async () => {
+  // Graph returns `cursors` on the LAST page too. Deriving "there is more" from
+  // the cursor instead of from `next` hands the caller a cursor to an empty
+  // page and never lets the listing end.
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({ data: items('a', 'b'), paging: { cursors: { before: 'B', after: 'A' } } }),
+  );
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.deepEqual([...page.data], items('a', 'b'));
+  assert.equal('nextCursor' in page, false, 'no resume cursor on the last page');
+  assert.equal(page.truncated, false);
+  assert.equal(page.note, undefined);
+});
+
+test('parsePage: an empty next string is the end of the listing', async () => {
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({ data: items('a'), paging: { next: '', cursors: { after: 'A' } } }),
+  );
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.equal('nextCursor' in page, false);
+  assert.equal(page.truncated, false);
+});
+
+test('parsePage: a token-bearing next URL is never returned, only its opaque cursor', async () => {
+  const secret = 'EAAsecretTOKENvalue1234567890';
+  const fb = createFakeFbRequest();
+  fb.on(
+    () => true,
+    fbOk({
+      data: items('a'),
+      paging: {
+        next: `https://graph.facebook.com/v23.0/123/feed?access_token=${secret}&after=CUR`,
+      },
+    }),
+  );
+
+  const page = await fetchPage<Item>(fb.fn, EDGE);
+
+  assert.equal(page.nextCursor, 'CUR');
+  const wire = JSON.stringify(page);
+  assert.equal(wire.includes(secret), false, 'the token never leaves the parser');
+  assert.equal(wire.includes('access_token'), false);
+  assert.equal(
+    wire.includes('graph.facebook.com'),
+    false,
+    'the URL itself is not surfaced',
+  );
+});
