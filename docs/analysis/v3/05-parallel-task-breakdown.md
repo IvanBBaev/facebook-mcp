@@ -189,6 +189,8 @@ lanes' spec.
 helpers in a new `src/tools/shared/list.ts` and re-exports it from `shared.ts` with one line.
 C02 merges after C01.
 
+An earlier uncommitted C01 attempt (2026-10-29, base `11e3d87`) is kept in `~/Development/_temp/branch-backups/20261030-0118/facebook-mcp-c01.uncommitted.patch` plus `facebook-mcp-c01.untracked.tgz`; it applied cleanly to `main` on 2026-11-06 and may save work. C02 and C04 were redone on 2026-11-07, so their backups are superseded.
+
 `src/mcp/define.ts` is shared by C03 and C06, so C06 depends on C03.
 
 ### Wave 2 — lane adoption (one L-task per lane; all lanes parallel)
