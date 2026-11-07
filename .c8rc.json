@@ -1,21 +1,26 @@
 {
   "//": "Coverage is measured over the COMPILED output, because that is what the test runner executes (`node --test build/**/*.test.js`). c8 applies include/exclude to the executed URL BEFORE source-map remapping, so filtering on `src/**/*.ts` here matches nothing and silently reports 0%. Include the build output instead; the reporter still prints `src/*.ts` paths, remapped through the emitted source maps.",
-  "all": false,
+  "//all": "`all: true` (R11, ARC-12) counts a production module that no test loads as 0% instead of leaving it out of the denominator. The type-only modules (they compile to `export {}`) and the annotation fragments (test support, not shipped) are excluded explicitly.",
+  "//thresholds": "Global backstop (QA-08), below the measured 99.4/92.2/99.4/99.4 by the Windows leg's margin: it skips the POSIX-only tests. The per-file gate is scripts/coverage-ratchet.mjs against scripts/coverage-baseline.json.",
+  "all": true,
   "include": ["build/**/*.js"],
   "exclude": [
     "build/**/*.test.js",
     "build/**/*.spawn-fixture.js",
     "build/testing/**",
     "build/core/fakes/**",
+    "build/mcp/annotations/**",
+    "build/cli/setup-token/types.js",
+    "build/mcp/doctor/types.js",
     "**/*.d.ts",
     "coverage/**",
     "node_modules/**"
   ],
-  "reporter": ["text", "text-summary", "lcov"],
+  "reporter": ["text", "text-summary", "lcov", "json-summary"],
   "reports-dir": "coverage",
   "check-coverage": true,
-  "lines": 95,
-  "branches": 85,
-  "functions": 95,
-  "statements": 95
+  "lines": 98,
+  "branches": 90,
+  "functions": 98,
+  "statements": 98
 }

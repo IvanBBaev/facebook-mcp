@@ -159,23 +159,28 @@ function createRecordingClock(startMs = 0): {
 } {
   const base = createFakeClock(startMs);
   const sleeps: number[] = [];
-  const clock: FakeClock = {
-    now: () => base.now(),
-    sleep: (ms, signal) => {
-      sleeps.push(ms);
-      return base.sleep(ms, signal);
-    },
-    advance: (ms) => base.advance(ms),
-    set: (ms) => base.set(ms),
-    pendingSleeps: () => base.pendingSleeps(),
+  const sleep: FakeClock['sleep'] = (ms, signal) => {
+    sleeps.push(ms);
+    return base.sleep(ms, signal);
   };
-  return { clock, sleeps };
+  return { clock: { ...base, sleep }, sleeps };
+}
+
+/**
+ * Default clock of {@link makeDeps}: `sleep` fails at once. Retry tests pass their
+ * own clock and {@link settle} it; anywhere else a backoff (a mis-retried write,
+ * QA-04 / mutation probe M01) is a bug that must fail here, not hang the runner.
+ */
+function createNoBackoffClock(): FakeClock {
+  const sleep = (ms: number): Promise<void> =>
+    Promise.reject(new assert.AssertionError({ message: `unexpected ${ms} ms backoff` }));
+  return { ...createFakeClock(), sleep };
 }
 
 function makeDeps(overrides: Partial<FbRequestDeps> = {}): FbRequestDeps {
   return {
     settings: makeSettings(),
-    clock: createFakeClock(),
+    clock: createNoBackoffClock(),
     redactor: createFakeRedactor(),
     logger: createTestLogger(),
     ...overrides,
@@ -740,18 +745,7 @@ test('CC-NET-3: the surfaced retry-after reads the ETA as minutes, not seconds',
 });
 
 test('CC-NET-3: a zero regain-access ETA backs off on the schedule, not instantly', async () => {
-  const sleeps: number[] = [];
-  const base = createFakeClock();
-  const clock: FakeClock = {
-    now: () => base.now(),
-    sleep: (ms, signal) => {
-      sleeps.push(ms);
-      return base.sleep(ms, signal);
-    },
-    advance: (ms) => base.advance(ms),
-    set: (ms) => base.set(ms),
-    pendingSleeps: () => base.pendingSleeps(),
-  };
+  const { clock, sleeps } = createRecordingClock();
   await withFetch(async (mock: FetchMock) => {
     // Graph emits `estimated_time_to_regain_access: 0` on real throttle
     // envelopes — F06 guards `eta > 0` before it will surface one, and
