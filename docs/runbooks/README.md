@@ -7,8 +7,8 @@ numbered steps and **verify by…** checks. They are grounded in the design in
 [`../analysis/05-architecture.md`](../analysis/05-architecture.md).
 
 > Note on identifiers. Environment-variable and tool names are final and match
-> the shipped code — including the package overrides `FB_PACKAGES_READONLY` and
-> `FB_PACKAGES_DENY`. Each runbook still describes the mechanism alongside the
+> the shipped code — including the package overrides `FB_TOOL_PACKAGES_READONLY` and
+> `FB_TOOL_PACKAGES_DENY`. Each runbook still describes the mechanism alongside the
 > name, so the procedure reads correctly on its own.
 
 ## Runbooks

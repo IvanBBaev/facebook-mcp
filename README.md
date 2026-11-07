@@ -412,10 +412,13 @@ Provide at least one token; everything else is optional tuning. Variables marked
 | `FB_ACTIVITY_STATE_PATH`        |    no    |        XDG / %APPDATA% state path        | Path to the local high-water marks of facebook_get_activity_since (0600).                                                                                                         |
 | `FB_EXPORT_DIR`                 |    no    |        XDG / %APPDATA% state path        | Directory for insights file exports (`output` argument; 0700 dir, 0600 files).                                                                                                    |
 | `FB_TOOL_PACKAGES`              |    no    | core profile (all packages except `ads`) | Comma-separated packages or profiles to enable. `core` is always forced on; `ads` is opt-in.                                                                                      |
-| `FB_PACKAGES_DENY`              |    no    |                    —                     | Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.                                                                      |
-| `FB_PACKAGES_READONLY`          |    no    |                    —                     | Packages or profiles whose write tools are not registered; their read tools stay.                                                                                                 |
+| `FB_TOOL_PACKAGES_DENY`         |    no    |                    —                     | Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.                                                                      |
+| `FB_PACKAGES_DENY`              |    no    |                    —                     | Deprecated alias of `FB_TOOL_PACKAGES_DENY`; still read in 1.x with a startup warning, removed in 2.0.                                                                            |
+| `FB_TOOL_PACKAGES_READONLY`     |    no    |                    —                     | Packages or profiles whose write tools are not registered; their read tools stay.                                                                                                 |
+| `FB_PACKAGES_READONLY`          |    no    |                    —                     | Deprecated alias of `FB_TOOL_PACKAGES_READONLY`; still read in 1.x with a startup warning, removed in 2.0.                                                                        |
 | `FB_TRANSPORT`                  |    no    |                 `stdio`                  | `stdio` (default) or `http` (loopback-only Streamable HTTP for local agent clients).                                                                                              |
-| `FB_HTTP_TOKEN`                 | if http  |                    —                     | **Secret.** Bearer token required by the `http` transport; it fails closed without it. At least 16 characters.                                                                    |
+| `FB_HTTP_BEARER`                | if http  |                    —                     | **Secret.** Bearer token required by the `http` transport; it fails closed without it. At least 16 characters.                                                                    |
+| `FB_HTTP_TOKEN`                 |    no    |                    —                     | Deprecated alias of `FB_HTTP_BEARER`; still read in 1.x with a startup warning, removed in 2.0.                                                                                   |
 | `FB_HTTP_PORT`                  |    no    |                  `3000`                  | TCP port for the `http` transport (the bind host is fixed to loopback `127.0.0.1`).                                                                                               |
 | `FB_AD_ACCOUNT_ID`              |    no    |                    —                     | Ad account ID for the opt-in `ads` package.                                                                                                                                       |
 | `FB_ADS_BUDGET_CEILING`         |    no    |                    —                     | Hard budget ceiling for ads writes, in minor units of the ad account currency (non-negative integer, no currency conversion).                                                     |
@@ -429,6 +432,23 @@ Provide at least one token; everything else is optional tuning. Variables marked
 A full, commented template lives in [`.env.example`](.env.example).
 
 <!-- END GENERATED -->
+
+#### Renamed variables (1.x → 2.0)
+
+Three variables were renamed so each family reads as one prefix. The old names
+still work throughout 1.x, but every start (and `doctor`) warns
+`deprecated-setting` until you rename them; 2.0 stops reading them. Setting both
+spellings to different values is a startup error.
+
+| Old name (deprecated)  | New name                    |
+| ---------------------- | --------------------------- |
+| `FB_PACKAGES_DENY`     | `FB_TOOL_PACKAGES_DENY`     |
+| `FB_PACKAGES_READONLY` | `FB_TOOL_PACKAGES_READONLY` |
+| `FB_HTTP_TOKEN`        | `FB_HTTP_BEARER`            |
+
+Setting more than one of `FB_SYSTEM_TOKEN`, `FB_ACCESS_TOKEN` and
+`FB_PAGE_TOKEN` also warns at startup (`multiple-tokens`): only the first by
+that precedence is used.
 
 ## Permissions you need to grant
 
@@ -533,13 +553,13 @@ is a setup-only permission that should never ride on a runtime token.
 ## Tools
 
 Packages are the unit of exposure: you enable and disable whole packages with
-`FB_TOOL_PACKAGES`, and `FB_PACKAGES_READONLY` drops a package's write tools
+`FB_TOOL_PACKAGES`, and `FB_TOOL_PACKAGES_READONLY` drops a package's write tools
 while keeping its reads.
 
 All three package variables share one namespace of packages **and** profiles
 (`core`, `all`, `reader`, `publisher`, `moderator`, `ads`), and a profile name
-wins over a same-spelled package. That matters most in `FB_PACKAGES_DENY`:
-`FB_PACKAGES_DENY=core` denies the six-package **core profile**, not the single
+wins over a same-spelled package. That matters most in `FB_TOOL_PACKAGES_DENY`:
+`FB_TOOL_PACKAGES_DENY=core` denies the six-package **core profile**, not the single
 `core` package — and the `core` package is then forced back on anyway, since its
 identity and rate-limit tools are how you diagnose the surface you just narrowed.
 A name none of them recognize fails at startup rather than being ignored.
@@ -856,7 +876,7 @@ that corpus, not a replacement for it.
   access tokens are derived to a boolean and their values never enter a payload.
 - **No telemetry, local-first.** The server logs only to `stderr`, collects
   nothing, and phones home nowhere. The `http` transport binds loopback
-  (`127.0.0.1`) only and fails closed without `FB_HTTP_TOKEN`.
+  (`127.0.0.1`) only and fails closed without `FB_HTTP_BEARER`.
 
 See [SECURITY.md](SECURITY.md) for the full model and vulnerability reporting.
 

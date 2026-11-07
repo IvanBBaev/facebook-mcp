@@ -85,7 +85,7 @@ These are properties the design commits to; grounded in the corpus:
 - **Comment and inbox sessions.** A session that reads comments or the
   Messenger inbox is reading text written by strangers, and the default package
   profile can also post as the Page in that same session. Run such a session
-  with a read-only profile (`FB_PACKAGES_READONLY`), or with an MCP client that
+  with a read-only profile (`FB_TOOL_PACKAGES_READONLY`), or with an MCP client that
   supports elicitation so a human sees each confirmation. Since 0.8.1 the
   free-text moderation verbs (`facebook_reply_to_comment`,
   `facebook_comment_on_post`, `facebook_edit_comment`,
@@ -100,7 +100,7 @@ These are properties the design commits to; grounded in the corpus:
   metadata (no tokens, no PII — it passes through the same redactor), written
   `0600` under the XDG state directory, non-blocking, and size-rotated.
 - **HTTP transport fails closed.** `FB_TRANSPORT=http` refuses to start without
-  `FB_HTTP_TOKEN`, binds `127.0.0.1` only, validates the `Origin` header
+  `FB_HTTP_BEARER`, binds `127.0.0.1` only, validates the `Origin` header
   (DNS-rebinding guard), and does a constant-time bearer check on every request.
 - **Local file upload is off by default.** Local media access is disabled unless
   a media directory is explicitly configured; when set, resolved paths are

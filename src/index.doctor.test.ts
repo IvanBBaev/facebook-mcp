@@ -148,7 +148,7 @@ test('the package narrowing follows the registry, and never costs a report', () 
   };
 
   assert.deepEqual(named({ FB_TOOL_PACKAGES: 'ads' }), ['core', 'ads']);
-  assert.deepEqual(named({ FB_PACKAGES_DENY: 'messages' }), [
+  assert.deepEqual(named({ FB_TOOL_PACKAGES_DENY: 'messages' }), [
     'core',
     'reader',
     'insights',
@@ -234,7 +234,7 @@ test('a resolvable selection leaves the doctor with nothing to say about configu
     [...DEFAULT_PROFILE_SCOPES],
     [],
     {
-      FB_PACKAGES_DENY: 'messages',
+      FB_TOOL_PACKAGES_DENY: 'messages',
     },
   );
 

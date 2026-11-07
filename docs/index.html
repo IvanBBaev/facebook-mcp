@@ -2209,7 +2209,7 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
           </div>
 
           <details id="env">
-            <summary>All <!-- BEGIN GENERATED: env-count -->30<!-- END GENERATED --> environment variables</summary>
+            <summary>All <!-- BEGIN GENERATED: env-count -->33<!-- END GENERATED --> environment variables</summary>
             <div class="details-body" style="max-width: none; padding: 0">
               <div
                 class="tw"
@@ -2372,7 +2372,7 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
                       </td>
                     </tr>
                     <tr>
-                      <td><code>FB_PACKAGES_DENY</code></td>
+                      <td><code>FB_TOOL_PACKAGES_DENY</code></td>
                       <td>—</td>
                       <td>
                         Packages or profiles to exclude even if <code>FB_TOOL_PACKAGES</code>
@@ -2380,11 +2380,27 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
                       </td>
                     </tr>
                     <tr>
-                      <td><code>FB_PACKAGES_READONLY</code></td>
+                      <td><code>FB_PACKAGES_DENY</code></td>
+                      <td>—</td>
+                      <td>
+                        Deprecated alias of <code>FB_TOOL_PACKAGES_DENY</code>; still read in 1.x
+                        with a startup warning, removed in 2.0.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_TOOL_PACKAGES_READONLY</code></td>
                       <td>—</td>
                       <td>
                         Packages or profiles whose write tools are not registered; their read tools
                         stay.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_PACKAGES_READONLY</code></td>
+                      <td>—</td>
+                      <td>
+                        Deprecated alias of <code>FB_TOOL_PACKAGES_READONLY</code>; still read in
+                        1.x with a startup warning, removed in 2.0.
                       </td>
                     </tr>
                     <tr>
@@ -2396,11 +2412,19 @@ FB_SETUP_TOKEN='&lt;your-meta-token&gt;' \
                       </td>
                     </tr>
                     <tr>
-                      <td><code>FB_HTTP_TOKEN</code></td>
+                      <td><code>FB_HTTP_BEARER</code></td>
                       <td>—</td>
                       <td>
                         <strong>Secret.</strong> Bearer token required by the <code>http</code>
                         transport; it fails closed without it. At least 16 characters.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><code>FB_HTTP_TOKEN</code></td>
+                      <td>—</td>
+                      <td>
+                        Deprecated alias of <code>FB_HTTP_BEARER</code>; still read in 1.x with a
+                        startup warning, removed in 2.0.
                       </td>
                     </tr>
                     <tr>

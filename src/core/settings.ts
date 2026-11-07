@@ -68,7 +68,7 @@ export const HTTP_LOOPBACK_HOST = '127.0.0.1';
  * `openssl rand -hex 32`.
  */
 export const MIN_CONFIRM_TOKEN_CHARS = 16;
-/** Floor for FB_HTTP_TOKEN — same reasoning as {@link MIN_CONFIRM_TOKEN_CHARS}. */
+/** Floor for FB_HTTP_BEARER — same reasoning as {@link MIN_CONFIRM_TOKEN_CHARS}. */
 const MIN_HTTP_TOKEN_CHARS = MIN_CONFIRM_TOKEN_CHARS;
 export const DEFAULT_LOG_LEVEL: LogLevel = 'info';
 export const DEFAULT_WRITE_MODE: WriteMode = 'plan';
@@ -135,6 +135,34 @@ const PROFILE_TOKEN_RE = /^FB_PROFILE_(.+)_TOKEN$/;
 const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
 const API_VERSION_RE = /^v\d+\.\d+$/;
 
+/** A renamed setting (C04): `name` is the current spelling, `deprecated` the old one. */
+export interface SettingAlias {
+  readonly name: string;
+  readonly deprecated: string;
+}
+
+/**
+ * Settings collapse (C04, F11): the renamed variables. The old spelling is still
+ * read as an alias through 1.x and reported as deprecated (a startup warning, so
+ * the doctor shows it too); C04b removes the aliases in 2.0.
+ *
+ * - `FB_PACKAGES_DENY` / `FB_PACKAGES_READONLY` join the `FB_TOOL_PACKAGES`
+ *   family they qualify;
+ * - `FB_HTTP_TOKEN` is the HTTP transport's bearer, not a Facebook token, and
+ *   sat next to three Facebook token variables under the same suffix.
+ */
+export const SETTING_ALIASES: readonly SettingAlias[] = [
+  { name: 'FB_TOOL_PACKAGES_DENY', deprecated: 'FB_PACKAGES_DENY' },
+  { name: 'FB_TOOL_PACKAGES_READONLY', deprecated: 'FB_PACKAGES_READONLY' },
+  { name: 'FB_HTTP_BEARER', deprecated: 'FB_HTTP_TOKEN' },
+];
+
+function aliasFor(name: string): SettingAlias {
+  const alias = SETTING_ALIASES.find((a) => a.name === name);
+  if (alias === undefined) throw new Error(`no alias registered for ${name}`);
+  return alias;
+}
+
 /**
  * Every `FB_*` name something in this project reads. `loadSettings` reads the
  * server's settings; `FB_SETUP_TOKEN` is read by the `setup-token` subcommand.
@@ -156,9 +184,12 @@ const SETTING_NAMES: readonly string[] = [
   'FB_MEDIA_DIR',
   'FB_MAX_RESULT_CHARS',
   'FB_TRANSPORT',
+  'FB_HTTP_BEARER',
   'FB_HTTP_TOKEN',
   'FB_HTTP_PORT',
   'FB_TOOL_PACKAGES',
+  'FB_TOOL_PACKAGES_DENY',
+  'FB_TOOL_PACKAGES_READONLY',
   'FB_PACKAGES_DENY',
   'FB_PACKAGES_READONLY',
   'FB_JOURNAL_PATH',
@@ -234,13 +265,45 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     return n;
   };
 
-  const csv = (key: string): string[] => {
-    const raw = str(key);
-    if (raw === undefined) return [];
-    return raw
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => s.length > 0);
+  const csv = (key: string): string[] => splitCsv(str(key));
+
+  /**
+   * Read a renamed setting through its alias. The current name wins; the old
+   * one alone still works and is reported as deprecated. Both set to different
+   * values is an error, not a ranking: the deny list an operator kept under the
+   * old name may be the stricter one. `key` is the name actually read, so a
+   * later message about the value names the variable the operator set.
+   */
+  const aliased = (alias: SettingAlias): { key: string; value: string | undefined } => {
+    const current = str(alias.name);
+    const old = str(alias.deprecated);
+    if (old === undefined) return { key: alias.name, value: current };
+    if (current === undefined) {
+      warn(
+        'deprecated-setting',
+        `${alias.deprecated} is deprecated; rename it to ${alias.name}. The old name is ` +
+          'still read in 1.x and stops working in 2.0.',
+        alias.deprecated,
+      );
+      return { key: alias.deprecated, value: old };
+    }
+    if (current !== old) {
+      err(
+        'setting-alias-conflict',
+        `${alias.name} and its deprecated alias ${alias.deprecated} are both set, to ` +
+          `different values. Only ${alias.name} is read; remove ${alias.deprecated} so the ` +
+          'configuration says one thing.',
+        alias.deprecated,
+      );
+    } else {
+      warn(
+        'deprecated-setting',
+        `${alias.deprecated} is deprecated and ignored because ${alias.name} is also set ` +
+          `(same value); remove ${alias.deprecated}.`,
+        alias.deprecated,
+      );
+    }
+    return { key: alias.name, value: current };
   };
 
   const enumOf = <T extends string>(key: string, allowed: readonly T[], def: T): T => {
@@ -277,6 +340,14 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
       'FB_APP_SECRET',
     );
   }
+  reportMultipleTokens(
+    [
+      ['FB_SYSTEM_TOKEN', systemToken],
+      ['FB_ACCESS_TOKEN', accessToken],
+      ['FB_PAGE_TOKEN', pageToken],
+    ],
+    warn,
+  );
 
   // --- Page topology (no ALS — C14) ---
   const defaultPageId = str('FB_PAGE_ID');
@@ -384,8 +455,13 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     ['stdio', 'http'],
     DEFAULT_TRANSPORT,
   );
-  const rawHttpToken = str('FB_HTTP_TOKEN');
-  const httpToken = resolveHttpToken(rawHttpToken, transport === 'http' ? err : warn);
+  const http = aliased(aliasFor('FB_HTTP_BEARER'));
+  const rawHttpToken = http.value;
+  const httpToken = resolveHttpToken(
+    http.key,
+    rawHttpToken,
+    transport === 'http' ? err : warn,
+  );
   const httpHost = transport === 'http' ? HTTP_LOOPBACK_HOST : undefined;
   const httpPort =
     transport === 'http'
@@ -394,8 +470,8 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
   if (transport === 'http' && rawHttpToken === undefined) {
     err(
       'http-no-token',
-      'FB_TRANSPORT=http requires FB_HTTP_TOKEN; the HTTP transport fails closed without it (binds 127.0.0.1 only, validates Origin).',
-      'FB_HTTP_TOKEN',
+      'FB_TRANSPORT=http requires FB_HTTP_BEARER (formerly FB_HTTP_TOKEN); the HTTP transport fails closed without it (binds 127.0.0.1 only, validates Origin).',
+      'FB_HTTP_BEARER',
     );
   }
 
@@ -404,8 +480,8 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
   // value to `undefined`, which is the "not configured" answer, and an operator
   // who set FB_TOOL_PACKAGES= did configure something.
   const toolPackages = resolveToolPackages(env.FB_TOOL_PACKAGES, csv, warn);
-  const packagesDeny = csv('FB_PACKAGES_DENY');
-  const packagesReadonly = csv('FB_PACKAGES_READONLY');
+  const packagesDeny = splitCsv(aliased(aliasFor('FB_TOOL_PACKAGES_DENY')).value);
+  const packagesReadonly = splitCsv(aliased(aliasFor('FB_TOOL_PACKAGES_READONLY')).value);
 
   // --- Journal & logging ---
   const defaultJournal = (): string =>
@@ -898,20 +974,77 @@ function resolveConfirmToken(raw: string | undefined, err: Report): string | und
  * transport would refuse to start anyway); under `stdio` the value is unused, so
  * it is dropped with a warning instead.
  */
-function resolveHttpToken(raw: string | undefined, report: Report): string | undefined {
+function resolveHttpToken(
+  key: string,
+  raw: string | undefined,
+  report: Report,
+): string | undefined {
   if (raw === undefined) return undefined;
   if (raw.length < MIN_HTTP_TOKEN_CHARS) {
     report(
       'weak-http-token',
-      `FB_HTTP_TOKEN must be at least ${String(MIN_HTTP_TOKEN_CHARS)} characters ` +
+      `${key} must be at least ${String(MIN_HTTP_TOKEN_CHARS)} characters ` +
         `(got ${String(raw.length)}). It is the only credential on the HTTP transport ` +
         'and nothing rate-limits it, so a short token is one a local process can guess. ' +
         'Ignored until it is replaced; mint one with `openssl rand -hex 32`.',
-      'FB_HTTP_TOKEN',
+      key,
     );
     return undefined;
   }
   return raw;
+}
+
+/** Lower-cased, trimmed, non-empty entries of a comma-separated value. */
+function splitCsv(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * CC-AUTH-9: more than one base credential is legal, but only the first by
+ * precedence is ever used and nothing else said so outside the doctor. The
+ * list is in precedence order. Only names are echoed — the values are tokens.
+ */
+function reportMultipleTokens(
+  tokens: readonly (readonly [string, string | undefined])[],
+  warn: Report,
+): void {
+  const set = tokens.filter(([, value]) => value !== undefined).map(([name]) => name);
+  const [winner, ...ignored] = set;
+  if (winner === undefined || ignored.length === 0) return;
+  warn(
+    'multiple-tokens',
+    `${set.join(', ')} are all set, but only ${winner} is used (precedence ` +
+      'FB_SYSTEM_TOKEN > FB_ACCESS_TOKEN > FB_PAGE_TOKEN); ' +
+      `${ignored.join(', ')} ${ignored.length === 1 ? 'is' : 'are'} ignored. Keep one, and ` +
+      'use FB_PROFILE_<NAME>_TOKEN for a per-Page token.',
+    ignored[0],
+  );
+}
+
+/**
+ * SEC-04 / SD-4 (contract for L2.ads): a `spend`-tier ads write is refused
+ * unless `FB_ADS_BUDGET_CEILING` is set; reads never need it. Returns the
+ * problem to report (doctor: an error when the ads package is loaded), or
+ * `undefined` when spend writes may proceed to their own ceiling checks.
+ */
+export function adsSpendCeilingProblem(
+  settings: Pick<Settings, 'adsBudgetCeiling'>,
+): StartupProblem | undefined {
+  if (settings.adsBudgetCeiling !== undefined) return undefined;
+  return {
+    severity: 'error',
+    code: 'ads-no-budget-ceiling',
+    message:
+      'FB_ADS_BUDGET_CEILING is not set, so every spend-tier ads write (budget raises, ' +
+      'activating a campaign, ad set or ad) is refused. Set it to the largest daily or ' +
+      "lifetime budget a write may set, in minor units of the ad account's currency; " +
+      'read tools work without it.',
+    field: 'FB_ADS_BUDGET_CEILING',
+  };
 }
 
 /**

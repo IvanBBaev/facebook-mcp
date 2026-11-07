@@ -376,7 +376,7 @@ export const env = Object.freeze([
     userConfigTitle: 'Tool packages',
   },
   {
-    name: 'FB_PACKAGES_DENY',
+    name: 'FB_TOOL_PACKAGES_DENY',
     group: 'Tool surface',
     required: 'no',
     secret: false,
@@ -384,7 +384,31 @@ export const env = Object.freeze([
     summary:
       'Packages or profiles to exclude even if `FB_TOOL_PACKAGES` enables them; the `core` package always survives.',
     description:
-      'Comma-separated packages OR profiles to exclude even when FB_TOOL_PACKAGES enables them; deny wins over allow. Profile names expand here exactly as they do in FB_TOOL_PACKAGES, and a profile beats a same-spelled package, so FB_PACKAGES_DENY=core denies the whole six-package core profile rather than the single core package. The core package is then forced back on regardless, because its identity and diagnostic tools are what you need to debug the surface you just narrowed. An unrecognized name is a startup error, not a silently ignored token.',
+      'Comma-separated packages OR profiles to exclude even when FB_TOOL_PACKAGES enables them; deny wins over allow. Profile names expand here exactly as they do in FB_TOOL_PACKAGES, and a profile beats a same-spelled package, so FB_TOOL_PACKAGES_DENY=core denies the whole six-package core profile rather than the single core package. The core package is then forced back on regardless, because its identity and diagnostic tools are what you need to debug the surface you just narrowed. An unrecognized name is a startup error, not a silently ignored token.',
+    example: '',
+  },
+  {
+    name: 'FB_PACKAGES_DENY',
+    group: 'Tool surface',
+    required: 'no',
+    secret: false,
+    format: 'string',
+    summary:
+      'Deprecated alias of `FB_TOOL_PACKAGES_DENY`; still read in 1.x with a startup warning, removed in 2.0.',
+    description:
+      'Deprecated alias of FB_TOOL_PACKAGES_DENY. Read only when FB_TOOL_PACKAGES_DENY is unset, with a deprecated-setting startup warning the doctor also reports; setting both to different values is a startup error. Removed in 2.0 — rename it to FB_TOOL_PACKAGES_DENY.',
+    example: '',
+  },
+  {
+    name: 'FB_TOOL_PACKAGES_READONLY',
+    group: 'Tool surface',
+    required: 'no',
+    secret: false,
+    format: 'string',
+    summary:
+      'Packages or profiles whose write tools are not registered; their read tools stay.',
+    description:
+      'Comma-separated packages OR profiles whose write tools are not registered at all; the read tools of those packages stay available. Profile names expand as they do in FB_TOOL_PACKAGES, so FB_TOOL_PACKAGES_READONLY=core makes every default package read-only in one token. An unrecognized name is a startup error.',
     example: '',
   },
   {
@@ -394,12 +418,11 @@ export const env = Object.freeze([
     secret: false,
     format: 'string',
     summary:
-      'Packages or profiles whose write tools are not registered; their read tools stay.',
+      'Deprecated alias of `FB_TOOL_PACKAGES_READONLY`; still read in 1.x with a startup warning, removed in 2.0.',
     description:
-      'Comma-separated packages OR profiles whose write tools are not registered at all; the read tools of those packages stay available. Profile names expand as they do in FB_TOOL_PACKAGES, so FB_PACKAGES_READONLY=core makes every default package read-only in one token. An unrecognized name is a startup error.',
+      'Deprecated alias of FB_TOOL_PACKAGES_READONLY. Read only when FB_TOOL_PACKAGES_READONLY is unset, with a deprecated-setting startup warning the doctor also reports; setting both to different values is a startup error. Removed in 2.0 — rename it to FB_TOOL_PACKAGES_READONLY.',
     example: '',
   },
-
   // --- Transport -----------------------------------------------------------
   {
     name: 'FB_TRANSPORT',
@@ -412,11 +435,11 @@ export const env = Object.freeze([
     summary:
       '`stdio` (default) or `http` (loopback-only Streamable HTTP for local agent clients).',
     description:
-      'Transport protocol: stdio (default) or http. The http transport binds 127.0.0.1 only and fails closed without FB_HTTP_TOKEN.',
+      'Transport protocol: stdio (default) or http. The http transport binds 127.0.0.1 only and fails closed without FB_HTTP_BEARER.',
     example: 'stdio',
   },
   {
-    name: 'FB_HTTP_TOKEN',
+    name: 'FB_HTTP_BEARER',
     group: 'Transport',
     required: 'http',
     secret: true,
@@ -425,6 +448,18 @@ export const env = Object.freeze([
       '**Secret.** Bearer token required by the `http` transport; it fails closed without it. At least 16 characters.',
     description:
       'Bearer token guarding the HTTP transport; required when FB_TRANSPORT=http (the server refuses to start without it). At least 16 characters — a shorter value is refused (under stdio it is dropped with a warning); mint one with openssl rand -hex 32.',
+    example: '',
+  },
+  {
+    name: 'FB_HTTP_TOKEN',
+    group: 'Transport',
+    required: 'no',
+    secret: true,
+    format: 'string',
+    summary:
+      'Deprecated alias of `FB_HTTP_BEARER`; still read in 1.x with a startup warning, removed in 2.0.',
+    description:
+      'Deprecated alias of FB_HTTP_BEARER. Read only when FB_HTTP_BEARER is unset, with a deprecated-setting startup warning the doctor also reports; setting both to different values is a startup error. Removed in 2.0 — rename it to FB_HTTP_BEARER.',
     example: '',
   },
   {

@@ -63,9 +63,9 @@ you still want insights/reads but no mutations.
    - setting `FB_TOOL_PACKAGES` to a reader-only set (e.g. `core,reader,insights`),
      or
    - applying the read-only preset or the deny override. Both are read at
-     startup, and they are **not** the same operation: `FB_PACKAGES_READONLY`
+     startup, and they are **not** the same operation: `FB_TOOL_PACKAGES_READONLY`
      keeps the named packages but drops every write-tier tool from them, while
-     `FB_PACKAGES_DENY` removes the named packages entirely, their read tools
+     `FB_TOOL_PACKAGES_DENY` removes the named packages entirely, their read tools
      included — denying `posts` also takes `facebook_list_scheduled_posts` and
      `facebook_get_video_status` with it.
 2. **Restart** the server so it re-reads the package selection.
@@ -83,17 +83,17 @@ exactly the configured set.
 If you want to keep a broad `FB_TOOL_PACKAGES` but subtract the dangerous parts,
 use the deny override to remove specific write packages:
 
-1. Set the deny override `FB_PACKAGES_DENY` to the write packages you want gone
+1. Set the deny override `FB_TOOL_PACKAGES_DENY` to the write packages you want gone
    (e.g. `posts,moderation,messages,ads`). Denied packages are not loaded.
 2. **Restart.**
 
 **Verify by:** same as Option 2 — the denied write tools are absent from the
 manifest.
 
-### `FB_PACKAGES_DENY=all` — the fastest in-process stop
+### `FB_TOOL_PACKAGES_DENY=all` — the fastest in-process stop
 
 Under pressure, enumerating the write packages correctly is exactly the kind of
-thing that goes wrong. `FB_PACKAGES_DENY=all` collapses the surface to the
+thing that goes wrong. `FB_TOOL_PACKAGES_DENY=all` collapses the surface to the
 always-on `core` package — four read-only identity and rate-limit tools — in one
 token, and it does so **whatever `FB_TOOL_PACKAGES` says**, because deny is applied
 after the selection. It leaves you enough server to run `facebook_whoami` and
@@ -101,22 +101,22 @@ after the selection. It leaves you enough server to run `facebook_whoami` and
 touch the credential; it is still weaker than Option 1, which is the only option
 that holds if the process itself is compromised.
 
-> **Read this before typing a name into `FB_PACKAGES_DENY`.** All three package
+> **Read this before typing a name into `FB_TOOL_PACKAGES_DENY`.** All three package
 > variables share one namespace of packages **and** profiles, and a profile name
-> wins over a same-spelled package. `FB_PACKAGES_DENY=core` therefore does **not**
+> wins over a same-spelled package. `FB_TOOL_PACKAGES_DENY=core` therefore does **not**
 > remove the `core` package — it denies the whole six-package `core` profile, and
 > the `core` package comes back anyway because it is always-on. That is **not**
 > the same collapse as `all`: the `core` profile does not include `ads`, so on an
 > install whose selection contains it (`FB_TOOL_PACKAGES=all`, or `ads` named
-> explicitly) `FB_PACKAGES_DENY=core` leaves the entire `ads` package loaded —
+> explicitly) `FB_TOOL_PACKAGES_DENY=core` leaves the entire `ads` package loaded —
 > including `facebook_update_ad_object`, the only spend-tier tool in the server.
-> Only `FB_PACKAGES_DENY=all` collapses the surface unconditionally: during an
+> Only `FB_TOOL_PACKAGES_DENY=all` collapses the surface unconditionally: during an
 > incident, type `all`. A name that matches neither a package nor a profile
 > is a **startup error**, not a silently ignored token: if you typo the deny list
 > during an incident the server refuses to start, which is the safe direction, but
 > you will see a `PackageSelectionError` rather than a running read-only server.
 > The error names the offending token, the variable it came from
-> (`FB_PACKAGES_DENY` here, not the allow list), and the full set of valid names,
+> (`FB_TOOL_PACKAGES_DENY` here, not the allow list), and the full set of valid names,
 > so the fix is a one-line correction rather than a search.
 
 ---

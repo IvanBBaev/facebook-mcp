@@ -34,7 +34,7 @@ own Pages and ad accounts.
 ## What the server reads
 
 Only through the Meta Graph API, with the token you configure, and only for the
-tool packages you enable (`FB_TOOL_PACKAGES`, `FB_PACKAGES_DENY`):
+tool packages you enable (`FB_TOOL_PACKAGES`, `FB_TOOL_PACKAGES_DENY`):
 
 - **Page content** — your Page's posts, photos, videos, Reels, Stories, albums and
   reaction totals (`reader`, `posts`).
@@ -116,7 +116,7 @@ This software cannot meet these for you. As a starting checklist:
   agreement, no training on your inputs, and acceptable data location and
   retention. Commercial API or business plans usually offer this; consumer chat
   plans may not.
-- **Minimise inbox reads.** Disable the `messages` package (`FB_PACKAGES_DENY=messages`)
+- **Minimise inbox reads.** Disable the `messages` package (`FB_TOOL_PACKAGES_DENY=messages`)
   if you do not need it, and avoid reading whole inboxes into a session when one
   thread will do.
 - **Do not record sensitive traits.** Never use labels or notes to record a
