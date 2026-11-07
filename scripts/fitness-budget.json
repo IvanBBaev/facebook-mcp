@@ -2,7 +2,8 @@
   "$comment": "Fitness baselines (R14, D-ARC-7): orphan allowlist, file-size soft gate, tool-name literal ratchet. Every list only shrinks; see scripts/fitness.mjs.",
   "orphans": {
     "src/api/insights-schema.ts": "expand-only (C05); L2.insights adopts it in wave 2",
-    "src/api/upload-session.ts": "expand-only (X06); L2.posts-upload adopts it by the end of wave 2, else it is reverted (ARC-02)"
+    "src/api/upload-session.ts": "expand-only (X06); L2.posts-upload adopts it by the end of wave 2, else it is reverted (ARC-02)",
+    "src/core/json.ts": "expand-only (C13, ARC-08); the L2.* lanes replace their local asRecord / isRecord copies with it in wave 2"
   },
   "fileSize": {
     "limits": {
