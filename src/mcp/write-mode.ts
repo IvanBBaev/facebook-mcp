@@ -81,6 +81,68 @@ function isHighConsequence(tier: WriteTier): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Declared tier (QA-07, D-QA-4): the spec's `writeTier` is the source of truth
+// ---------------------------------------------------------------------------
+
+/**
+ * Severity order of the known tiers, lowest first. `spend` ranks above
+ * `irreversible` because a spec declares its WORST case (ToolSpec.writeTier):
+ * `facebook_update_ad_object` declares `spend` and hands the gate `irreversible`
+ * for a pause.
+ */
+const TIER_RANK: ReadonlyMap<WriteTier, number> = new Map<WriteTier, number>([
+  ['safe', 0],
+  ['reversible', 1],
+  ['irreversible', 2],
+  ['spend', 3],
+]);
+
+/**
+ * Whether a per-call tier is one the declared spec tier allows. Two rules:
+ *
+ *  - the same gate class: a tool declared `irreversible` / `spend` may never
+ *    hand the gate `safe` / `reversible`, which `FB_WRITE_MODE=apply` would
+ *    perform without a plan_id or a confirmation (the QA-07 risk), and a tool
+ *    declared low may not reach the high class its README row does not show;
+ *  - never above the declaration, which is a claim about the worst case.
+ *
+ * A tier outside the union on either side fails: the gate cannot vouch for a
+ * consequence it does not know.
+ */
+export function tierWithinDeclared(tier: WriteTier, declared: WriteTier): boolean {
+  const rank = TIER_RANK.get(tier);
+  const declaredRank = TIER_RANK.get(declared);
+  if (rank === undefined || declaredRank === undefined) return false;
+  return rank <= declaredRank && isHighConsequence(tier) === isHighConsequence(declared);
+}
+
+/**
+ * Wrap a gate so every action is checked against the tool's declared tier
+ * before the inner gate sees it. A mismatch throws a `tier_mismatch`
+ * {@link WriteGateError}: nothing is planned, journaled or performed. The tier
+ * argument stays on {@link WriteAction} (expand only); `defineTool` installs this
+ * wrapper for every tool that declares a `writeTier`.
+ */
+export function bindDeclaredTier(gate: WriteGate, declared: WriteTier): WriteGate {
+  return {
+    execute<T = unknown>(action: WriteAction<T>): Promise<WriteOutcome<T>> {
+      if (!tierWithinDeclared(action.tier, declared)) {
+        return Promise.reject(
+          new WriteGateError(
+            'tier_mismatch',
+            `tool "${action.tool}" handed the write gate tier "${String(action.tier)}", ` +
+              `but its spec declares writeTier "${String(declared)}"; this is a tool ` +
+              'wiring bug and nothing was planned or performed',
+            { tool: action.tool, tier: action.tier },
+          ),
+        );
+      }
+      return gate.execute(action);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Authorization decision (pure — the Security #3 heart of the gate)
 // ---------------------------------------------------------------------------
 
@@ -170,7 +232,13 @@ export type WriteGateErrorCode =
    * nowhere to ask. The two must not be conflated — a denial is an answer the
    * operator gave, this is a broken install.
    */
-  | 'confirmation_unavailable';
+  | 'confirmation_unavailable'
+  /**
+   * The handler handed the gate a tier its tool's spec does not allow (QA-07):
+   * a lower gate class than the declared one, or a tier above the declared
+   * worst case. Thrown before anything is planned or performed.
+   */
+  | 'tier_mismatch';
 
 /**
  * The `plan_not_found` message for a plan another call is applying right now.

@@ -22,6 +22,7 @@ import type {
   ToolSpec,
   WriteTier,
 } from '../core/index.js';
+import { bindDeclaredTier, type WriteGate } from './write-mode.js';
 
 /**
  * Authoring shape accepted by {@link defineTool}. Generic over the input schema
@@ -44,9 +45,12 @@ export interface ToolDefinition<Schema extends z.ZodObject> {
   readonly annotations: ToolAnnotations;
   /**
    * Write blast-radius tier; absent ⇒ a read-only tool. Declare the WORST tier
-   * any call to this tool can reach — see {@link ToolSpec.writeTier}: only the
-   * presence of this field gates anything, the gate takes its actual tier from
-   * the handler, and the value here is what the generated README publishes.
+   * any call to this tool can reach — see {@link ToolSpec.writeTier}. This is the
+   * single source of truth for the tier (QA-07): the handler still hands the
+   * gate a per-call tier, and `defineTool` binds the gate so a per-call tier in
+   * a different gate class, or above this one, is refused before anything runs
+   * (`tierWithinDeclared` in `write-mode.ts`). The value is also what the
+   * generated README publishes.
    */
   readonly writeTier?: WriteTier;
   /**
@@ -121,12 +125,17 @@ export function defineTool<Schema extends z.ZodObject>(
   }
 
   const strictSchema = def.inputSchema.strict();
+  const declaredTier = def.writeTier;
 
   const handler: ToolHandler = async (input, ctx) => {
     // `.strict()` parse rejects unknown keys before the author's handler runs.
     const parsed = (await strictSchema.parseAsync(input)) as z.infer<Schema>;
-    return def.handler(parsed, ctx);
+    return def.handler(
+      parsed,
+      declaredTier === undefined ? ctx : withDeclaredTier(ctx, declaredTier),
+    );
   };
+  if (declaredTier !== undefined) TIER_BOUND_HANDLERS.add(handler);
 
   return {
     name: def.name,
@@ -139,4 +148,37 @@ export function defineTool<Schema extends z.ZodObject>(
     ...(def.logFields !== undefined ? { logFields: def.logFields } : {}),
     handler,
   };
+}
+
+/** The handlers `defineTool` built with a declared-tier gate (QA-07). */
+const TIER_BOUND_HANDLERS = new WeakSet<ToolHandler>();
+
+/**
+ * Whether this spec's handler checks every write against its declared
+ * `writeTier` — true for each write tool built by {@link defineTool}. The
+ * registry-wide tier test asserts it for the whole surface, so a write tool
+ * assembled by hand cannot skip the check unnoticed.
+ */
+export function hasDeclaredTierGate(spec: ToolSpec): boolean {
+  return spec.writeTier !== undefined && TIER_BOUND_HANDLERS.has(spec.handler);
+}
+
+function isWriteGate(value: unknown): value is WriteGate {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { execute?: unknown }).execute === 'function'
+  );
+}
+
+/**
+ * The context a write handler runs with: the same capabilities, with the write
+ * gate (attached by the bootstrap outside the `ToolContext` type) bound to the
+ * declared tier. A context without a gate is passed through untouched, so the
+ * handler still fails with `MissingWriteGateError` when it reaches for one.
+ */
+function withDeclaredTier(ctx: ToolContext, declared: WriteTier): ToolContext {
+  const gate: unknown = (ctx as { readonly writeGate?: unknown }).writeGate;
+  if (!isWriteGate(gate)) return ctx;
+  return { ...ctx, writeGate: bindDeclaredTier(gate, declared) } as ToolContext;
 }

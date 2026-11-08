@@ -108,13 +108,13 @@ export interface ToolSpec {
   /**
    * Write blast-radius tier; absent ⇒ a read-only tool.
    *
-   * Only PRESENCE is load-bearing at runtime: the registry reads it to drop
-   * writes under a read-only package (registry.ts), and `defineTool` requires it
-   * to agree with `annotations.readOnlyHint`. Nothing reads the VALUE to decide
-   * gating — the gate is handed a tier per call by the handler, which for a tool
-   * whose consequence depends on its arguments is not a constant at all
+   * PRESENCE drops writes under a read-only package (registry.ts), and
+   * `defineTool` requires it to agree with `annotations.readOnlyHint`. The gate
+   * is still handed a tier per call by the handler, which for a tool whose
+   * consequence depends on its arguments is not a constant at all
    * (`facebook_update_ad_object` pauses at `irreversible` and resumes at
-   * `spend`).
+   * `spend`) — but the VALUE bounds it (QA-07): `defineTool` binds the gate so
+   * a per-call tier in another gate class, or above this one, is refused.
    *
    * The value is therefore a CLAIM about the worst case: the highest tier any
    * call to this tool can hand the gate. It is published — `tierOf` in
