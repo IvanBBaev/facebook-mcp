@@ -27,6 +27,7 @@ import {
   type ShapeOptions,
   type WriteAction,
   type WriteGate,
+  WriteGateError,
 } from '../mcp/index.js';
 
 // The list contract (C02): pagination, notes[], fields, time windows, list taint.
@@ -512,6 +513,45 @@ function applyPayload<T>(tool: string, result: ApplyResult<T>): Record<string, u
   };
 }
 
+/** Whether `value` carries a secret, by the redactor's predicate (SEC-06). */
+function payloadHasSecret(ctx: ToolContext, value: unknown): boolean {
+  const { redactor } = ctx;
+  if (typeof redactor.containsSecret === 'function')
+    return redactor.containsSecret(value);
+  // A redactor without the predicate (a hand-rolled test double): anything its
+  // string scrubber would change counts as a secret.
+  let text: string;
+  try {
+    text = JSON.stringify(value) ?? '';
+  } catch {
+    return true;
+  }
+  return redactor.redactString(text) !== text;
+}
+
+/**
+ * Refuse a write whose payload would carry a secret off the box (SEC-06): a
+ * prompt-injected "post this" holding the Page token, the app secret or the
+ * operator confirm token. Checked before the gate — plan and apply alike — so
+ * nothing is planned, journaled or performed. The message names the field,
+ * never the value.
+ */
+function refuseSecretPayload<T>(ctx: ToolContext, action: WriteAction<T>): void {
+  const params: Readonly<Record<string, unknown>> = action.params;
+  // Field by field (key and value), so the refusal can say which one.
+  const field = Object.keys(params).find((key) =>
+    payloadHasSecret(ctx, { [key]: params[key] }),
+  );
+  if (field === undefined) return;
+  throw new WriteGateError(
+    'secret_in_payload',
+    `${action.tool} refused: the "${field}" field ` +
+      'carries a credential (an access token, the app secret or the confirm token). ' +
+      'Remove it; secrets are never sent to Facebook as content.',
+    { tool: action.tool, tier: action.tier },
+  );
+}
+
 /**
  * Run a write action through the gate and shape whatever comes back into the
  * uniform preview / applied / diverged envelope. This is the single call site
@@ -529,6 +569,7 @@ export async function executeWrite<T>(
   action: WriteAction<T>,
 ): Promise<ToolResult> {
   const gate = writeGateOf(ctx, action.tool);
+  refuseSecretPayload(ctx, action);
   const outcome = await gate.execute(action);
   const payload =
     outcome.kind === 'preview'

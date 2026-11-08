@@ -25,6 +25,7 @@ import type {
 import {
   createConfirmer,
   createRegistry,
+  createTaintLatch,
   createWriteGate,
   shapeResult,
   type ConnectableServer,
@@ -111,6 +112,13 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
   // the in-memory plan store, so rebuilding it would throw away every plan_id it
   // has issued. A tool belongs to exactly one package and therefore always
   // resolves to the same mode, so a plan and its apply always meet in one gate.
+  // The session taint latch (SEC-01, C08): set by the first tool result that
+  // carries untrusted content, read by every gate on every call, so from then
+  // on an `outbound` write needs out-of-band confirmation. One per server and
+  // never reset — the server outlives a single HTTP session, so the latch
+  // errs toward confirming (an open owner question, changes/unreleased/c08.md).
+  const taintLatch = createTaintLatch();
+
   const gates = new Map<WriteMode, WriteGate>();
   const gateFor = (mode: WriteMode): WriteGate => {
     const existing = gates.get(mode);
@@ -120,6 +128,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       journal: deps.journal,
       defaultWriteMode: mode,
       confirmer,
+      sessionTainted: () => taintLatch.tainted,
     });
     gates.set(mode, gate);
     return gate;
@@ -210,6 +219,7 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
 
     try {
       const result = await spec.handler(args, ctx);
+      taintLatch.observe(result);
       return toCallToolResult(result);
     } catch (err) {
       // The C1 invalidate-on-190 hook, driven from the one place every thrown
@@ -218,13 +228,15 @@ export function buildServer(deps: BuildServerDeps): ConnectableServer {
       if (invalidatesPageToken(err)) {
         for (const pageId of tracked.resolved) deps.pages.invalidate(pageId);
       }
-      return toCallToolResult(
-        shapeResult(buildErrorRecord(err), {
-          maxResultChars: settings.maxResultChars,
-          redactor,
-          isError: true,
-        }),
-      );
+      const failure = shapeResult(buildErrorRecord(err), {
+        maxResultChars: settings.maxResultChars,
+        redactor,
+        isError: true,
+      });
+      // A refusal can echo Page content back (a Graph error quoting a field),
+      // so it is observed like a result.
+      taintLatch.observe(failure);
+      return toCallToolResult(failure);
     }
   });
 

@@ -47,6 +47,15 @@ export interface Redactor {
    * after startup (C1) must be scrubbable the moment it exists.
    */
   addSecret(value: string): void;
+  /**
+   * Whether `value` (deep: every string leaf and object key) carries a secret
+   * (SEC-06): a registered value in any of its wire forms, an `EAA…` user/Page
+   * token, or an `{app-id}|{app-secret}` app token. The bare-hex backup
+   * patterns are NOT consulted — a 32-hex ad `image_hash` is legitimate write
+   * payload. Optional so a hand-rolled test redactor stays valid; callers
+   * treat an absent predicate by falling back to `redactString`.
+   */
+  containsSecret?(value: unknown): boolean;
 }
 
 // ---------------------------------------------------------------------------

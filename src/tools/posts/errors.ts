@@ -224,9 +224,11 @@ function errorRecord(err: unknown): Record<string, unknown> | undefined {
       // Re-planning a plan another call is still applying is the duplicate
       // write the gate refused to cause; the only safe step is to wait.
       hint:
-        err.message === PLAN_IN_PROGRESS_MESSAGE
-          ? 'Another call is applying this plan right now. Wait for its result before doing anything else — do not re-plan or re-apply, or the write may happen twice.'
-          : "Run the tool once WITHOUT apply to get a fresh preview, then repeat the identical arguments with apply:true and that preview's plan_id.",
+        err.code === 'secret_in_payload'
+          ? 'Remove the credential from the arguments. Re-planning will not help: the same content is refused every time.'
+          : err.message === PLAN_IN_PROGRESS_MESSAGE
+            ? 'Another call is applying this plan right now. Wait for its result before doing anything else — do not re-plan or re-apply, or the write may happen twice.'
+            : "Run the tool once WITHOUT apply to get a fresh preview, then repeat the identical arguments with apply:true and that preview's plan_id.",
     };
   }
   return undefined;

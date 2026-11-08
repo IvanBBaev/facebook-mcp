@@ -304,3 +304,72 @@ export function renderTainted(tainted: TaintedContent<unknown>): string {
     TAINT_END,
   ].join('\n');
 }
+
+// ---------------------------------------------------------------------------
+// Session taint latch (SEC-01, task C08)
+// ---------------------------------------------------------------------------
+
+/**
+ * The markers whose presence in a tool result means untrusted content entered
+ * the session: the structural brand every envelope carries (`__tainted`), the
+ * rendered opening delimiter, and the first words of both warning forms (the
+ * shaper may swap the long warning for {@link TAINT_WARNING_SHORT}). Any one of
+ * them is enough. A Page's own text that happens to contain one latches the
+ * session too — over-latching costs a confirmation prompt, under-latching costs
+ * the control, so the detector errs on the side of the prompt.
+ */
+const TAINT_MARKERS: readonly string[] = [
+  '__tainted',
+  TAINT_BEGIN,
+  'UNTRUSTED user-generated content',
+];
+
+/**
+ * Whether a value — a shaped `ToolResult`, an envelope, a raw payload — carries
+ * untrusted content. It is checked on its serialized form, which is the form
+ * the model reads, so nothing a renderer or the shaper did to the envelope on
+ * the way out can hide it. A value that cannot be serialized counts as tainted:
+ * the latch cannot vouch for content it could not inspect.
+ */
+export function carriesTaint(value: unknown): boolean {
+  if (isTainted(value)) return true;
+  let text: string;
+  try {
+    text = typeof value === 'string' ? value : (JSON.stringify(value) ?? '');
+  } catch {
+    return true;
+  }
+  return TAINT_MARKERS.some((marker) => text.includes(marker));
+}
+
+/**
+ * One server session's memory of whether untrusted content has reached the
+ * model (SEC-01). It only ever goes from clean to tainted: a prompt injection
+ * read early in a session can steer every later call, so nothing short of a new
+ * session clears it. The write gate reads {@link TaintLatch.tainted} and makes
+ * every `outbound` write out-of-band confirmed once it is set.
+ */
+export interface TaintLatch {
+  /** True once any observed result carried untrusted content. Never resets. */
+  readonly tainted: boolean;
+  /** Inspect one tool result; latches when it {@link carriesTaint}. */
+  observe(result: unknown): void;
+  /** Latch unconditionally (a caller that knows it surfaced untrusted content). */
+  latch(): void;
+}
+
+/** Create a clean {@link TaintLatch}. One per server instance (its session). */
+export function createTaintLatch(): TaintLatch {
+  let tainted = false;
+  return {
+    get tainted(): boolean {
+      return tainted;
+    },
+    observe(result: unknown): void {
+      if (!tainted && carriesTaint(result)) tainted = true;
+    },
+    latch(): void {
+      tainted = true;
+    },
+  };
+}

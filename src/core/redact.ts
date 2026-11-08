@@ -92,6 +92,17 @@ const PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`${LEAD}[A-Fa-f0-9]{32}\b`, 'g'),
 ];
 
+/**
+ * The token-shaped backup patterns `containsSecret` consults: the app-token
+ * pair and an `EAA…` token. Non-global so `.test` carries no `lastIndex`
+ * state. The bare 64/32-hex patterns are left out on purpose — outbound write
+ * payloads legitimately carry hex ids (an ad `image_hash`).
+ */
+const TOKEN_PATTERNS: readonly RegExp[] = [
+  new RegExp(String.raw`${LEAD}\d{6,}(?:\||%7[Cc])[A-Fa-f0-9]{32}\b`),
+  /EAA[A-Za-z0-9_-]{20,}/,
+];
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -336,9 +347,45 @@ export function createRedactor(config: RedactorConfig = {}): Redactor {
     }
   };
 
+  const stringHasSecret = (input: string): boolean =>
+    registered.some((form) => input.includes(form)) ||
+    TOKEN_PATTERNS.some((re) => re.test(input));
+
+  // Same defensive reads as the redaction walk. A walk cut by depth answers
+  // "secret": the predicate gates an outbound write, so what it cannot
+  // inspect it refuses (fail closed).
+  const hasSecretDeep = (
+    value: unknown,
+    path: WeakSet<object>,
+    depth: number,
+  ): boolean => {
+    if (typeof value === 'string') return stringHasSecret(value);
+    if (value === null || typeof value !== 'object') return false;
+    if (
+      value instanceof Date ||
+      ArrayBuffer.isView(value) ||
+      value instanceof ArrayBuffer
+    ) {
+      return false;
+    }
+    if (depth >= MAX_DEPTH) return true;
+    if (path.has(value)) return false;
+    path.add(value);
+    try {
+      for (const [key, val] of safeEntries(value)) {
+        if (stringHasSecret(key) || hasSecretDeep(val, path, depth + 1)) return true;
+      }
+      return false;
+    } finally {
+      path.delete(value);
+    }
+  };
+
   return {
     redact: (value: unknown): unknown => redactValue(value, new WeakSet<object>(), 0),
     redactString: (s: string): string => scrubString(s),
     addSecret,
+    containsSecret: (value: unknown): boolean =>
+      hasSecretDeep(value, new WeakSet<object>(), 0),
   };
 }

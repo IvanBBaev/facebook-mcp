@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  carriesTaint,
+  createTaintLatch,
   isTainted,
   renderTainted,
   taint,
   TAINT_BEGIN,
   TAINT_END,
   TAINT_WARNING,
+  TAINT_WARNING_SHORT,
 } from './taint.js';
 
 // A comment whose body carries an injected instruction — the B1 / CC-MOD-8
@@ -361,4 +364,49 @@ test('single presentation selectors in ordinary emoji survive untouched', () => 
   const body = 'love ❤️, keycap 1️⃣, fire ❤️‍\u{1F525}, 葛\u{E0100}';
   const out = renderTainted(taint('comment', body));
   assert.ok(out.includes(body));
+});
+
+// --- session taint latch (SEC-01, C08) ---------------------------------------
+
+test('carriesTaint sees an envelope as an object, as JSON text and rendered', () => {
+  const wrapped = taint('comment', INJECTION);
+  assert.equal(carriesTaint(wrapped), true);
+  assert.equal(carriesTaint({ data: [wrapped] }), true);
+  // A ToolResult carries the envelope as JSON text in its content.
+  assert.equal(
+    carriesTaint({
+      content: [{ type: 'text', text: JSON.stringify({ rows: wrapped }) }],
+    }),
+    true,
+  );
+  assert.equal(carriesTaint(renderTainted(wrapped)), true);
+  // The shaper may have swapped the long warning for the short one.
+  assert.equal(carriesTaint({ text: TAINT_WARNING_SHORT }), true);
+});
+
+test('carriesTaint is false for server-authored content and true for what it cannot read', () => {
+  assert.equal(
+    carriesTaint({ content: [{ type: 'text', text: '{"pages":[]}' }] }),
+    false,
+  );
+  assert.equal(carriesTaint(undefined), false);
+  assert.equal(carriesTaint('plain text'), false);
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  assert.equal(carriesTaint(cyclic), true, 'unserializable fails closed');
+});
+
+test('the latch starts clean, sets on the first tainted result and never clears', () => {
+  const latch = createTaintLatch();
+  assert.equal(latch.tainted, false);
+  latch.observe({ content: [{ type: 'text', text: '{"ok":true}' }] });
+  assert.equal(latch.tainted, false);
+  latch.observe(taint('message', INJECTION));
+  assert.equal(latch.tainted, true);
+  latch.observe({ ok: true });
+  assert.equal(latch.tainted, true, 'a clean result does not reset the latch');
+
+  const manual = createTaintLatch();
+  manual.latch();
+  assert.equal(manual.tainted, true);
 });

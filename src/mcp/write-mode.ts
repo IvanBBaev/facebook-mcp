@@ -238,7 +238,14 @@ export type WriteGateErrorCode =
    * a lower gate class than the declared one, or a tier above the declared
    * worst case. Thrown before anything is planned or performed.
    */
-  | 'tier_mismatch';
+  | 'tier_mismatch'
+  /**
+   * The write's payload carries a registered secret (SEC-06): a configured
+   * token, the app secret, or an access-token-shaped value. Thrown by
+   * `executeWrite` before the gate sees the action — nothing is planned or
+   * performed. The message names the field, never the value.
+   */
+  | 'secret_in_payload';
 
 /**
  * The `plan_not_found` message for a plan another call is applying right now.
@@ -367,6 +374,16 @@ export interface WriteAction<T = unknown> {
    */
   readonly requirePlanId?: boolean;
   /**
+   * This write speaks for the Page to an audience — a DM, a public reply or
+   * comment, a comment edit, publish-now, a Page profile field, an attachment
+   * fetched by URL, `block_user` (SEC-01). Orthogonal to the tier, so a lane
+   * does not re-tier to declare it. Once untrusted content has entered the
+   * session ({@link WriteGateDeps.sessionTainted}) an outbound write is
+   * plan-bound and out-of-band confirmed whatever its tier; before that it
+   * behaves exactly as an unmarked write. Omitted ⇒ not outbound.
+   */
+  readonly outbound?: boolean;
+  /**
    * The operator token supplied with THIS call (the gated tools' `confirm_token`
    * argument). Handed to the {@link Confirmer} as a separate argument, never
    * folded into the `ConfirmationRequest` — that object is forwarded to the
@@ -484,6 +501,15 @@ export interface WriteGateDeps {
    * where a JS consumer meets no type checker at all.
    */
   readonly confirmer: Confirmer;
+  /**
+   * The session taint latch (SEC-01, C08): true once any tool result in this
+   * session carried untrusted content (`TaintLatch.tainted` in `./taint.js`).
+   * Read on every call, so a session tainted between a plan and its apply is
+   * confirmed at the apply. Omitted — or a hook that throws — reads as
+   * TAINTED: a gate that cannot tell whether the model has read attacker text
+   * assumes it has, so an `outbound` write is always confirmed there.
+   */
+  readonly sessionTainted?: () => boolean;
   /** Plan lifetime in ms; default {@link PLAN_TTL_MS}. */
   readonly planTtlMs?: number;
   /** Mint a fresh plan id; default `crypto.randomUUID`. Injectable for tests. */
@@ -494,6 +520,15 @@ export interface WriteGate {
   /** Preview or perform one write, per the tier/mode/plan gating. */
   execute<T = unknown>(action: WriteAction<T>): Promise<WriteOutcome<T>>;
 }
+
+/**
+ * Preview warning for an outbound write in a tainted session, so the agent
+ * learns before the apply that a human will be asked.
+ */
+export const TAINT_LATCH_WARNING =
+  'Untrusted user-generated content has entered this session, so this outbound write ' +
+  'needs out-of-band confirmation: apply it with apply:true and this plan_id, and the ' +
+  'operator will be asked to approve it (or pass confirm_token where the tool takes one).';
 
 function defaultNotPerformedNotice(tool: string): string {
   return `This was a dry run — no change was made. The "${tool}" action was NOT performed.`;
@@ -508,6 +543,21 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
   const inFlight = new Set<PlanId>();
   const ttlMs = deps.planTtlMs ?? PLAN_TTL_MS;
   const mintId = deps.newPlanId ?? ((): PlanId => randomUUID());
+
+  /** Fail closed: no latch, or a latch that throws, means tainted. */
+  function isSessionTainted(): boolean {
+    if (typeof deps.sessionTainted !== 'function') return true;
+    try {
+      return deps.sessionTainted() !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Whether this call is an outbound write the taint latch has caught. */
+  function isLatched(action: GateAction): boolean {
+    return action.outbound === true && isSessionTainted();
+  }
 
   function sweepExpired(now: number): void {
     for (const [id, plan] of plans) {
@@ -576,6 +626,7 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
   async function runPlan(
     action: GateAction,
     decision: Extract<GateDecision, { mode: 'plan' }>,
+    latched: boolean,
   ): Promise<Extract<WriteOutcome<never>, { kind: 'preview' }>> {
     const beforeState = action.readState ? await action.readState() : undefined;
     sweepExpired(deps.clock.now());
@@ -588,6 +639,7 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
     // Surface why an explicit apply attempt was downgraded to a preview so the
     // agent learns what it still owes (e.g. "must bind a plan_id").
     if (action.apply === true) warnings.push(decision.reason);
+    if (latched) warnings.push(TAINT_LATCH_WARNING);
 
     const preview: PlanPreview = {
       planId: plan.planId,
@@ -692,12 +744,15 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
     return plan;
   }
 
-  async function runApply<T>(action: WriteAction<T>): Promise<WriteOutcome<T>> {
+  async function runApply<T>(
+    action: WriteAction<T>,
+    latched: boolean,
+  ): Promise<WriteOutcome<T>> {
     const plan = claimPlanForApply(action, deps.clock.now());
-    if (!plan) return applyClaimed(action, plan);
+    if (!plan) return applyClaimed(action, plan, latched);
     inFlight.add(plan.planId);
     try {
-      return await applyClaimed(action, plan);
+      return await applyClaimed(action, plan, latched);
     } finally {
       inFlight.delete(plan.planId);
     }
@@ -706,6 +761,7 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
   async function applyClaimed<T>(
     action: WriteAction<T>,
     plan: StoredPlan | undefined,
+    latched: boolean,
   ): Promise<WriteOutcome<T>> {
     // The sentence a human is asked to approve, and the one the audit trail
     // keeps. It comes from the PLAN whenever this apply is bound to one; only an
@@ -729,8 +785,9 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
         }
       }
 
-      // Out-of-band confirmation gate for high-consequence tiers (B1 / F15 seam).
-      if (isHighConsequence(action.tier)) {
+      // Out-of-band confirmation gate for high-consequence tiers (B1 / F15 seam),
+      // and for an outbound write once the session is tainted (SEC-01 latch).
+      if (isHighConsequence(action.tier) || latched) {
         // A missing seam is unreachable through the types, so getting here means
         // an untyped caller. Refusing is the only safe reading: performing the
         // write would be the gate deciding, on its own, that a tier requiring
@@ -748,7 +805,9 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
             tier: action.tier,
             ...(hasPlanId(action.planId) ? { planId: action.planId } : {}),
             summary: approvedSummary,
-            reason: `${action.tier} write requires out-of-band confirmation`,
+            reason: isHighConsequence(action.tier)
+              ? `${action.tier} write requires out-of-band confirmation`
+              : 'outbound write after untrusted content entered this session requires out-of-band confirmation',
           },
           action.confirmToken,
         );
@@ -889,16 +948,20 @@ export function createWriteGate(deps: WriteGateDeps): WriteGate {
   }
 
   function runExecute<T>(action: WriteAction<T>): Promise<WriteOutcome<T>> {
+    // Read once per call: the same answer decides the plan binding, the
+    // preview warning and the confirmation, so they cannot disagree.
+    const latched = isLatched(action);
+    const requirePlanId = action.requirePlanId === true || latched;
     const decision = authorize({
       tier: action.tier,
       ...(action.apply !== undefined ? { apply: action.apply } : {}),
       ...(hasPlanId(action.planId) ? { planId: action.planId } : {}),
-      ...(action.requirePlanId !== undefined
-        ? { requirePlanId: action.requirePlanId }
-        : {}),
+      ...(requirePlanId ? { requirePlanId } : {}),
       defaultWriteMode: deps.defaultWriteMode,
     });
-    return decision.mode === 'plan' ? runPlan(action, decision) : runApply(action);
+    return decision.mode === 'plan'
+      ? runPlan(action, decision, latched)
+      : runApply(action, latched);
   }
 
   return {

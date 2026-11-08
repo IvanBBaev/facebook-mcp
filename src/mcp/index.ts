@@ -24,6 +24,7 @@ export {
   WriteGateError,
   PLAN_IN_PROGRESS_MESSAGE,
   PLAN_TTL_MS,
+  TAINT_LATCH_WARNING,
   type WriteGate,
   type WriteGateDeps,
   APPLIED_VERDICT,
