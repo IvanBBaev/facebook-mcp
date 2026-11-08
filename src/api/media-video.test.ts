@@ -1074,6 +1074,30 @@ test('a chunk answered 2xx with success:false and no offset is not counted as la
   assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
 });
 
+test('a chunk refused mid-file keeps the cursor on the refused window (guard M16)', async () => {
+  // The second kill for M16, past the first window: the bytes already landed stay
+  // landed, and the refused window is neither skipped nor counted.
+  const { fb, deps, sessions } = harness({ maxResumeAttempts: 1 });
+  fb.on(isStart, fbOk(startBody(4)));
+  fb.on(isChunk, fbOk(chunkBody(4, 8)), 1);
+  fb.on(isChunk, fbOk({ success: 0 }));
+
+  await startVideoUpload(deps, { pageId: PAGE_ID, totalBytes: TOTAL });
+  const err = await transferVideoUpload(deps, {
+    uploadSessionId: SESSION_ID,
+    data: bytes(TOTAL),
+  }).catch((e: unknown) => e);
+
+  assert.ok(err instanceof GraphApiError, 'a refused chunk ends the transfer');
+  assert.deepEqual(
+    chunksOf(fb).map((c) => c.fileOffset),
+    [0, 4, 4],
+    'the refused window is re-sent, never skipped',
+  );
+  assert.equal(sessions.get(SESSION_ID)?.startOffset, 4);
+  assert.equal(sessions.get(SESSION_ID)?.phase, 'failed');
+});
+
 test('a resume offset is also read from the file_offset response header', async () => {
   const { fb, deps } = harness();
   fb.on(isStart, fbOk(startBody(4)));
