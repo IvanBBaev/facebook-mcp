@@ -22,6 +22,8 @@ import type {
   WriteMode,
 } from './types.js';
 import {
+  DEFAULT_JOURNAL_RETENTION_DAYS,
+  MAX_JOURNAL_RETENTION_DAYS,
   defaultActivityStatePath,
   defaultExportDir,
   defaultJournalPath,
@@ -193,6 +195,7 @@ const SETTING_NAMES: readonly string[] = [
   'FB_PACKAGES_DENY',
   'FB_PACKAGES_READONLY',
   'FB_JOURNAL_PATH',
+  'FB_JOURNAL_RETENTION_DAYS',
   'FB_ACTIVITY_STATE_PATH',
   'FB_EXPORT_DIR',
   'FB_LOG_LEVEL',
@@ -497,6 +500,13 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
         key,
       ),
     ) ?? defaultJournal();
+  // LEG-02: entries carry PSIDs, so they age out by default; 0 = no age limit.
+  const journalRetentionDays = intIn(
+    'FB_JOURNAL_RETENTION_DAYS',
+    DEFAULT_JOURNAL_RETENTION_DAYS,
+    0,
+    MAX_JOURNAL_RETENTION_DAYS,
+  );
   const defaultActivityState = (): string =>
     defaultActivityStatePath({
       platform: options.platform,
@@ -578,6 +588,7 @@ export function loadSettings(options: LoadSettingsOptions = {}): LoadSettingsRes
     packagesDeny,
     packagesReadonly,
     journalPath,
+    journalRetentionDays,
     activityStatePath,
     exportDir,
     logLevel,

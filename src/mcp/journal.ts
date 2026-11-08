@@ -12,15 +12,17 @@
 //     and the note is best-effort: a throwing `onError` sink or redactor is
 //     swallowed too, since by then the Graph write has already happened.
 //   * REDACTED. The whole entry runs through the structural token strip and then
-//     the value-based redactor before it is serialized, so no token/secret/PII
+//     the value-based redactor before it is serialized, so no token or secret
 //     value can ever reach disk (C3 / Sec #7). Metadata is structured-only by
-//     contract. The structural pass is not redundant with the redactor: the
-//     redactor only recognises the values it was TOLD about (plus a defensive
-//     `EAA…`/hex scan), so a credential nobody registered — a token echoed back
-//     inside a proxy's HTML error page, which `core/errors.ts` embeds verbatim
-//     into the `GraphApiError` message this file journals as `error` — is
-//     invisible to it. `access_token=…` in a string is recognisable by SHAPE,
-//     and shape is what survives an upstream that forgot to register a value.
+//     contract. Entries are NOT free of personal data: they keep pseudonymous
+//     recipient ids (PSIDs) and conversation ids for audit (LEG-02), which is why
+//     they also age out (below). The structural pass is not redundant with the
+//     redactor: the redactor only recognises the values it was TOLD about (plus a
+//     defensive `EAA…`/hex scan), so a credential nobody registered — a token
+//     echoed back inside a proxy's HTML error page, which `core/errors.ts` embeds
+//     verbatim into the `GraphApiError` message this file journals as `error` — is
+//     invisible to it. `access_token=…` in a string is recognisable by SHAPE, and
+//     shape is what survives an upstream that forgot to register a value.
 //   * PARSEABLE. Every line written is valid JSON, and a line that is not is not
 //     written at all. An operator tails this file with one `JSON.parse` per line;
 //     a single malformed record is a wall, not a gap. That makes serialization a
@@ -45,6 +47,15 @@
 //     may slightly exceed the cap before the next append rotates it — "~5 MB".
 //     A rotation that FAILS never costs the entry: it is reported on stderr and
 //     the line is appended past the cap, since the record outranks the bound.
+//   * AGED OUT. Entries older than `retentionDays` (default 90,
+//     `FB_JOURNAL_RETENTION_DAYS`; `0` = no age limit) are dropped at the first
+//     append of a process, once a day after that and after every rotation
+//     (LEG-02, GDPR Art. 5(1)(e)). The live file is never rewritten in place —
+//     a live file whose oldest record expired is ROTATED, which is safe against
+//     other servers appending to it — and only the retained generation, which
+//     nobody appends to, has its expired head cut off (atomic temp + rename).
+//     Retention runs under the rotation lock and, like rotation, is
+//     housekeeping: a failed pass is a stderr note and never costs the entry.
 //   * SERIALIZED. Concurrent tool calls append concurrently, and rotation is a
 //     read-modify-write across three syscalls; the writes therefore run one at a
 //     time on an internal FIFO queue. Without it two callers racing a rotation
@@ -70,7 +81,11 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { errorMessageOf } from '../core/index.js';
+import {
+  DEFAULT_JOURNAL_RETENTION_DAYS,
+  atomicWriteFile,
+  errorMessageOf,
+} from '../core/index.js';
 import type {
   Clock,
   Journal,
@@ -95,6 +110,11 @@ export interface JournalDeps {
   /** Rotate once the live file reaches this many bytes; default {@link JOURNAL_MAX_BYTES}. */
   readonly maxBytes?: number;
   /**
+   * Drop entries older than this many days; `0` = no age limit. Default
+   * {@link DEFAULT_JOURNAL_RETENTION_DAYS} (`Settings.journalRetentionDays`).
+   */
+  readonly retentionDays?: number;
+  /**
    * Sink for the (redacted) failure note. Defaults to a `console.error` line on
    * stderr — never stdout, which is the stdio JSON-RPC channel (CC-CFG-1).
    */
@@ -109,6 +129,33 @@ export interface JournalDeps {
 export function rotatedJournalPath(journalPath: string): string {
   const parsed = path.parse(journalPath);
   return path.join(parsed.dir, `${parsed.name}.1${parsed.ext}`);
+}
+
+/** One day in milliseconds. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Cut the expired head off one journal generation.
+ *
+ * Lines are in append order, so retention drops everything up to and including
+ * the LAST entry stamped before `cutoff` and keeps the rest verbatim. A line that
+ * carries no timestamp (torn by a crash, foreign) is dropped only when an expired
+ * entry follows it — it is older by position — and kept otherwise, since the
+ * journal never deletes a record it cannot date as expired. Answers the kept
+ * text and whether anything was dropped.
+ */
+export function retainedJournalText(
+  text: string,
+  cutoff: number,
+): { readonly kept: string; readonly dropped: boolean } {
+  const lines = text.split('\n');
+  let start = 0;
+  for (const [i, line] of lines.entries()) {
+    const entry = parseEntryLine(line);
+    if (entry !== undefined && entry.timestamp < cutoff) start = i + 1;
+  }
+  if (start === 0) return { kept: text, dropped: false };
+  return { kept: lines.slice(start).join('\n'), dropped: true };
 }
 
 /**
@@ -168,6 +215,9 @@ export function createJournal(deps: JournalDeps): Journal {
   const filePath = deps.journalPath;
   const dir = path.dirname(filePath);
   const lockPath = `${filePath}.rotating`;
+  const retentionMs = (deps.retentionDays ?? DEFAULT_JOURNAL_RETENTION_DAYS) * DAY_MS;
+  /** Clock reading of the last retention pass; `undefined` = due now. */
+  let lastRetentionAt: number | undefined;
   const reportError =
     deps.onError ??
     ((message: string): void => {
@@ -344,6 +394,18 @@ export function createJournal(deps: JournalDeps): Journal {
     }
   }
 
+  /** Drop the rotation lock; a failure is a note, never a throw. */
+  async function releaseRotationLock(): Promise<void> {
+    try {
+      await rm(lockPath, { force: true });
+    } catch (err) {
+      reportNote(
+        `journal rotation lock ${lockPath} could not be removed; rotation will be ` +
+          `skipped until it is deleted: ${errorMessageOf(err)}`,
+      );
+    }
+  }
+
   /**
    * Rotate under the cross-process lock. Answers `'held'` when another server
    * is rotating right now: this record is appended to whichever file is live —
@@ -362,14 +424,7 @@ export function createJournal(deps: JournalDeps): Journal {
       await rm(rotated, { force: true });
       await rename(filePath, rotated);
     } finally {
-      try {
-        await rm(lockPath, { force: true });
-      } catch (err) {
-        reportNote(
-          `journal rotation lock ${lockPath} could not be removed; rotation will be ` +
-            `skipped until it is deleted: ${errorMessageOf(err)}`,
-        );
-      }
+      await releaseRotationLock();
     }
     if (isPosix) {
       // `rename` carries the live file's mode across, and nothing ever revisits
@@ -397,6 +452,88 @@ export function createJournal(deps: JournalDeps): Journal {
     return 'rotated';
   }
 
+  /**
+   * Text of one generation, or `undefined` when there is nothing retention can
+   * trim: no file (ENOENT), or a path that is not a regular file. Reading a FIFO
+   * would block forever and a directory cannot be read as text; neither is
+   * retention's to report — the append path refuses a bad live path, and a bad
+   * retained path surfaces when rotation tries to replace it.
+   */
+  async function readIfPresent(file: string): Promise<string | undefined> {
+    let stats;
+    try {
+      stats = await stat(file);
+    } catch (err) {
+      if (errnoOf(err) === 'ENOENT') return undefined;
+      throw err;
+    }
+    if (!stats.isFile()) return undefined;
+    return readFile(file, 'utf8');
+  }
+
+  /**
+   * Drop entries stamped before `cutoff` from both generations (LEG-02).
+   * Answers `false` when another server holds the rotation lock, so the pass is
+   * retried on the next append.
+   *
+   * A live file whose oldest entry expired is rotated rather than rewritten:
+   * every entry of the retained generation is older still, so replacing it
+   * loses nothing that should be kept, and `rename` is the one operation that
+   * cannot lose a record another server is appending at the same moment. The
+   * retained generation is then trimmed — only rotation, under this same lock,
+   * ever writes it. The lock is taken only when something has expired, so a
+   * pass with nothing to drop touches nothing.
+   */
+  async function applyRetention(cutoff: number): Promise<boolean> {
+    const rotated = rotatedJournalPath(filePath);
+    const expired = async (file: string): Promise<boolean> => {
+      const text = await readIfPresent(file);
+      return text !== undefined && retainedJournalText(text, cutoff).dropped;
+    };
+    if (!(await expired(filePath)) && !(await expired(rotated))) return true;
+    if (!(await acquireRotationLock())) return false;
+    try {
+      // Re-checked under the lock: another server may have rotated meanwhile.
+      if (await expired(filePath)) {
+        await rm(rotated, { force: true });
+        await rename(filePath, rotated);
+      }
+      const older = await readIfPresent(rotated);
+      if (older === undefined) return true;
+      const { kept, dropped } = retainedJournalText(older, cutoff);
+      if (!dropped) return true;
+      if (kept.trim() === '') {
+        await rm(rotated, { force: true });
+      } else {
+        await atomicWriteFile(rotated, kept);
+      }
+      return true;
+    } finally {
+      await releaseRotationLock();
+    }
+  }
+
+  /**
+   * Run the retention pass when it is due: at the first append of this
+   * process, a day after the previous pass, or right after a rotation
+   * (`force`). Never throws — retention is housekeeping, the entry is the
+   * payload.
+   */
+  async function retainIfDue(force: boolean): Promise<void> {
+    if (retentionMs <= 0) return;
+    const now = deps.clock.now();
+    if (!force && lastRetentionAt !== undefined && now - lastRetentionAt < DAY_MS) return;
+    lastRetentionAt = now;
+    try {
+      if (!(await applyRetention(now - retentionMs))) lastRetentionAt = undefined;
+    } catch (err) {
+      reportNote(
+        `journal retention pass failed; expired entries are kept until the next pass: ` +
+          errorMessageOf(err),
+      );
+    }
+  }
+
   // Writes are serialized on one promise chain. Concurrent tool calls each end in
   // an `append`, and check-then-rotate-then-write is not atomic: two callers can
   // both stat an over-size file, both `rm` the retained generation and both try to
@@ -418,10 +555,12 @@ export function createJournal(deps: JournalDeps): Journal {
 
   async function writeLine(line: string): Promise<void> {
     await mkdir(dir, { recursive: true, ...(isPosix ? { mode: 0o700 } : {}) });
+    await retainIfDue(false);
     let live = await liveStat();
     if (live !== undefined && live.size >= maxBytes) {
       try {
         const rotation = await rotate();
+        if (rotation === 'rotated') await retainIfDue(true);
         heldInARow = rotation === 'held' ? heldInARow + 1 : 0;
         if (heldInARow === ROTATION_LOCK_WEDGED_AFTER) {
           // Contention clears within milliseconds; the lock still held on this

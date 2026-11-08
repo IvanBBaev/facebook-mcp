@@ -239,7 +239,12 @@ async function main(onStarted: () => void = () => undefined): Promise<void> {
     onUsage: usageTracker.record,
     versionDrift,
   });
-  const journal = createJournal({ clock, redactor, journalPath: settings.journalPath });
+  const journal = createJournal({
+    clock,
+    redactor,
+    journalPath: settings.journalPath,
+    retentionDays: settings.journalRetentionDays,
+  });
   const activityState = createActivityStateStore({
     statePath: settings.activityStatePath ?? defaultActivityStatePath(),
   });

@@ -380,6 +380,7 @@ const LITERAL_DEFAULTS: readonly {
     probe: { FB_TRANSPORT: 'http', FB_HTTP_TOKEN: 'placeholder-http-token' },
   },
   { name: 'FB_LOG_LEVEL', read: (s) => s.logLevel },
+  { name: 'FB_JOURNAL_RETENTION_DAYS', read: (s) => s.journalRetentionDays },
 ];
 
 /**

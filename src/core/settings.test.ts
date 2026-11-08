@@ -1078,3 +1078,30 @@ test('a blank profile token without a page id is not reported as an orphan', () 
   });
   assert.ok(!codes(report.problems).includes('orphan-profile-token'));
 });
+
+test('FB_JOURNAL_RETENTION_DAYS defaults to 90, accepts 0 and refuses anything but a day count', () => {
+  const env = (value?: string) =>
+    loadSettings({
+      ...POSIX,
+      env: {
+        FB_ACCESS_TOKEN: 'fake',
+        FB_APP_SECRET: 's',
+        FB_PAGE_ID: '1',
+        ...(value === undefined ? {} : { FB_JOURNAL_RETENTION_DAYS: value }),
+      },
+    });
+  assert.equal(env().settings.journalRetentionDays, 90);
+  assert.equal(env('30').settings.journalRetentionDays, 30);
+  const keepForever = env('0');
+  assert.equal(keepForever.settings.journalRetentionDays, 0);
+  assert.equal(keepForever.report.ok, true);
+  for (const value of ['-1', '1.5', 'never', '36501']) {
+    const bad = env(value);
+    assert.equal(bad.report.ok, false, value);
+    assert.equal(bad.settings.journalRetentionDays, 90, value);
+    const problem = bad.report.errors.find(
+      (p) => p.field === 'FB_JOURNAL_RETENTION_DAYS',
+    );
+    assert.equal(problem?.code, 'invalid-number', value);
+  }
+});

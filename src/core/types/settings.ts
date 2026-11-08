@@ -100,6 +100,11 @@ export interface Settings {
 
   // Journal & logging
   readonly journalPath: string;
+  /**
+   * `FB_JOURNAL_RETENTION_DAYS`: journal entries older than this many days are
+   * dropped; `0` = no age limit. Absent ⇒ `DEFAULT_JOURNAL_RETENTION_DAYS` (config.ts).
+   */
+  readonly journalRetentionDays?: number;
   /** `FB_ACTIVITY_STATE_PATH`; absent ⇒ `defaultActivityStatePath()` (config.ts). */
   readonly activityStatePath?: string;
   /** `FB_EXPORT_DIR`; absent ⇒ `defaultExportDir()` (config.ts). */

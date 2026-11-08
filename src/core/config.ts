@@ -130,6 +130,16 @@ export function defaultJournalPath(o?: PathOptions): string {
   return pathFor(resolvePlatform(o)).join(stateDir(o), JOURNAL_FILE_NAME);
 }
 
+/**
+ * Default age limit of write-journal entries, in days (LEG-02, `FB_JOURNAL_RETENTION_DAYS`).
+ * Entries older than this are dropped at start-up, once a day after that and on
+ * rotation; `0` keeps them for as long as the size-based rotation does.
+ */
+export const DEFAULT_JOURNAL_RETENTION_DAYS = 90;
+
+/** Largest accepted `FB_JOURNAL_RETENTION_DAYS` (about 100 years). */
+export const MAX_JOURNAL_RETENTION_DAYS = 36_500;
+
 /** Absolute default path of the facebook_get_activity_since high-water marks. */
 export function defaultActivityStatePath(o?: PathOptions): string {
   return pathFor(resolvePlatform(o)).join(stateDir(o), ACTIVITY_STATE_FILE_NAME);

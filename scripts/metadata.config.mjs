@@ -331,6 +331,18 @@ export const env = Object.freeze([
     example: '',
   },
   {
+    name: 'FB_JOURNAL_RETENTION_DAYS',
+    group: 'Write safety',
+    required: 'no',
+    secret: false,
+    default: '90',
+    format: 'number',
+    summary: 'Days a write-journal entry is kept (0 = no age limit).',
+    description:
+      'Write-journal entries older than this many days are dropped at start-up, once a day and on rotation (entries hold recipient PSIDs, so they age out by default). Integer in [0, 36500]; 0 keeps entries until size rotation drops them.',
+    example: '90',
+  },
+  {
     name: 'FB_ACTIVITY_STATE_PATH',
     group: 'Write safety',
     required: 'no',

@@ -101,7 +101,7 @@ export interface JournalEntryInput {
   readonly planId?: PlanId;
   readonly outcome: JournalOutcome;
   readonly summary: string;
-  /** Structured metadata ONLY — passed through the redactor (no tokens/PII). */
+  /** Structured metadata ONLY — passed through the redactor (no secrets; may hold pseudonymous recipient ids — PSIDs — for audit). */
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly error?: string;
 }
