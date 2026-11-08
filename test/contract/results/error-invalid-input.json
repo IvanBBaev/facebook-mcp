@@ -1,0 +1,15 @@
+{
+  "arguments": { "post_id": 42 },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "error": "[\n  {\n    \"expected\": \"string\",\n    \"code\": \"invalid_type\",\n    \"path\": [\n      \"post_id\"\n    ],\n    \"message\": \"Invalid input: expected string, received number\"\n  }\n]"
+        },
+        "type": "text"
+      }
+    ],
+    "isError": true
+  },
+  "tool": "facebook_get_post"
+}

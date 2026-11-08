@@ -1,0 +1,19 @@
+{
+  "arguments": {},
+  "result": {
+    "content": [
+      {
+        "json": {
+          "nextCursor": null,
+          "pageId": "1000000001",
+          "pageTimezone": null,
+          "posts": [],
+          "timezoneCaveat": "Facebook renders scheduled times in the Page's own timezone. The wire value is the UTC instant below (Unix seconds); the Page-local rendering is display-only.",
+          "truncated": false
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_list_scheduled_posts"
+}

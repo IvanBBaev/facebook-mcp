@@ -1,0 +1,29 @@
+{
+  "arguments": { "apply": true, "post_id": "1000000001_2000000002" },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "applied": false,
+          "expiresAt": "2026-01-15T12:05:00.000Z",
+          "nextStep": "To perform it, call facebook_delete_post again with the same arguments plus apply:true and plan_id:\"<uuid>\".",
+          "notPerformedNotice": "This was a dry run — the post was NOT deleted and still exists.",
+          "pageId": "1000000001",
+          "planId": "<uuid>",
+          "status": "preview",
+          "summary": "Permanently delete post 1000000001_2000000002.",
+          "tier": "irreversible",
+          "tool": "facebook_delete_post",
+          "warnings": [
+            "Deleting a Page post is permanent: there is no undo and no trash to restore it from.",
+            "Facebook only lets an app edit posts that the SAME app created. Editing a post published by another app, or by a human in the Page UI, fails no matter what permissions the token carries (CC-PUB-4).",
+            "If the post is already gone, the delete reports success-with-note instead of an error — absence is the intended end state (CC-PUB-5).",
+            "\"irreversible\" writes must bind apply:true to a plan_id from a prior plan step"
+          ]
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_delete_post"
+}

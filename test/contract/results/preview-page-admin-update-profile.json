@@ -1,0 +1,26 @@
+{
+  "arguments": { "about": "New about text" },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "applied": false,
+          "expiresAt": "2026-01-15T12:05:00.000Z",
+          "nextStep": "To perform it, call facebook_update_page_profile again with the same arguments plus apply:true and plan_id:\"<uuid>\".",
+          "notPerformedNotice": "This was a dry run — the Page profile was not changed.",
+          "pageId": "1000000001",
+          "planId": "<uuid>",
+          "status": "preview",
+          "summary": "Update the profile of Page 1000000001: about: \"Synthetic Page for the unit suite.\" → \"New about text\".",
+          "tier": "reversible",
+          "tool": "facebook_update_page_profile",
+          "warnings": [
+            "The profile is PUBLIC — every visitor sees the new values. Keep the before-values: a second call with them undoes the edit."
+          ]
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_update_page_profile"
+}

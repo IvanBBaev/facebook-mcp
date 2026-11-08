@@ -1,0 +1,30 @@
+{
+  "arguments": { "ad_account_id": "act_4000000004" },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "accountId": "act_4000000004",
+          "count": 1,
+          "hasBudgets": false,
+          "level": "campaign",
+          "notes": [
+            "`status` is the configured setting; `effective_status` is the real delivery state after review and parent status are applied. ACTIVE in `status` does NOT mean the object is delivering — read `effective_status` and the `delivering` flag."
+          ],
+          "objects": [
+            {
+              "delivering": false,
+              "id": "5000000005",
+              "name": "Campaign",
+              "status": "PAUSED",
+              "status_explanation": "Delivery state unknown: Graph returned no `effective_status` for this object (the `fields` override may have dropped it)."
+            }
+          ],
+          "truncated": false
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_list_campaigns"
+}

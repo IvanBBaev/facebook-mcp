@@ -1,0 +1,13 @@
+{
+  "arguments": {},
+  "result": {
+    "content": [
+      {
+        "json": { "code": 200, "error": "(#200) Permissions error", "httpStatus": 403 },
+        "type": "text"
+      }
+    ],
+    "isError": true
+  },
+  "tool": "facebook_list_posts"
+}

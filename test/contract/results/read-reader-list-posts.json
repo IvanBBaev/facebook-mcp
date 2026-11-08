@@ -1,0 +1,32 @@
+{
+  "arguments": {},
+  "result": {
+    "content": [
+      {
+        "json": {
+          "count": 2,
+          "edge": "published_posts",
+          "nextCursor": "QVFIUmExX2FmdGVy",
+          "note": "Reels are never returned by the post edges — list them with facebook_list_reels. Scheduled posts are not returned either until their publish time (list them with facebook_list_scheduled_posts), and unpublished drafts are on no listing this server reads, so a post missing here may still exist as a scheduled post or a draft.",
+          "pageId": "1000000001",
+          "posts": [
+            {
+              "created_time": "2026-01-15T10:00:00+0000",
+              "id": "100000000000001_200000000000002",
+              "message": "Hello from the example fixture."
+            },
+            {
+              "created_time": "2026-01-14T09:30:00+0000",
+              "id": "100000000000001_200000000000003",
+              "story": "Example Test Page shared a link."
+            }
+          ],
+          "profile": null,
+          "truncated": false
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_list_posts"
+}

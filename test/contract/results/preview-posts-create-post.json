@@ -1,0 +1,29 @@
+{
+  "arguments": { "message": "Hello from the contract suite" },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "applied": false,
+          "expiresAt": "2026-01-15T12:05:00.000Z",
+          "nextStep": "To perform it, call facebook_create_post again with the same arguments plus apply:true and plan_id:\"<uuid>\".",
+          "notPerformedNotice": "This was a dry run — nothing was posted and no photo was uploaded.",
+          "pageId": "1000000001",
+          "planId": "<uuid>",
+          "status": "preview",
+          "summary": "Create a text post on Page 1000000001 immediately.",
+          "tier": "reversible",
+          "tool": "facebook_create_post",
+          "warnings": [
+            "A publish that times out may still have landed. Never re-send it blindly — verify with facebook_list_posts, matching each item's created_time and exact message text against this plan (the tool has no time filter; the newest posts come first, follow nextCursor if needed) (CC-PUB-1).",
+            "A Page can publish roughly 600 posts per year through the API. The server does not count them locally, so the cap surfaces as a Meta error rather than a local refusal (CC-PUB-3).",
+            "Posting identical text twice in quick succession is refused by Meta as duplicate content (error 506). The server never retries a publish on its own (CC-PUB-2).",
+            "Message text is sent verbatim as UTF-8. Hashtags are plain text and @-mentions of other Pages are not supported for third-party apps (CC-PUB-8)."
+          ]
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_create_post"
+}

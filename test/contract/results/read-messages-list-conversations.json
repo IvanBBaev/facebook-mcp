@@ -1,0 +1,19 @@
+{
+  "arguments": {},
+  "result": {
+    "content": [
+      {
+        "json": {
+          "conversations": [],
+          "count": 0,
+          "pageId": "1000000001",
+          "platform": "messenger",
+          "polling": "Poll-based snapshot, not a stream: messages that arrived and were handled between two calls are not replayed. Diff `updatedTime` / `unreadCount` against your previous call and re-read the affected thread; ordering is best-effort.",
+          "truncated": false
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_list_conversations"
+}

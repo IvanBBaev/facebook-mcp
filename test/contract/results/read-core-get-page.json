@@ -1,0 +1,41 @@
+{
+  "arguments": {},
+  "result": {
+    "content": [
+      {
+        "json": {
+          "name": "Contract Page",
+          "page": {
+            "about": "Synthetic Page for the unit suite.",
+            "description": "Longer synthetic description.",
+            "emails": ["hello@example.com"],
+            "hours": {
+              "mon_1_close": "12:00",
+              "mon_1_open": "09:00",
+              "mon_2_close": "18:00",
+              "mon_2_open": "14:00",
+              "tue_1_close": "18:00",
+              "tue_1_open": "09:00"
+            },
+            "id": "100000000000001",
+            "is_always_open": false,
+            "location": {
+              "city": "Example City",
+              "country": "Exampleland",
+              "street": "1 Example Street"
+            },
+            "name": "Example Page",
+            "phone": "+1 555 0100",
+            "single_line_address": "1 Example Street, Example City",
+            "temporary_status": "OPERATING_AS_USUAL",
+            "website": "https://example.com"
+          },
+          "pageId": "1000000001",
+          "profile": null
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_get_page"
+}

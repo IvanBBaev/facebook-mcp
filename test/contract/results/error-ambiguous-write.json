@@ -1,0 +1,20 @@
+{
+  "arguments": { "comment_id": "2000000002_3000000003", "message": "Thanks" },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "action": "Write outcome unknown (response body lost) — the request reached Facebook but the response was lost, so it may already have succeeded. Do NOT retry blindly; re-read the object you wrote (or the listing it belongs to) first, then decide.",
+          "category": "ambiguous",
+          "code": 0,
+          "error": "response body lost after HTTP 200",
+          "httpStatus": 200,
+          "retryable": false
+        },
+        "type": "text"
+      }
+    ],
+    "isError": true
+  },
+  "tool": "facebook_reply_to_comment"
+}

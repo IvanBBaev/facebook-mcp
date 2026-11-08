@@ -1,0 +1,57 @@
+{
+  "arguments": {
+    "metrics": ["page_media_view"],
+    "since": "2026-01-01",
+    "until": "2026-01-03"
+  },
+  "result": {
+    "content": [
+      {
+        "json": {
+          "contractVersion": 2,
+          "deprecatedMetrics": [],
+          "emptyMetrics": [],
+          "metrics": [
+            {
+              "aggregation": "sum",
+              "firstEnd": "2026-01-02T08:00:00+0000",
+              "firstValue": 10,
+              "kind": "flow",
+              "lastEnd": "2026-01-03T08:00:00+0000",
+              "lastValue": 12,
+              "metric": "page_media_view",
+              "period": "day",
+              "points": 2,
+              "value": 22
+            }
+          ],
+          "mode": "series",
+          "notes": [
+            "`date` is the calendar date of Graph's `end_time`, the EXCLUSIVE end boundary of the period. Days with no data are absent; nothing is zero-filled.",
+            "Page period=day buckets use Pacific Time (America/Los_Angeles). For example, an end boundary dated 2026-08-30 covers the 2026-08-29 Pacific day."
+          ],
+          "pageId": "1000000001",
+          "period": "day",
+          "profile": null,
+          "queriedMetrics": ["page_media_view"],
+          "rows": [
+            { "date": "2026-01-02", "metric": "page_media_view", "value": 10 },
+            { "date": "2026-01-03", "metric": "page_media_view", "value": 12 }
+          ],
+          "rowsAvailable": 2,
+          "truncated": false,
+          "unavailableMetrics": [],
+          "window": {
+            "boundary": "[since, until)",
+            "days": 2,
+            "since": "2026-01-01",
+            "timezone": "America/Los_Angeles",
+            "until": "2026-01-03"
+          }
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_page_insights"
+}

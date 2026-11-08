@@ -1,0 +1,71 @@
+{
+  "arguments": {
+    "metrics": ["page_media_view"],
+    "output": { "format": "csv" },
+    "since": "2026-01-01",
+    "until": "2026-01-03"
+  },
+  "files": [
+    {
+      "lines": [
+        "metric,date,end_time,breakdown,value",
+        "page_media_view,2026-01-02,2026-01-02T08:00:00+0000,,10",
+        ""
+      ],
+      "name": "page-1000000001-2026-01-01-2026-01-03-20260115T120000Z.csv"
+    }
+  ],
+  "result": {
+    "content": [
+      {
+        "json": {
+          "contractVersion": 2,
+          "deprecatedMetrics": [],
+          "emptyMetrics": [],
+          "export": {
+            "bytes": 95,
+            "format": "csv",
+            "path": "<export-dir>/page-1000000001-2026-01-01-2026-01-03-20260115T120000Z.csv",
+            "rows": 1,
+            "sha256": "[REDACTED]"
+          },
+          "metrics": [
+            {
+              "aggregation": "single",
+              "firstEnd": "2026-01-02T08:00:00+0000",
+              "firstValue": 10,
+              "kind": "flow",
+              "lastEnd": "2026-01-02T08:00:00+0000",
+              "lastValue": 10,
+              "metric": "page_media_view",
+              "period": "day",
+              "points": 1,
+              "value": 10
+            }
+          ],
+          "mode": "aggregate",
+          "notes": [
+            "`date` is the calendar date of Graph's `end_time`, the EXCLUSIVE end boundary of the period. Days with no data are absent; nothing is zero-filled.",
+            "Page period=day buckets use Pacific Time (America/Los_Angeles). For example, an end boundary dated 2026-08-30 covers the 2026-08-29 Pacific day."
+          ],
+          "pageId": "1000000001",
+          "period": "day",
+          "profile": null,
+          "queriedMetrics": ["page_media_view"],
+          "rowsAvailable": 1,
+          "truncated": false,
+          "unavailableMetrics": [],
+          "window": {
+            "boundary": "[since, until)",
+            "days": 2,
+            "since": "2026-01-01",
+            "timezone": "America/Los_Angeles",
+            "until": "2026-01-03"
+          }
+        },
+        "type": "text"
+      }
+    ]
+  },
+  "tool": "facebook_page_insights"
+}
